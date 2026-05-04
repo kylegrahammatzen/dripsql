@@ -1,6 +1,7 @@
 package vector
 
 import (
+	"math"
 	"slices"
 	"testing"
 )
@@ -64,6 +65,84 @@ func TestFloat64Take(t *testing.T) {
 	}
 }
 
+func TestFloat64MinMax(t *testing.T) {
+	v := NewFloat64([]float64{9.5, -2.25, 12.75, 4})
+
+	min, max, ok := v.MinMax()
+	if !ok {
+		t.Fatal("expected min/max for non-empty vector")
+	}
+	if min != -2.25 || max != 12.75 {
+		t.Fatalf("min/max = %f/%f, want -2.25/12.75", min, max)
+	}
+}
+
+func TestFloat64MinMaxRejectsNaN(t *testing.T) {
+	v := NewFloat64([]float64{1, math.NaN(), 2})
+
+	_, _, ok := v.MinMax()
+	if ok {
+		t.Fatal("did not expect min/max when values contain NaN")
+	}
+}
+
+func TestStringData(t *testing.T) {
+	data := []byte("alphabeta")
+	v := FromStringData(data, []uint64{
+		StringRange(0, 5),
+		StringRange(5, 0),
+		StringRange(5, 4),
+	})
+
+	if v.Len() != 3 {
+		t.Fatalf("len = %d, want 3", v.Len())
+	}
+	if got := v.Value(0); got != "alpha" {
+		t.Fatalf("value 0 = %q, want alpha", got)
+	}
+	if got := v.Value(1); got != "" {
+		t.Fatalf("value 1 = %q, want empty", got)
+	}
+	if got := v.Value(2); got != "beta" {
+		t.Fatalf("value 2 = %q, want beta", got)
+	}
+
+	taken, err := v.Take([]uint32{2, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	takenStrings, ok := taken.(String)
+	if !ok {
+		t.Fatalf("got %T, want String", taken)
+	}
+	if !slices.Equal(takenStrings.Values, []string{"beta", "alpha"}) {
+		t.Fatalf("taken = %v, want [beta alpha]", takenStrings.Values)
+	}
+}
+
+func TestVectorConstructorsCloneInput(t *testing.T) {
+	ints := []int64{1, 2}
+	intVec := NewInt64(ints)
+	ints[0] = 99
+	if intVec.Values[0] != 1 {
+		t.Fatalf("int vector aliased input: %v", intVec.Values)
+	}
+
+	floats := []float64{1.5, 2.5}
+	floatVec := NewFloat64(floats)
+	floats[0] = 99
+	if floatVec.Values[0] != 1.5 {
+		t.Fatalf("float vector aliased input: %v", floatVec.Values)
+	}
+
+	strings := []string{"a", "b"}
+	stringVec := NewString(strings)
+	strings[0] = "z"
+	if stringVec.Values[0] != "a" {
+		t.Fatalf("string vector aliased input: %v", stringVec.Values)
+	}
+}
+
 func TestNewBatchRejectsInvalidColumns(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -104,6 +183,22 @@ func TestNewBatchRejectsInvalidColumns(t *testing.T) {
 				t.Fatal("expected error")
 			}
 		})
+	}
+}
+
+func TestNewBatchClonesColumns(t *testing.T) {
+	columns := []Column{
+		{Name: "tenant_id", Vector: NewInt64([]int64{1})},
+	}
+
+	batch, err := NewBatch(columns...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	columns[0].Name = "changed"
+	if batch.Columns[0].Name != "tenant_id" {
+		t.Fatalf("batch column name = %q, want tenant_id", batch.Columns[0].Name)
 	}
 }
 
