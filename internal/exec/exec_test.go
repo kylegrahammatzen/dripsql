@@ -323,7 +323,26 @@ func BenchmarkFilterInt64EqualAtIntoWithSelection(b *testing.B) {
 	}
 }
 
-func mustBatch(t *testing.T, columns ...vector.Column) vector.Batch {
+func BenchmarkFilterInt64EqualChainsSelection(b *testing.B) {
+	batch := benchmarkBatch(b, 100_000, 100)
+	selected, err := FilterInt64Equal(batch, "tenant_id", 7)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		got, err := FilterInt64Equal(selected, "tenant_id", 7)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if Count(got) != 1_000 {
+			b.Fatalf("count = %d, want 1000", Count(got))
+		}
+	}
+}
+
+func mustBatch(t testing.TB, columns ...vector.Column) vector.Batch {
 	t.Helper()
 
 	batch, err := vector.NewBatch(columns...)
