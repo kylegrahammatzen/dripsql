@@ -34,6 +34,16 @@ type SegmentStats struct {
 	Columns []ColumnStats
 }
 
+// Column returns segment column stats by name.
+func (s SegmentStats) Column(name string) (ColumnStats, bool) {
+	for _, col := range s.Columns {
+		if col.Name == name {
+			return col, true
+		}
+	}
+	return ColumnStats{}, false
+}
+
 // WriteSegment writes a small immutable columnar segment.
 func WriteSegment(w io.Writer, batch vector.Batch) (SegmentStats, error) {
 	sw := newSegmentWriter(w)
@@ -114,6 +124,33 @@ func ReadSegmentStats(r io.Reader) (SegmentStats, error) {
 	}
 
 	return stats, nil
+}
+
+// ReadSegmentColumnStats reads metadata for one column without decoding vector payloads.
+func ReadSegmentColumnStats(r io.Reader, column string) (ColumnStats, bool, error) {
+	sr := newSegmentReader(r)
+	rowCount, columnCount, err := sr.ReadHeader()
+	if err != nil {
+		return ColumnStats{}, false, err
+	}
+	if _, err := checkedInt("segment row count", rowCount); err != nil {
+		return ColumnStats{}, false, err
+	}
+
+	for range columnCount {
+		stats, err := sr.readColumnHeader()
+		if err != nil {
+			return ColumnStats{}, false, err
+		}
+		if stats.Name == column {
+			return stats, true, nil
+		}
+		if err := sr.skip(stats.EncodedLen); err != nil {
+			return ColumnStats{}, false, err
+		}
+	}
+
+	return ColumnStats{}, false, nil
 }
 
 // CanSkipInt64Equal reports whether an equality predicate cannot match a column by min/max stats.
@@ -302,10 +339,34 @@ func (s *segmentReader) ReadColumnStats() (ColumnStats, error) {
 	if err != nil {
 		return ColumnStats{}, err
 	}
-	if _, err := io.CopyN(io.Discard, s.r, int64(stats.EncodedLen)); err != nil {
+	if err := s.skip(stats.EncodedLen); err != nil {
 		return ColumnStats{}, err
 	}
 	return stats, nil
+}
+
+func (s *segmentReader) skip(n int) error {
+	if n == 0 {
+		return nil
+	}
+	if seeker, ok := s.r.(io.Seeker); ok {
+		current, err := seeker.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return err
+		}
+		end, err := seeker.Seek(0, io.SeekEnd)
+		if err != nil {
+			return err
+		}
+		if current+int64(n) > end {
+			_, _ = seeker.Seek(current, io.SeekStart)
+			return io.ErrUnexpectedEOF
+		}
+		_, err = seeker.Seek(current+int64(n), io.SeekStart)
+		return err
+	}
+	_, err := io.CopyN(io.Discard, s.r, int64(n))
+	return err
 }
 
 func (s *segmentReader) readColumnHeader() (ColumnStats, error) {

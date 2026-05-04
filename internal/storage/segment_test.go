@@ -115,6 +115,44 @@ func TestReadSegmentStats(t *testing.T) {
 	if eventStats.HasMinMax {
 		t.Fatal("did not expect string min/max stats")
 	}
+
+	if _, ok := readStats.Column("missing"); ok {
+		t.Fatal("did not expect missing column stats")
+	}
+}
+
+func TestReadSegmentColumnStats(t *testing.T) {
+	batch := mustBatch(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7})},
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup"})},
+	)
+
+	var buf bytes.Buffer
+	if _, err := WriteSegment(&buf, batch); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, ok, err := ReadSegmentColumnStats(bytes.NewReader(buf.Bytes()), "tenant_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing tenant_id stats")
+	}
+	if stats.Kind != vector.KindInt64 || !stats.HasMinMax {
+		t.Fatalf("stats = %+v, want int64 min/max", stats)
+	}
+	if stats.MinInt64 != 7 || stats.MaxInt64 != 42 {
+		t.Fatalf("min/max = %d/%d, want 7/42", stats.MinInt64, stats.MaxInt64)
+	}
+
+	_, ok, err = ReadSegmentColumnStats(bytes.NewReader(buf.Bytes()), "missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("did not expect missing stats")
+	}
 }
 
 func TestCanSkipInt64Equal(t *testing.T) {
@@ -356,6 +394,35 @@ func BenchmarkReadSegmentStatsInt64(b *testing.B) {
 	for b.Loop() {
 		if _, err := ReadSegmentStats(bytes.NewReader(data)); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkReadSegmentColumnStatsInt64(b *testing.B) {
+	b.ReportAllocs()
+
+	values := make([]int64, 100_000)
+	for i := range values {
+		values[i] = int64(i % 1024)
+	}
+
+	batch := mustBatch(b,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64(values)},
+	)
+
+	var buf bytes.Buffer
+	if _, err := WriteSegment(&buf, batch); err != nil {
+		b.Fatal(err)
+	}
+
+	data := buf.Bytes()
+	b.ResetTimer()
+
+	for b.Loop() {
+		if _, ok, err := ReadSegmentColumnStats(bytes.NewReader(data), "tenant_id"); err != nil {
+			b.Fatal(err)
+		} else if !ok {
+			b.Fatal("missing tenant_id stats")
 		}
 	}
 }
