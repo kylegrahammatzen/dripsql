@@ -92,6 +92,37 @@ func ReadSegment(r io.Reader) (vector.Batch, SegmentStats, error) {
 	return batch, stats, nil
 }
 
+// ReadSegmentStats reads segment metadata and skips encoded column payloads without decoding vectors.
+func ReadSegmentStats(r io.Reader) (SegmentStats, error) {
+	sr := newSegmentReader(r)
+	rowCount, columnCount, err := sr.ReadHeader()
+	if err != nil {
+		return SegmentStats{}, err
+	}
+	rows, err := checkedInt("segment row count", rowCount)
+	if err != nil {
+		return SegmentStats{}, err
+	}
+
+	stats := SegmentStats{Rows: rows, Columns: make([]ColumnStats, 0, columnCount)}
+	for range columnCount {
+		colStats, err := sr.ReadColumnStats()
+		if err != nil {
+			return SegmentStats{}, err
+		}
+		stats.Columns = append(stats.Columns, colStats)
+	}
+
+	return stats, nil
+}
+
+// CanSkipInt64Equal reports whether an equality predicate cannot match a column by min/max stats.
+func CanSkipInt64Equal(stats ColumnStats, value int64) bool {
+	return stats.Kind == vector.KindInt64 &&
+		stats.HasMinMax &&
+		(value < stats.MinInt64 || value > stats.MaxInt64)
+}
+
 // EncodeColumn encodes one vector column into DripSQL's current segment payload format.
 func EncodeColumn(col vector.Column) ([]byte, ColumnStats, error) {
 	stats := ColumnStats{Name: col.Name, Kind: col.Vector.Kind(), Count: col.Vector.Len()}
@@ -248,50 +279,69 @@ func (s *segmentReader) ReadHeader() (rows uint64, columns uint32, err error) {
 }
 
 func (s *segmentReader) ReadColumn() (vector.Column, ColumnStats, error) {
-	name, err := s.string16()
-	if err != nil {
-		return vector.Column{}, ColumnStats{}, err
-	}
-	kindByte, err := s.u8()
-	if err != nil {
-		return vector.Column{}, ColumnStats{}, err
-	}
-	count, err := s.u64()
-	if err != nil {
-		return vector.Column{}, ColumnStats{}, err
-	}
-	encodedLen, err := s.u64()
-	if err != nil {
-		return vector.Column{}, ColumnStats{}, err
-	}
-	columnCount, err := checkedInt(fmt.Sprintf("column %q count", name), count)
-	if err != nil {
-		return vector.Column{}, ColumnStats{}, err
-	}
-	if encodedLen > maxEncodedColumnLen {
-		return vector.Column{}, ColumnStats{}, fmt.Errorf("encoded column %q is too large: %d", name, encodedLen)
-	}
-	columnEncodedLen, err := checkedInt(fmt.Sprintf("column %q encoded length", name), encodedLen)
+	stats, err := s.readColumnHeader()
 	if err != nil {
 		return vector.Column{}, ColumnStats{}, err
 	}
 
-	stats := ColumnStats{Name: name, Kind: vector.Kind(kindByte), Count: columnCount, EncodedLen: columnEncodedLen}
-	if err := s.readColumnStats(&stats); err != nil {
-		return vector.Column{}, ColumnStats{}, err
-	}
-
-	encoded := make([]byte, columnEncodedLen)
+	encoded := make([]byte, stats.EncodedLen)
 	if _, err := io.ReadFull(s.r, encoded); err != nil {
 		return vector.Column{}, ColumnStats{}, err
 	}
 
-	values, err := decodeValues(stats.Kind, encoded, columnCount)
+	values, err := decodeValues(stats.Kind, encoded, stats.Count)
 	if err != nil {
 		return vector.Column{}, ColumnStats{}, err
 	}
 
-	return vector.Column{Name: name, Vector: values}, stats, nil
+	return vector.Column{Name: stats.Name, Vector: values}, stats, nil
+}
+
+func (s *segmentReader) ReadColumnStats() (ColumnStats, error) {
+	stats, err := s.readColumnHeader()
+	if err != nil {
+		return ColumnStats{}, err
+	}
+	if _, err := io.CopyN(io.Discard, s.r, int64(stats.EncodedLen)); err != nil {
+		return ColumnStats{}, err
+	}
+	return stats, nil
+}
+
+func (s *segmentReader) readColumnHeader() (ColumnStats, error) {
+	name, err := s.string16()
+	if err != nil {
+		return ColumnStats{}, err
+	}
+	kindByte, err := s.u8()
+	if err != nil {
+		return ColumnStats{}, err
+	}
+	count, err := s.u64()
+	if err != nil {
+		return ColumnStats{}, err
+	}
+	encodedLen, err := s.u64()
+	if err != nil {
+		return ColumnStats{}, err
+	}
+	columnCount, err := checkedInt(fmt.Sprintf("column %q count", name), count)
+	if err != nil {
+		return ColumnStats{}, err
+	}
+	if encodedLen > maxEncodedColumnLen {
+		return ColumnStats{}, fmt.Errorf("encoded column %q is too large: %d", name, encodedLen)
+	}
+	columnEncodedLen, err := checkedInt(fmt.Sprintf("column %q encoded length", name), encodedLen)
+	if err != nil {
+		return ColumnStats{}, err
+	}
+
+	stats := ColumnStats{Name: name, Kind: vector.Kind(kindByte), Count: columnCount, EncodedLen: columnEncodedLen}
+	if err := s.readColumnStats(&stats); err != nil {
+		return ColumnStats{}, err
+	}
+	return stats, nil
 }
 
 func (s *segmentReader) readColumnStats(stats *ColumnStats) error {

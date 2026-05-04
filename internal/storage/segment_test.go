@@ -76,6 +76,79 @@ func TestSegmentPersistsInt64Stats(t *testing.T) {
 	}
 }
 
+func TestReadSegmentStats(t *testing.T) {
+	batch := mustBatch(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7})},
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup"})},
+	)
+
+	var buf bytes.Buffer
+	writeStats, err := WriteSegment(&buf, batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readStats, err := ReadSegmentStats(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if readStats.Rows != writeStats.Rows {
+		t.Fatalf("rows = %d, want %d", readStats.Rows, writeStats.Rows)
+	}
+	if len(readStats.Columns) != len(writeStats.Columns) {
+		t.Fatalf("column count = %d, want %d", len(readStats.Columns), len(writeStats.Columns))
+	}
+
+	tenantStats := columnStats(t, readStats, "tenant_id")
+	if tenantStats.Kind != vector.KindInt64 || !tenantStats.HasMinMax {
+		t.Fatalf("tenant stats = %+v, want int64 min/max", tenantStats)
+	}
+	if tenantStats.MinInt64 != 7 || tenantStats.MaxInt64 != 42 {
+		t.Fatalf("tenant min/max = %d/%d, want 7/42", tenantStats.MinInt64, tenantStats.MaxInt64)
+	}
+
+	eventStats := columnStats(t, readStats, "event_type")
+	if eventStats.Kind != vector.KindString {
+		t.Fatalf("event kind = %s, want string", eventStats.Kind)
+	}
+	if eventStats.HasMinMax {
+		t.Fatal("did not expect string min/max stats")
+	}
+}
+
+func TestCanSkipInt64Equal(t *testing.T) {
+	stats := ColumnStats{
+		Name:      "tenant_id",
+		Kind:      vector.KindInt64,
+		HasMinMax: true,
+		MinInt64:  7,
+		MaxInt64:  42,
+	}
+
+	for _, value := range []int64{6, 43} {
+		if !CanSkipInt64Equal(stats, value) {
+			t.Fatalf("expected value %d to skip", value)
+		}
+	}
+	for _, value := range []int64{7, 20, 42} {
+		if CanSkipInt64Equal(stats, value) {
+			t.Fatalf("did not expect value %d to skip", value)
+		}
+	}
+
+	stats.HasMinMax = false
+	if CanSkipInt64Equal(stats, 6) {
+		t.Fatal("did not expect skip without min/max")
+	}
+
+	stats.HasMinMax = true
+	stats.Kind = vector.KindString
+	if CanSkipInt64Equal(stats, 6) {
+		t.Fatal("did not expect skip for non-int64 stats")
+	}
+}
+
 func TestReadSegmentRejectsBadInput(t *testing.T) {
 	t.Run("bad magic", func(t *testing.T) {
 		_, _, err := ReadSegment(bytes.NewReader([]byte("not-a-segment")))
@@ -156,6 +229,11 @@ func TestReadSegmentRejectsTruncatedInput(t *testing.T) {
 		_, _, err := ReadSegment(bytes.NewReader(data[:i]))
 		if err == nil {
 			t.Fatalf("expected error for truncated segment length %d", i)
+		}
+
+		_, err = ReadSegmentStats(bytes.NewReader(data[:i]))
+		if err == nil {
+			t.Fatalf("expected stats error for truncated segment length %d", i)
 		}
 	}
 }
@@ -250,6 +328,33 @@ func BenchmarkReadSegmentInt64(b *testing.B) {
 
 	for b.Loop() {
 		if _, _, err := ReadSegment(bytes.NewReader(data)); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkReadSegmentStatsInt64(b *testing.B) {
+	b.ReportAllocs()
+
+	values := make([]int64, 100_000)
+	for i := range values {
+		values[i] = int64(i % 1024)
+	}
+
+	batch := mustBatch(b,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64(values)},
+	)
+
+	var buf bytes.Buffer
+	if _, err := WriteSegment(&buf, batch); err != nil {
+		b.Fatal(err)
+	}
+
+	data := buf.Bytes()
+	b.ResetTimer()
+
+	for b.Loop() {
+		if _, err := ReadSegmentStats(bytes.NewReader(data)); err != nil {
 			b.Fatal(err)
 		}
 	}

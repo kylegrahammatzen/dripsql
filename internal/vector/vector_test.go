@@ -147,4 +147,16 @@ func TestBatchColumn(t *testing.T) {
 	if col.Vector.Kind() != KindString {
 		t.Fatalf("kind = %s, want string", col.Vector.Kind())
 	}
+
+	index, ok := batch.ColumnIndex("event_type")
+	if !ok {
+		t.Fatal("missing event_type column index")
+	}
+	if index != 1 {
+		t.Fatalf("index = %d, want 1", index)
+	}
+
+	if _, ok := batch.ColumnIndex("missing"); ok {
+		t.Fatal("did not expect missing column index")
+	}
 }

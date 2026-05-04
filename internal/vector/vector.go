@@ -203,10 +203,19 @@ func NewBatch(columns ...Column) (Batch, error) {
 
 // Column returns a batch column by name.
 func (b Batch) Column(name string) (Column, bool) {
-	for _, col := range b.Columns {
+	index, ok := b.ColumnIndex(name)
+	if !ok {
+		return Column{}, false
+	}
+	return b.Columns[index], true
+}
+
+// ColumnIndex returns a batch column index by name.
+func (b Batch) ColumnIndex(name string) (int, bool) {
+	for index, col := range b.Columns {
 		if col.Name == name {
-			return col, true
+			return index, true
 		}
 	}
-	return Column{}, false
+	return 0, false
 }
