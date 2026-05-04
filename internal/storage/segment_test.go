@@ -3,7 +3,6 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"slices"
 	"testing"
 
@@ -154,12 +153,10 @@ func TestReadSegmentRejectsTruncatedInput(t *testing.T) {
 
 	data := buf.Bytes()
 	for i := range data {
-		t.Run(fmt.Sprintf("len=%d", i), func(t *testing.T) {
-			_, _, err := ReadSegment(bytes.NewReader(data[:i]))
-			if err == nil {
-				t.Fatal("expected error for truncated segment")
-			}
-		})
+		_, _, err := ReadSegment(bytes.NewReader(data[:i]))
+		if err == nil {
+			t.Fatalf("expected error for truncated segment length %d", i)
+		}
 	}
 }
 
