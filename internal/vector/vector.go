@@ -7,14 +7,20 @@ import "fmt"
 type Kind uint8
 
 const (
-	KindInt64 Kind = iota + 1
+	KindBool Kind = iota + 1
+	KindInt64
+	KindFloat64
 	KindString
 )
 
 func (k Kind) String() string {
 	switch k {
+	case KindBool:
+		return "bool"
 	case KindInt64:
 		return "int64"
+	case KindFloat64:
+		return "float64"
 	case KindString:
 		return "string"
 	default:
@@ -22,13 +28,14 @@ func (k Kind) String() string {
 	}
 }
 
-// Values is implemented by typed column vectors.
-type Values interface {
-	Len() int
+// Vector is implemented by typed column vectors.
+type Vector interface {
 	Kind() Kind
+	Len() int
+	Take(sel []uint32) (Vector, error)
 }
 
-// Int64 stores int64 values without per-row interface allocation.
+// Int64 stores int64 values without per-row allocation or boxing.
 type Int64 struct {
 	Values []int64
 }
@@ -38,17 +45,20 @@ func NewInt64(values []int64) Int64 {
 	return Int64{Values: append([]int64(nil), values...)}
 }
 
-func (v Int64) Len() int { return len(v.Values) }
+// FromInt64 returns an int64 vector that owns values without copying them.
+func FromInt64(values []int64) Int64 {
+	return Int64{Values: values}
+}
 
 func (v Int64) Kind() Kind { return KindInt64 }
 
-func (v Int64) At(i int) int64 { return v.Values[i] }
+func (v Int64) Len() int { return len(v.Values) }
 
-func (v Int64) Take(sel []uint32) (Int64, error) {
+func (v Int64) Take(sel []uint32) (Vector, error) {
 	out := make([]int64, len(sel))
 	for i, row := range sel {
 		if int(row) >= len(v.Values) {
-			return Int64{}, fmt.Errorf("selection row %d out of range for int64 vector length %d", row, len(v.Values))
+			return nil, fmt.Errorf("selection row %d out of range for int64 vector length %d", row, len(v.Values))
 		}
 		out[i] = v.Values[row]
 	}
@@ -73,7 +83,37 @@ func (v Int64) MinMax() (min, max int64, ok bool) {
 	return min, max, true
 }
 
-// String stores string values without boxing each row as an interface{}.
+// Float64 stores float64 values without per-row allocation or boxing.
+type Float64 struct {
+	Values []float64
+}
+
+// NewFloat64 returns a float64 vector with its own backing storage.
+func NewFloat64(values []float64) Float64 {
+	return Float64{Values: append([]float64(nil), values...)}
+}
+
+// FromFloat64 returns a float64 vector that owns values without copying them.
+func FromFloat64(values []float64) Float64 {
+	return Float64{Values: values}
+}
+
+func (v Float64) Kind() Kind { return KindFloat64 }
+
+func (v Float64) Len() int { return len(v.Values) }
+
+func (v Float64) Take(sel []uint32) (Vector, error) {
+	out := make([]float64, len(sel))
+	for i, row := range sel {
+		if int(row) >= len(v.Values) {
+			return nil, fmt.Errorf("selection row %d out of range for float64 vector length %d", row, len(v.Values))
+		}
+		out[i] = v.Values[row]
+	}
+	return Float64{Values: out}, nil
+}
+
+// String stores string values without boxing each row.
 type String struct {
 	Values []string
 }
@@ -83,17 +123,20 @@ func NewString(values []string) String {
 	return String{Values: append([]string(nil), values...)}
 }
 
-func (v String) Len() int { return len(v.Values) }
+// FromString returns a string vector that owns values without copying them.
+func FromString(values []string) String {
+	return String{Values: values}
+}
 
 func (v String) Kind() Kind { return KindString }
 
-func (v String) At(i int) string { return v.Values[i] }
+func (v String) Len() int { return len(v.Values) }
 
-func (v String) Take(sel []uint32) (String, error) {
+func (v String) Take(sel []uint32) (Vector, error) {
 	out := make([]string, len(sel))
 	for i, row := range sel {
 		if int(row) >= len(v.Values) {
-			return String{}, fmt.Errorf("selection row %d out of range for string vector length %d", row, len(v.Values))
+			return nil, fmt.Errorf("selection row %d out of range for string vector length %d", row, len(v.Values))
 		}
 		out[i] = v.Values[row]
 	}
@@ -103,7 +146,7 @@ func (v String) Take(sel []uint32) (String, error) {
 // Column names a typed vector inside a batch.
 type Column struct {
 	Name   string
-	Values Values
+	Vector Vector
 }
 
 // Batch is the unit passed between vectorized execution operators.
@@ -111,6 +154,19 @@ type Batch struct {
 	Columns []Column
 	Count   int
 	Sel     []uint32
+}
+
+// VisibleCount returns the number of rows currently visible through the batch selection.
+func (b Batch) VisibleCount() int {
+	if b.Sel != nil {
+		return len(b.Sel)
+	}
+	return b.Count
+}
+
+// HasSelection reports whether this batch is filtered through a selection vector.
+func (b Batch) HasSelection() bool {
+	return b.Sel != nil
 }
 
 // NewBatch validates column lengths and creates an execution batch.
@@ -125,20 +181,20 @@ func NewBatch(columns ...Column) (Batch, error) {
 		if col.Name == "" {
 			return Batch{}, fmt.Errorf("column name is required")
 		}
+		if col.Vector == nil {
+			return Batch{}, fmt.Errorf("column %q has no vector", col.Name)
+		}
 		if _, ok := seen[col.Name]; ok {
 			return Batch{}, fmt.Errorf("duplicate column %q", col.Name)
 		}
 		seen[col.Name] = struct{}{}
 
-		if col.Values == nil {
-			return Batch{}, fmt.Errorf("column %q has nil values", col.Name)
-		}
 		if count == -1 {
-			count = col.Values.Len()
+			count = col.Vector.Len()
 			continue
 		}
-		if col.Values.Len() != count {
-			return Batch{}, fmt.Errorf("column %q length %d does not match batch length %d", col.Name, col.Values.Len(), count)
+		if col.Vector.Len() != count {
+			return Batch{}, fmt.Errorf("column %q length %d does not match batch length %d", col.Name, col.Vector.Len(), count)
 		}
 	}
 

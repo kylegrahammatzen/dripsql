@@ -12,10 +12,13 @@ import (
 
 var segmentMagic = []byte("DRIPSEG1")
 
-const segmentVersion uint16 = 1
+const (
+	segmentVersion      uint16 = 1
+	maxEncodedColumnLen uint64 = 1 << 30
+)
 
-// ColumnMeta describes one encoded column in a segment.
-type ColumnMeta struct {
+// ColumnStats describes one encoded column in a segment.
+type ColumnStats struct {
 	Name       string
 	Kind       vector.Kind
 	Count      int
@@ -25,217 +28,409 @@ type ColumnMeta struct {
 	EncodedLen int
 }
 
-// SegmentMeta describes a written segment.
-type SegmentMeta struct {
+// SegmentStats describes a written segment.
+type SegmentStats struct {
 	Rows    int
-	Columns []ColumnMeta
+	Columns []ColumnStats
 }
 
 // WriteSegment writes a small immutable columnar segment.
-func WriteSegment(w io.Writer, batch vector.Batch) (SegmentMeta, error) {
-	if _, err := w.Write(segmentMagic); err != nil {
-		return SegmentMeta{}, err
-	}
-	if err := binary.Write(w, binary.LittleEndian, segmentVersion); err != nil {
-		return SegmentMeta{}, err
-	}
-	if err := binary.Write(w, binary.LittleEndian, uint64(batch.Count)); err != nil {
-		return SegmentMeta{}, err
-	}
-	if err := binary.Write(w, binary.LittleEndian, uint32(len(batch.Columns))); err != nil {
-		return SegmentMeta{}, err
+func WriteSegment(w io.Writer, batch vector.Batch) (SegmentStats, error) {
+	sw := newSegmentWriter(w)
+	if err := sw.WriteHeader(batch.Count, len(batch.Columns)); err != nil {
+		return SegmentStats{}, err
 	}
 
-	meta := SegmentMeta{Rows: batch.Count, Columns: make([]ColumnMeta, 0, len(batch.Columns))}
+	stats := SegmentStats{Rows: batch.Count, Columns: make([]ColumnStats, 0, len(batch.Columns))}
 	for _, col := range batch.Columns {
-		encoded, colMeta, err := encodeColumn(col)
+		encoded, colStats, err := EncodeColumn(col)
 		if err != nil {
-			return SegmentMeta{}, err
-		}
-		colMeta.EncodedLen = len(encoded)
-
-		if len(col.Name) > 1<<16-1 {
-			return SegmentMeta{}, fmt.Errorf("column name %q is too long", col.Name)
-		}
-		if err := binary.Write(w, binary.LittleEndian, uint16(len(col.Name))); err != nil {
-			return SegmentMeta{}, err
-		}
-		if _, err := io.WriteString(w, col.Name); err != nil {
-			return SegmentMeta{}, err
-		}
-		if err := binary.Write(w, binary.LittleEndian, uint8(col.Values.Kind())); err != nil {
-			return SegmentMeta{}, err
-		}
-		if err := binary.Write(w, binary.LittleEndian, uint64(col.Values.Len())); err != nil {
-			return SegmentMeta{}, err
-		}
-		if err := binary.Write(w, binary.LittleEndian, uint64(len(encoded))); err != nil {
-			return SegmentMeta{}, err
-		}
-		if _, err := w.Write(encoded); err != nil {
-			return SegmentMeta{}, err
+			return SegmentStats{}, err
 		}
 
-		meta.Columns = append(meta.Columns, colMeta)
+		if err := sw.WriteColumn(colStats, encoded); err != nil {
+			return SegmentStats{}, err
+		}
+
+		stats.Columns = append(stats.Columns, colStats)
 	}
 
-	return meta, nil
+	return stats, nil
 }
 
 // ReadSegment reads a segment written by WriteSegment.
-func ReadSegment(r io.Reader) (vector.Batch, SegmentMeta, error) {
-	magic := make([]byte, len(segmentMagic))
-	if _, err := io.ReadFull(r, magic); err != nil {
-		return vector.Batch{}, SegmentMeta{}, err
+func ReadSegment(r io.Reader) (vector.Batch, SegmentStats, error) {
+	sr := newSegmentReader(r)
+	rowCount, columnCount, err := sr.ReadHeader()
+	if err != nil {
+		return vector.Batch{}, SegmentStats{}, err
 	}
-	if !bytes.Equal(magic, segmentMagic) {
-		return vector.Batch{}, SegmentMeta{}, fmt.Errorf("invalid segment magic %q", string(magic))
-	}
-
-	var version uint16
-	if err := binary.Read(r, binary.LittleEndian, &version); err != nil {
-		return vector.Batch{}, SegmentMeta{}, err
-	}
-	if version != segmentVersion {
-		return vector.Batch{}, SegmentMeta{}, fmt.Errorf("unsupported segment version %d", version)
-	}
-
-	var rowCount uint64
-	if err := binary.Read(r, binary.LittleEndian, &rowCount); err != nil {
-		return vector.Batch{}, SegmentMeta{}, err
-	}
-	var columnCount uint32
-	if err := binary.Read(r, binary.LittleEndian, &columnCount); err != nil {
-		return vector.Batch{}, SegmentMeta{}, err
+	rows, err := checkedInt("segment row count", rowCount)
+	if err != nil {
+		return vector.Batch{}, SegmentStats{}, err
 	}
 
 	columns := make([]vector.Column, 0, columnCount)
-	meta := SegmentMeta{Rows: int(rowCount), Columns: make([]ColumnMeta, 0, columnCount)}
+	stats := SegmentStats{Rows: rows, Columns: make([]ColumnStats, 0, columnCount)}
 	for range columnCount {
-		col, colMeta, err := readColumn(r)
+		col, colStats, err := sr.ReadColumn()
 		if err != nil {
-			return vector.Batch{}, SegmentMeta{}, err
+			return vector.Batch{}, SegmentStats{}, err
 		}
 		columns = append(columns, col)
-		meta.Columns = append(meta.Columns, colMeta)
+		stats.Columns = append(stats.Columns, colStats)
 	}
 
 	batch, err := vector.NewBatch(columns...)
 	if err != nil {
-		return vector.Batch{}, SegmentMeta{}, err
+		return vector.Batch{}, SegmentStats{}, err
 	}
-	if batch.Count != int(rowCount) {
-		return vector.Batch{}, SegmentMeta{}, fmt.Errorf("segment row count %d does not match decoded batch count %d", rowCount, batch.Count)
+	if batch.Count != rows {
+		return vector.Batch{}, SegmentStats{}, fmt.Errorf("segment row count %d does not match decoded batch count %d", rowCount, batch.Count)
 	}
 
-	return batch, meta, nil
+	return batch, stats, nil
 }
 
-func encodeColumn(col vector.Column) ([]byte, ColumnMeta, error) {
-	meta := ColumnMeta{Name: col.Name, Kind: col.Values.Kind(), Count: col.Values.Len()}
-	var buf bytes.Buffer
+// EncodeColumn encodes one vector column into DripSQL's current segment payload format.
+func EncodeColumn(col vector.Column) ([]byte, ColumnStats, error) {
+	stats := ColumnStats{Name: col.Name, Kind: col.Vector.Kind(), Count: col.Vector.Len()}
 
-	switch values := col.Values.(type) {
+	switch values := col.Vector.(type) {
 	case vector.Int64:
 		min, max, ok := values.MinMax()
-		meta.HasMinMax = ok
-		meta.MinInt64 = min
-		meta.MaxInt64 = max
-		for _, value := range values.Values {
-			if err := binary.Write(&buf, binary.LittleEndian, value); err != nil {
-				return nil, ColumnMeta{}, err
-			}
-		}
+		stats.HasMinMax = ok
+		stats.MinInt64 = min
+		stats.MaxInt64 = max
+		encoded := encodeInt64(values.Values)
+		stats.EncodedLen = len(encoded)
+		return encoded, stats, nil
 	case vector.String:
-		for _, value := range values.Values {
-			if len(value) > 1<<32-1 {
-				return nil, ColumnMeta{}, fmt.Errorf("string value in column %q is too long", col.Name)
-			}
-			if err := binary.Write(&buf, binary.LittleEndian, uint32(len(value))); err != nil {
-				return nil, ColumnMeta{}, err
-			}
-			if _, err := io.WriteString(&buf, value); err != nil {
-				return nil, ColumnMeta{}, err
-			}
+		encoded, err := encodeString(values.Values)
+		if err != nil {
+			return nil, ColumnStats{}, fmt.Errorf("encode column %q: %w", col.Name, err)
 		}
+		stats.EncodedLen = len(encoded)
+		return encoded, stats, nil
 	default:
-		return nil, ColumnMeta{}, fmt.Errorf("unsupported vector type %T", col.Values)
+		return nil, ColumnStats{}, fmt.Errorf("segment encoding is not implemented for %s vectors", col.Vector.Kind())
 	}
-
-	return buf.Bytes(), meta, nil
 }
 
-func readColumn(r io.Reader) (vector.Column, ColumnMeta, error) {
-	var nameLen uint16
-	if err := binary.Read(r, binary.LittleEndian, &nameLen); err != nil {
-		return vector.Column{}, ColumnMeta{}, err
-	}
-	nameBytes := make([]byte, nameLen)
-	if _, err := io.ReadFull(r, nameBytes); err != nil {
-		return vector.Column{}, ColumnMeta{}, err
-	}
-	name := string(nameBytes)
+type segmentWriter struct {
+	w io.Writer
+}
 
-	var kindByte uint8
-	if err := binary.Read(r, binary.LittleEndian, &kindByte); err != nil {
-		return vector.Column{}, ColumnMeta{}, err
-	}
-	kind := vector.Kind(kindByte)
+func newSegmentWriter(w io.Writer) *segmentWriter {
+	return &segmentWriter{w: w}
+}
 
-	var count uint64
-	if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
-		return vector.Column{}, ColumnMeta{}, err
+func (s *segmentWriter) WriteHeader(rows int, columns int) error {
+	if _, err := s.w.Write(segmentMagic); err != nil {
+		return err
 	}
-	var encodedLen uint64
-	if err := binary.Read(r, binary.LittleEndian, &encodedLen); err != nil {
-		return vector.Column{}, ColumnMeta{}, err
+	if err := s.u16(segmentVersion); err != nil {
+		return err
 	}
-	encoded := make([]byte, encodedLen)
-	if _, err := io.ReadFull(r, encoded); err != nil {
-		return vector.Column{}, ColumnMeta{}, err
+	if err := s.u64(uint64(rows)); err != nil {
+		return err
+	}
+	return s.u32(uint32(columns))
+}
+
+func (s *segmentWriter) WriteColumn(stats ColumnStats, encoded []byte) error {
+	if err := s.string16(stats.Name); err != nil {
+		return err
+	}
+	if err := s.u8(uint8(stats.Kind)); err != nil {
+		return err
+	}
+	if err := s.u64(uint64(stats.Count)); err != nil {
+		return err
+	}
+	if err := s.u64(uint64(len(encoded))); err != nil {
+		return err
+	}
+	if err := s.writeColumnStats(stats); err != nil {
+		return err
+	}
+	_, err := s.w.Write(encoded)
+	return err
+}
+
+func (s *segmentWriter) writeColumnStats(stats ColumnStats) error {
+	var minMax byte
+	if stats.HasMinMax {
+		minMax = 1
+	}
+	if err := s.u8(minMax); err != nil {
+		return err
+	}
+	if err := s.u64(uint64(stats.MinInt64)); err != nil {
+		return err
+	}
+	return s.u64(uint64(stats.MaxInt64))
+}
+
+func (s *segmentWriter) string16(value string) error {
+	if len(value) > 1<<16-1 {
+		return fmt.Errorf("string %q is too long", value)
+	}
+	if err := s.u16(uint16(len(value))); err != nil {
+		return err
+	}
+	_, err := io.WriteString(s.w, value)
+	return err
+}
+
+func (s *segmentWriter) u8(value uint8) error {
+	var buf [1]byte
+	buf[0] = value
+	_, err := s.w.Write(buf[:])
+	return err
+}
+
+func (s *segmentWriter) u16(value uint16) error {
+	var buf [2]byte
+	binary.LittleEndian.PutUint16(buf[:], value)
+	_, err := s.w.Write(buf[:])
+	return err
+}
+
+func (s *segmentWriter) u32(value uint32) error {
+	var buf [4]byte
+	binary.LittleEndian.PutUint32(buf[:], value)
+	_, err := s.w.Write(buf[:])
+	return err
+}
+
+func (s *segmentWriter) u64(value uint64) error {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], value)
+	_, err := s.w.Write(buf[:])
+	return err
+}
+
+type segmentReader struct {
+	r io.Reader
+}
+
+func newSegmentReader(r io.Reader) *segmentReader {
+	return &segmentReader{r: r}
+}
+
+func (s *segmentReader) ReadHeader() (rows uint64, columns uint32, err error) {
+	magic := make([]byte, len(segmentMagic))
+	if _, err := io.ReadFull(s.r, magic); err != nil {
+		return 0, 0, err
+	}
+	if !bytes.Equal(magic, segmentMagic) {
+		return 0, 0, fmt.Errorf("invalid segment magic %q", string(magic))
 	}
 
-	meta := ColumnMeta{Name: name, Kind: kind, Count: int(count), EncodedLen: int(encodedLen)}
-	values, err := decodeValues(kind, encoded, int(count), &meta)
+	version, err := s.u16()
 	if err != nil {
-		return vector.Column{}, ColumnMeta{}, err
+		return 0, 0, err
+	}
+	if version != segmentVersion {
+		return 0, 0, fmt.Errorf("unsupported segment version %d", version)
 	}
 
-	return vector.Column{Name: name, Values: values}, meta, nil
+	rows, err = s.u64()
+	if err != nil {
+		return 0, 0, err
+	}
+	columns, err = s.u32()
+	if err != nil {
+		return 0, 0, err
+	}
+	return rows, columns, nil
 }
 
-func decodeValues(kind vector.Kind, encoded []byte, count int, meta *ColumnMeta) (vector.Values, error) {
-	reader := bytes.NewReader(encoded)
+func (s *segmentReader) ReadColumn() (vector.Column, ColumnStats, error) {
+	name, err := s.string16()
+	if err != nil {
+		return vector.Column{}, ColumnStats{}, err
+	}
+	kindByte, err := s.u8()
+	if err != nil {
+		return vector.Column{}, ColumnStats{}, err
+	}
+	count, err := s.u64()
+	if err != nil {
+		return vector.Column{}, ColumnStats{}, err
+	}
+	encodedLen, err := s.u64()
+	if err != nil {
+		return vector.Column{}, ColumnStats{}, err
+	}
+	columnCount, err := checkedInt(fmt.Sprintf("column %q count", name), count)
+	if err != nil {
+		return vector.Column{}, ColumnStats{}, err
+	}
+	if encodedLen > maxEncodedColumnLen {
+		return vector.Column{}, ColumnStats{}, fmt.Errorf("encoded column %q is too large: %d", name, encodedLen)
+	}
+	columnEncodedLen, err := checkedInt(fmt.Sprintf("column %q encoded length", name), encodedLen)
+	if err != nil {
+		return vector.Column{}, ColumnStats{}, err
+	}
 
+	stats := ColumnStats{Name: name, Kind: vector.Kind(kindByte), Count: columnCount, EncodedLen: columnEncodedLen}
+	if err := s.readColumnStats(&stats); err != nil {
+		return vector.Column{}, ColumnStats{}, err
+	}
+
+	encoded := make([]byte, columnEncodedLen)
+	if _, err := io.ReadFull(s.r, encoded); err != nil {
+		return vector.Column{}, ColumnStats{}, err
+	}
+
+	values, err := decodeValues(stats.Kind, encoded, columnCount)
+	if err != nil {
+		return vector.Column{}, ColumnStats{}, err
+	}
+
+	return vector.Column{Name: name, Vector: values}, stats, nil
+}
+
+func (s *segmentReader) readColumnStats(stats *ColumnStats) error {
+	minMax, err := s.u8()
+	if err != nil {
+		return err
+	}
+	stats.HasMinMax = minMax != 0
+
+	min, err := s.u64()
+	if err != nil {
+		return err
+	}
+	max, err := s.u64()
+	if err != nil {
+		return err
+	}
+	stats.MinInt64 = int64(min)
+	stats.MaxInt64 = int64(max)
+	return nil
+}
+
+func (s *segmentReader) string16() (string, error) {
+	length, err := s.u16()
+	if err != nil {
+		return "", err
+	}
+	buf := make([]byte, length)
+	if _, err := io.ReadFull(s.r, buf); err != nil {
+		return "", err
+	}
+	return string(buf), nil
+}
+
+func (s *segmentReader) u8() (uint8, error) {
+	var buf [1]byte
+	_, err := io.ReadFull(s.r, buf[:])
+	return buf[0], err
+}
+
+func (s *segmentReader) u16() (uint16, error) {
+	var buf [2]byte
+	_, err := io.ReadFull(s.r, buf[:])
+	return binary.LittleEndian.Uint16(buf[:]), err
+}
+
+func (s *segmentReader) u32() (uint32, error) {
+	var buf [4]byte
+	_, err := io.ReadFull(s.r, buf[:])
+	return binary.LittleEndian.Uint32(buf[:]), err
+}
+
+func (s *segmentReader) u64() (uint64, error) {
+	var buf [8]byte
+	_, err := io.ReadFull(s.r, buf[:])
+	return binary.LittleEndian.Uint64(buf[:]), err
+}
+
+func encodeInt64(values []int64) []byte {
+	out := make([]byte, 0, len(values)*8)
+	for _, value := range values {
+		out = binary.LittleEndian.AppendUint64(out, uint64(value))
+	}
+	return out
+}
+
+func encodeString(values []string) ([]byte, error) {
+	size := 0
+	for _, value := range values {
+		if len(value) > 1<<32-1 {
+			return nil, fmt.Errorf("string value is too long")
+		}
+		size += 4 + len(value)
+	}
+
+	out := make([]byte, 0, size)
+	for _, value := range values {
+		out = binary.LittleEndian.AppendUint32(out, uint32(len(value)))
+		out = append(out, value...)
+	}
+	return out, nil
+}
+
+func decodeValues(kind vector.Kind, encoded []byte, count int) (vector.Vector, error) {
 	switch kind {
 	case vector.KindInt64:
-		values := make([]int64, count)
-		for i := range values {
-			if err := binary.Read(reader, binary.LittleEndian, &values[i]); err != nil {
-				return nil, err
-			}
+		values, err := decodeInt64(encoded, count)
+		if err != nil {
+			return nil, err
 		}
-		v := vector.Int64{Values: values}
-		min, max, ok := v.MinMax()
-		meta.HasMinMax = ok
-		meta.MinInt64 = min
-		meta.MaxInt64 = max
-		return v, nil
+		return vector.FromInt64(values), nil
 	case vector.KindString:
-		values := make([]string, count)
-		for i := range values {
-			var length uint32
-			if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
-				return nil, err
-			}
-			data := make([]byte, length)
-			if _, err := io.ReadFull(reader, data); err != nil {
-				return nil, err
-			}
-			values[i] = string(data)
+		values, err := decodeString(encoded, count)
+		if err != nil {
+			return nil, err
 		}
-		return vector.String{Values: values}, nil
+		return vector.FromString(values), nil
 	default:
 		return nil, fmt.Errorf("unsupported vector kind %s", kind)
 	}
+}
+
+func decodeInt64(encoded []byte, count int) ([]int64, error) {
+	if len(encoded) != count*8 {
+		return nil, fmt.Errorf("invalid int64 encoded length %d for count %d", len(encoded), count)
+	}
+
+	values := make([]int64, count)
+	for i := range values {
+		values[i] = int64(binary.LittleEndian.Uint64(encoded[i*8:]))
+	}
+	return values, nil
+}
+
+func decodeString(encoded []byte, count int) ([]string, error) {
+	values := make([]string, count)
+	offset := 0
+	for i := range values {
+		if len(encoded)-offset < 4 {
+			return nil, fmt.Errorf("short string length at row %d", i)
+		}
+		length := int(binary.LittleEndian.Uint32(encoded[offset:]))
+		offset += 4
+		if len(encoded)-offset < length {
+			return nil, fmt.Errorf("short string data at row %d", i)
+		}
+		values[i] = string(encoded[offset : offset+length])
+		offset += length
+	}
+	if offset != len(encoded) {
+		return nil, fmt.Errorf("trailing string bytes: %d", len(encoded)-offset)
+	}
+	return values, nil
+}
+
+func checkedInt(name string, value uint64) (int, error) {
+	maxInt := uint64(^uint(0) >> 1)
+	if value > maxInt {
+		return 0, fmt.Errorf("%s overflows int: %d", name, value)
+	}
+	return int(value), nil
 }
