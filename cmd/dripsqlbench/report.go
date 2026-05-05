@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -84,41 +85,36 @@ func printColumns(stats []table.ColumnStorageStats) {
 	fmt.Println()
 	fmt.Println("Columns")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "Column\tType\tCodec\tPlain\tEncoded\tRatio\tDict\tMin/max")
+	fmt.Fprintln(w, "Column\tType\tCodec\tPlain\tEncoded\tRatio\tDict\tMin/max\tFeatures")
 	for _, col := range stats {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			col.Name, col.Kind, formatCodec(col.Codec), formatMiB(col.PlainBytes), formatMiB(col.EncodedBytes),
-			formatRatio(col.CompressionRatio()), formatDictionaryValues(col), formatMinMax(col))
+			formatRatio(col.CompressionRatio()), formatDictionaryValues(col), formatMinMax(col), formatColumnFeatures(col))
 	}
 	w.Flush()
 }
 
-func printQueries(results []benchResult, rows int64) {
+func printQueries(results []benchResult) {
 	const mib = 1024 * 1024
 	fmt.Println()
 	fmt.Println("Queries")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "Query\tResult\tSamples\tFirst\tBest\tAvg\tRows/sec\tMiB/sec\tScan\tSegments\tRows skipped")
+	fmt.Fprintln(w, "Query\tResult\tSamples\tFirst\tBest\tAvg\tMiB/sec\tScan\tSegments\tRows skipped")
 	for _, result := range results {
-		rowsScanned := result.Stats.RowsScanned
-		if rowsScanned == 0 && result.Stats.RowsSkipped == 0 {
-			rowsScanned = rows
-		}
-		rowsPerSec, mibPerSec := queryRates(result, rowsScanned)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.2f\t%.2f MiB\t%d/%d\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%.2f\t%.2f MiB\t%d/%d\t%s\n",
 			result.Name, commas(result.Count), commas(result.Samples), formatDuration(result.First), formatDuration(result.Best),
-			formatDuration(result.Avg), commas(int64(rowsPerSec)), mibPerSec, float64(result.Stats.BytesScanned)/mib,
+			formatDuration(result.Avg), queryMiBPerSec(result), float64(result.Stats.BytesScanned)/mib,
 			result.Stats.SegmentsScanned, result.Stats.SegmentsTotal, commas(result.Stats.RowsSkipped))
 	}
 	w.Flush()
 }
 
-func queryRates(result benchResult, rowsScanned int64) (float64, float64) {
+func queryMiBPerSec(result benchResult) float64 {
 	if result.Avg <= 0 {
-		return 0, 0
+		return 0
 	}
 	const mib = 1024 * 1024
-	return float64(rowsScanned) / result.Avg.Seconds(), float64(result.Stats.BytesScanned) / mib / result.Avg.Seconds()
+	return float64(result.Stats.BytesScanned) / mib / result.Avg.Seconds()
 }
 
 func printGroups(results []groupResult) {
@@ -196,6 +192,23 @@ func formatMinMax(stats table.ColumnStorageStats) string {
 		return "-"
 	}
 	return fmt.Sprintf("%d..%d", stats.MinInt64, stats.MaxInt64)
+}
+
+func formatColumnFeatures(stats table.ColumnStorageStats) string {
+	features := make([]string, 0, 3)
+	if stats.MinMaxSegments > 0 {
+		features = append(features, "range skip")
+	}
+	if stats.DictionarySegments > 0 {
+		features = append(features, "fast equality")
+		if stats.GroupPath == "dict-counts" {
+			features = append(features, "fast group")
+		}
+	}
+	if len(features) == 0 {
+		return "-"
+	}
+	return strings.Join(features, ", ")
 }
 
 func commas[T ~int | ~int64](n T) string {

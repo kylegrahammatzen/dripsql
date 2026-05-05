@@ -48,7 +48,7 @@ func main() {
 	}
 	printStorage(opts.rows, tbl.Bytes(), codecStats)
 	printColumns(codecStats)
-	printQueries(results, opts.rows)
+	printQueries(results)
 	printGroups(groups)
 }
 
