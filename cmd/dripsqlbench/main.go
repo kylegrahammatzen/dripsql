@@ -31,6 +31,7 @@ func main() {
 		tenant       int64
 		event        string
 		runs         int
+		workers      int
 		openExisting bool
 	)
 
@@ -41,6 +42,7 @@ func main() {
 	flag.Int64Var(&tenant, "tenant", 7, "tenant_id value to count")
 	flag.StringVar(&event, "event", "checkout", "event_type value to count")
 	flag.IntVar(&runs, "runs", 5, "query repetitions after load/open; first run is reported separately")
+	flag.IntVar(&workers, "workers", 1, "parallel workers for count queries")
 	flag.BoolVar(&openExisting, "open", false, "open an existing table directory and skip loading")
 	flag.Parse()
 
@@ -51,6 +53,8 @@ func main() {
 		log.Fatalf("segment-rows must be positive: %d", segmentRows)
 	case runs <= 0:
 		log.Fatalf("runs must be positive: %d", runs)
+	case workers <= 0:
+		log.Fatalf("workers must be positive: %d", workers)
 	case openExisting && dir == "":
 		log.Fatal("-open requires -dir")
 	}
@@ -143,10 +147,16 @@ func main() {
 	}
 
 	bench(fmt.Sprintf("tenant_id = %d", tenant), func() (int, error) {
+		if workers > 1 {
+			return scanner.CountInt64EqualParallel("tenant_id", tenant, workers)
+		}
 		return scanner.CountInt64Equal("tenant_id", tenant)
 	})
 
 	bench(fmt.Sprintf("event_type = %q", event), func() (int, error) {
+		if workers > 1 {
+			return scanner.CountStringEqualParallel("event_type", event, workers)
+		}
 		return scanner.CountStringEqual("event_type", event)
 	})
 
@@ -168,7 +178,7 @@ func main() {
 		mode = "open"
 	}
 
-	printSummary(dir, mode, rows, segmentRows, tbl.Bytes(), tbl.Segments(), loadElapsed, openExisting)
+	printSummary(dir, mode, rows, segmentRows, workers, tbl.Bytes(), tbl.Segments(), loadElapsed, openExisting)
 	printQueries(results, rows)
 	printGroups(groups)
 	printScanStats(results)
@@ -224,6 +234,7 @@ func printSummary(
 	mode string,
 	rows int64,
 	segmentRows int,
+	workers int,
 	tableBytes int64,
 	segments int,
 	loadElapsed time.Duration,
@@ -245,6 +256,7 @@ func printSummary(
 	fmt.Fprintf(w, "Rows:\t%s\n", commas(rows))
 	fmt.Fprintf(w, "Segments:\t%s\n", commas(segments))
 	fmt.Fprintf(w, "Segment rows:\t%s\n", commas(segmentRows))
+	fmt.Fprintf(w, "Count workers:\t%s\n", commas(workers))
 	fmt.Fprintf(w, "Table size:\t%.2f MiB\n", float64(tableBytes)/mib)
 	fmt.Fprintf(w, "Bytes / row:\t%.2f\n", bytesPerRow)
 
