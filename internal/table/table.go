@@ -53,6 +53,12 @@ type Table struct {
 	manifest manifest
 }
 
+// Scanner reuses scratch buffers across table scans. It is not safe for concurrent use.
+type Scanner struct {
+	table *Table
+	buf   []byte
+}
+
 // Create initializes a new table directory with a manifest and segment directory.
 func Create(dir string, schema []Column) (*Table, error) {
 	manifestSchema, err := encodeSchema(schema)
@@ -121,6 +127,11 @@ func (t *Table) Segments() int {
 	return len(t.manifest.Segments)
 }
 
+// NewScanner creates a reusable scanner for repeated table scans.
+func (t *Table) NewScanner() *Scanner {
+	return &Scanner{table: t}
+}
+
 // Append writes batch as one immutable table segment and records it in the manifest.
 func (t *Table) Append(batch vector.Batch) error {
 	if err := t.validateBatch(batch); err != nil {
@@ -173,12 +184,20 @@ func (t *Table) Append(batch vector.Batch) error {
 
 // CountInt64Equal counts rows across all table segments where column equals value.
 func (t *Table) CountInt64Equal(column string, value int64) (int, error) {
+	return t.NewScanner().CountInt64Equal(column, value)
+}
+
+// CountInt64Equal counts rows across all table segments where column equals value.
+func (s *Scanner) CountInt64Equal(column string, value int64) (int, error) {
+	if err := s.validate(); err != nil {
+		return 0, err
+	}
+	t := s.table
 	if err := t.requireColumnKind(column, vector.KindInt64); err != nil {
 		return 0, err
 	}
 
 	count := 0
-	var buf []byte
 	for _, segment := range t.manifest.Segments {
 		stats, ok := segment.Stats.Column(column)
 		if !ok {
@@ -191,11 +210,10 @@ func (t *Table) CountInt64Equal(column string, value int64) (int, error) {
 			continue
 		}
 
-		data, err := t.readSegmentInto(segment, buf)
+		data, err := s.readSegment(segment)
 		if err != nil {
 			return 0, err
 		}
-		buf = data
 		segmentCount, ok, err := storage.CountSegmentInt64EqualBytes(data, column, value)
 		if err != nil {
 			return 0, err
@@ -213,12 +231,20 @@ func (t *Table) CountInt64Equal(column string, value int64) (int, error) {
 
 // CountStringEqual counts rows across all table segments where column equals value.
 func (t *Table) CountStringEqual(column string, value string) (int, error) {
+	return t.NewScanner().CountStringEqual(column, value)
+}
+
+// CountStringEqual counts rows across all table segments where column equals value.
+func (s *Scanner) CountStringEqual(column string, value string) (int, error) {
+	if err := s.validate(); err != nil {
+		return 0, err
+	}
+	t := s.table
 	if err := t.requireColumnKind(column, vector.KindString); err != nil {
 		return 0, err
 	}
 
 	count := 0
-	var buf []byte
 	for _, segment := range t.manifest.Segments {
 		stats, ok := segment.Stats.Column(column)
 		if !ok {
@@ -228,11 +254,10 @@ func (t *Table) CountStringEqual(column string, value string) (int, error) {
 			return 0, fmt.Errorf("segment %d column %q is %s, want string", segment.ID, column, stats.Kind)
 		}
 
-		data, err := t.readSegmentInto(segment, buf)
+		data, err := s.readSegment(segment)
 		if err != nil {
 			return 0, err
 		}
-		buf = data
 		segmentCount, ok, err := storage.CountSegmentStringEqualBytes(data, column, value)
 		if err != nil {
 			return 0, err
@@ -246,6 +271,73 @@ func (t *Table) CountStringEqual(column string, value string) (int, error) {
 		}
 	}
 	return count, nil
+}
+
+// GroupStringCounts returns per-value row counts for one string column.
+func (t *Table) GroupStringCounts(column string) (map[string]int, error) {
+	return t.NewScanner().GroupStringCounts(column)
+}
+
+// GroupStringCounts returns per-value row counts for one string column.
+func (s *Scanner) GroupStringCounts(column string) (map[string]int, error) {
+	return s.GroupStringCountsInto(column, nil)
+}
+
+// GroupStringCountsInto adds per-value row counts for one string column into counts.
+func (s *Scanner) GroupStringCountsInto(column string, counts map[string]int) (map[string]int, error) {
+	if err := s.validate(); err != nil {
+		return nil, err
+	}
+	if counts == nil {
+		counts = make(map[string]int)
+	}
+	t := s.table
+	if err := t.requireColumnKind(column, vector.KindString); err != nil {
+		return nil, err
+	}
+	for _, segment := range t.manifest.Segments {
+		stats, ok := segment.Stats.Column(column)
+		if !ok {
+			return nil, fmt.Errorf("segment %d missing column %q", segment.ID, column)
+		}
+		if stats.Kind != vector.KindString {
+			return nil, fmt.Errorf("segment %d column %q is %s, want string", segment.ID, column, stats.Kind)
+		}
+
+		data, err := s.readSegment(segment)
+		if err != nil {
+			return nil, err
+		}
+		ok, err = storage.GroupSegmentStringCountsBytes(data, column, counts)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("segment %d missing column %q", segment.ID, column)
+		}
+	}
+	return counts, nil
+}
+
+// Reset releases scanner scratch buffers.
+func (s *Scanner) Reset() {
+	s.buf = nil
+}
+
+func (s *Scanner) validate() error {
+	if s == nil || s.table == nil {
+		return fmt.Errorf("table scanner is not initialized")
+	}
+	return nil
+}
+
+func (s *Scanner) readSegment(segment Segment) ([]byte, error) {
+	data, err := s.table.readSegmentInto(segment, s.buf)
+	if err != nil {
+		return nil, err
+	}
+	s.buf = data
+	return data, nil
 }
 
 func (t *Table) validateBatch(batch vector.Batch) error {

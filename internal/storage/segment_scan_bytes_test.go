@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"maps"
 	"slices"
 	"testing"
 
@@ -143,6 +144,50 @@ func TestCountSegmentStringEqualBytesPlain(t *testing.T) {
 	}
 }
 
+func TestGroupSegmentStringCountsBytes(t *testing.T) {
+	data := writeSegmentBytes(t,
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "cancel", "checkout"})},
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 11, 42})},
+	)
+	counts := map[string]int{"existing": 3}
+
+	ok, err := GroupSegmentStringCountsBytes(data, "event_type", counts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing event_type column")
+	}
+	want := map[string]int{"existing": 3, "signup": 2, "checkout": 2, "cancel": 1}
+	if !maps.Equal(counts, want) {
+		t.Fatalf("counts = %v, want %v", counts, want)
+	}
+
+	_, err = GroupSegmentStringCountsBytes(data, "tenant_id", counts)
+	if err == nil {
+		t.Fatal("expected wrong type error")
+	}
+}
+
+func TestGroupSegmentStringCountsBytesPlain(t *testing.T) {
+	data := writeSegmentBytes(t,
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"alpha", "bravo", "charlie", "delta"})},
+	)
+	counts := make(map[string]int)
+
+	ok, err := GroupSegmentStringCountsBytes(data, "event_type", counts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing event_type column")
+	}
+	want := map[string]int{"alpha": 1, "bravo": 1, "charlie": 1, "delta": 1}
+	if !maps.Equal(counts, want) {
+		t.Fatalf("counts = %v, want %v", counts, want)
+	}
+}
+
 func BenchmarkSelectSegmentInt64EqualBytesWithString(b *testing.B) {
 	b.ReportAllocs()
 
@@ -208,6 +253,35 @@ func BenchmarkCountSegmentStringEqualBytes(b *testing.B) {
 		}
 		if count != 25_000 {
 			b.Fatalf("count = %d, want 25000", count)
+		}
+	}
+}
+
+func BenchmarkGroupSegmentStringCountsBytes(b *testing.B) {
+	b.ReportAllocs()
+
+	choices := []string{"signup", "checkout", "page_view", "cancel"}
+	values := make([]string, 100_000)
+	for i := range values {
+		values[i] = choices[i%len(choices)]
+	}
+	data := writeSegmentBytes(b,
+		vector.Column{Name: "event_type", Vector: vector.NewString(values)},
+	)
+	counts := make(map[string]int, len(choices))
+	b.ResetTimer()
+
+	for b.Loop() {
+		clear(counts)
+		ok, err := GroupSegmentStringCountsBytes(data, "event_type", counts)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if !ok {
+			b.Fatal("missing event_type column")
+		}
+		if counts["checkout"] != 25_000 {
+			b.Fatalf("checkout count = %d, want 25000", counts["checkout"])
 		}
 	}
 }

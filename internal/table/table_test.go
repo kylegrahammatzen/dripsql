@@ -1,6 +1,7 @@
 package table
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,6 +147,79 @@ func TestEmptyTableCountsZero(t *testing.T) {
 	}
 }
 
+func TestScannerReusesBufferAcrossCounts(t *testing.T) {
+	tbl := createEventsTable(t, t.TempDir())
+	appendBatch(t, tbl, []int64{7, 42, 7}, []string{"signup", "checkout", "checkout"})
+
+	scanner := tbl.NewScanner()
+	count, err := scanner.CountInt64Equal("tenant_id", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("tenant count = %d, want 2", count)
+	}
+	if cap(scanner.buf) == 0 {
+		t.Fatal("expected scanner buffer to be retained")
+	}
+	bufCap := cap(scanner.buf)
+
+	count, err = scanner.CountStringEqual("event_type", "checkout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("event count = %d, want 2", count)
+	}
+	if cap(scanner.buf) != bufCap {
+		t.Fatalf("scanner buffer cap = %d, want %d", cap(scanner.buf), bufCap)
+	}
+
+	scanner.Reset()
+	if scanner.buf != nil {
+		t.Fatal("expected scanner reset to release buffer")
+	}
+}
+
+func TestGroupStringCounts(t *testing.T) {
+	tbl := createEventsTable(t, t.TempDir())
+	appendBatch(t, tbl,
+		[]int64{7, 42, 7},
+		[]string{"signup", "checkout", "checkout"},
+	)
+	appendBatch(t, tbl,
+		[]int64{11, 7},
+		[]string{"cancel", "checkout"},
+	)
+
+	counts, err := tbl.GroupStringCounts("event_type")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"signup": 1, "checkout": 3, "cancel": 1}
+	if !maps.Equal(counts, want) {
+		t.Fatalf("counts = %v, want %v", counts, want)
+	}
+}
+
+func TestScannerGroupStringCountsInto(t *testing.T) {
+	tbl := createEventsTable(t, t.TempDir())
+	appendBatch(t, tbl,
+		[]int64{7, 42, 7},
+		[]string{"signup", "checkout", "checkout"},
+	)
+
+	scanner := tbl.NewScanner()
+	counts, err := scanner.GroupStringCountsInto("event_type", map[string]int{"existing": 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"existing": 4, "signup": 1, "checkout": 2}
+	if !maps.Equal(counts, want) {
+		t.Fatalf("counts = %v, want %v", counts, want)
+	}
+}
+
 func TestManifestPersistsStats(t *testing.T) {
 	dir := t.TempDir()
 	tbl := createEventsTable(t, dir)
@@ -209,6 +283,88 @@ func BenchmarkCountStringEqualTable(b *testing.B) {
 		}
 		if count != 250_000 {
 			b.Fatalf("count = %d, want 250000", count)
+		}
+	}
+}
+
+func BenchmarkScannerCountInt64EqualTable(b *testing.B) {
+	tbl := benchmarkEventsTable(b, 10, 100_000)
+	scanner := tbl.NewScanner()
+	if count, err := scanner.CountInt64Equal("tenant_id", 7); err != nil {
+		b.Fatal(err)
+	} else if count != 980 {
+		b.Fatalf("count = %d, want 980", count)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		count, err := scanner.CountInt64Equal("tenant_id", 7)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if count != 980 {
+			b.Fatalf("count = %d, want 980", count)
+		}
+	}
+}
+
+func BenchmarkScannerCountStringEqualTable(b *testing.B) {
+	tbl := benchmarkEventsTable(b, 10, 100_000)
+	scanner := tbl.NewScanner()
+	if count, err := scanner.CountStringEqual("event_type", "checkout"); err != nil {
+		b.Fatal(err)
+	} else if count != 250_000 {
+		b.Fatalf("count = %d, want 250000", count)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		count, err := scanner.CountStringEqual("event_type", "checkout")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if count != 250_000 {
+			b.Fatalf("count = %d, want 250000", count)
+		}
+	}
+}
+
+func BenchmarkGroupStringCountsTable(b *testing.B) {
+	tbl := benchmarkEventsTable(b, 10, 100_000)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		counts, err := tbl.GroupStringCounts("event_type")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if counts["checkout"] != 250_000 {
+			b.Fatalf("checkout count = %d, want 250000", counts["checkout"])
+		}
+	}
+}
+
+func BenchmarkScannerGroupStringCountsTable(b *testing.B) {
+	tbl := benchmarkEventsTable(b, 10, 100_000)
+	scanner := tbl.NewScanner()
+	counts := make(map[string]int, 4)
+	if _, err := scanner.GroupStringCountsInto("event_type", counts); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		clear(counts)
+		counts, err := scanner.GroupStringCountsInto("event_type", counts)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if counts["checkout"] != 250_000 {
+			b.Fatalf("checkout count = %d, want 250000", counts["checkout"])
 		}
 	}
 }
