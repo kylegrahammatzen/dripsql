@@ -101,6 +101,15 @@ func (t *Table) Segments() int {
 	return len(t.manifest.Segments)
 }
 
+// Schema returns the table schema in storage order.
+func (t *Table) Schema() []Column {
+	schema, err := decodeSchema(t.manifest.Schema)
+	if err != nil {
+		return nil
+	}
+	return schema
+}
+
 // NewScanner creates a reusable scanner for repeated table scans.
 func (t *Table) NewScanner() *Scanner {
 	return &Scanner{table: t}

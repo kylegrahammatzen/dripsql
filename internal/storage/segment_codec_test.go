@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/binary"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -35,6 +36,27 @@ func TestEncodeStringUsesDictionaryWhenSmaller(t *testing.T) {
 
 func TestEncodeStringUsesPlainWhenDictionaryIsLarger(t *testing.T) {
 	values := []string{"alpha", "bravo", "charlie", "delta"}
+
+	encoded, err := encodeString(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoded[0] != stringCodecPlain {
+		t.Fatalf("string codec = %d, want plain", encoded[0])
+	}
+
+	decoded, err := decodeString(encoded, len(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireVectorEqual(t, vector.NewString(values), decoded)
+}
+
+func TestEncodeStringSkipsDictionaryForSampledHighCardinality(t *testing.T) {
+	values := make([]string, dictionarySampleRows+1)
+	for i := range values {
+		values[i] = "url-" + strconv.Itoa(i)
+	}
 
 	encoded, err := encodeString(values)
 	if err != nil {
@@ -198,6 +220,24 @@ func TestEncodeInt64UsesPlainWhenDictionaryIsLarger(t *testing.T) {
 	requireVectorEqual(t, vector.NewInt64(values), vector.FromInt64(decoded))
 }
 
+func TestEncodeInt64SkipsDictionaryForSampledHighCardinality(t *testing.T) {
+	values := make([]int64, dictionarySampleRows+1)
+	for i := range values {
+		values[i] = int64(i)
+	}
+
+	encoded := encodeInt64(values)
+	if encoded[0] != int64CodecPlain {
+		t.Fatalf("int64 codec = %d, want plain", encoded[0])
+	}
+
+	decoded, err := decodeInt64(encoded, len(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireVectorEqual(t, vector.NewInt64(values), vector.FromInt64(decoded))
+}
+
 func TestDecodeInt64RejectsBadPayload(t *testing.T) {
 	validOneValueDictionary := []byte{int64CodecDictionary}
 	validOneValueDictionary = binary.LittleEndian.AppendUint32(validOneValueDictionary, 1)
@@ -263,6 +303,19 @@ func BenchmarkEncodeInt64(b *testing.B) {
 	}
 }
 
+func BenchmarkEncodeInt64HighCardinality(b *testing.B) {
+	b.ReportAllocs()
+
+	values := make([]int64, 100_000)
+	for i := range values {
+		values[i] = int64(i)
+	}
+
+	for b.Loop() {
+		_ = encodeInt64(values)
+	}
+}
+
 func BenchmarkDecodeInt64(b *testing.B) {
 	b.ReportAllocs()
 
@@ -316,6 +369,21 @@ func BenchmarkDecodeStringPlain(b *testing.B) {
 
 	for b.Loop() {
 		if _, err := decodeString(encoded, len(values)); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkEncodeStringHighCardinality(b *testing.B) {
+	b.ReportAllocs()
+
+	values := make([]string, 100_000)
+	for i := range values {
+		values[i] = "url-" + strconv.Itoa(i)
+	}
+
+	for b.Loop() {
+		if _, err := encodeString(values); err != nil {
 			b.Fatal(err)
 		}
 	}

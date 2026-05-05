@@ -141,6 +141,52 @@ func TestReadSegmentStats(t *testing.T) {
 	}
 }
 
+func TestSegmentReportsColumnEncoding(t *testing.T) {
+	batch := mustBatch(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 7, 42, 7, 42, 7})},
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "signup", "checkout", "signup", "checkout", "signup"})},
+	)
+
+	writeStats, _, readStats := roundTrip(t, batch)
+	statsToCheck := []struct {
+		label string
+		stats SegmentStats
+	}{
+		{label: "written", stats: writeStats},
+		{label: "read", stats: readStats},
+	}
+
+	for _, source := range statsToCheck {
+		tenant := columnStats(t, source.stats, "tenant_id")
+		if tenant.Encoding.Codec != codecDictionary {
+			t.Fatalf("%s tenant codec = %q, want dictionary", source.label, tenant.Encoding.Codec)
+		}
+		if tenant.Encoding.PlainBytes != 65 {
+			t.Fatalf("%s tenant plain bytes = %d, want 65", source.label, tenant.Encoding.PlainBytes)
+		}
+		if tenant.Encoding.DictionaryValues != 2 || !tenant.Encoding.DictionaryPacked || tenant.Encoding.DictionaryPackedBitWidth != 1 {
+			t.Fatalf("%s tenant encoding = %+v, want 2-value packed 1-bit dictionary", source.label, tenant.Encoding)
+		}
+		if tenant.Encoding.FilterPath != filterPathDictionaryID {
+			t.Fatalf("%s tenant filter path = %q, want %q", source.label, tenant.Encoding.FilterPath, filterPathDictionaryID)
+		}
+
+		event := columnStats(t, source.stats, "event_type")
+		if event.Encoding.Codec != codecDictionary {
+			t.Fatalf("%s event codec = %q, want dictionary", source.label, event.Encoding.Codec)
+		}
+		if event.Encoding.PlainBytes != 87 {
+			t.Fatalf("%s event plain bytes = %d, want 87", source.label, event.Encoding.PlainBytes)
+		}
+		if event.Encoding.DictionaryValues != 2 || !event.Encoding.DictionaryPacked || event.Encoding.DictionaryPackedBitWidth != 1 {
+			t.Fatalf("%s event encoding = %+v, want 2-value packed 1-bit dictionary", source.label, event.Encoding)
+		}
+		if event.Encoding.FilterPath != filterPathDictionaryID || event.Encoding.GroupPath != groupPathDictionaryCounts {
+			t.Fatalf("%s event paths = %q/%q, want %q/%q", source.label, event.Encoding.FilterPath, event.Encoding.GroupPath, filterPathDictionaryID, groupPathDictionaryCounts)
+		}
+	}
+}
+
 func TestReadSegmentColumns(t *testing.T) {
 	batch := mustBatch(t,
 		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup"})},

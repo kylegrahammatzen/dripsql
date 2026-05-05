@@ -110,6 +110,49 @@ func TestManifestPersistsStats(t *testing.T) {
 	if !stats.HasMinMax || stats.MinInt64 != 7 || stats.MaxInt64 != 42 {
 		t.Fatalf("tenant stats = %+v, want min/max 7/42", stats)
 	}
+	if stats.Encoding.Codec == "" {
+		t.Fatalf("tenant encoding stats were not persisted: %+v", stats)
+	}
+}
+
+func TestColumnStorageStats(t *testing.T) {
+	dir := t.TempDir()
+	tbl := createEventsTable(t, dir)
+	tenants := make([]int64, 1000)
+	events := make([]string, 1000)
+	choices := []string{"signup", "checkout", "page_view", "cancel"}
+	for row := range tenants {
+		tenants[row] = int64(row % 4)
+		events[row] = choices[row%len(choices)]
+	}
+	appendBatch(t, tbl, tenants, events)
+
+	stats, err := tbl.ColumnStorageStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats) != 2 {
+		t.Fatalf("stats columns = %d, want 2", len(stats))
+	}
+
+	tenant := columnStorageStats(t, stats, "tenant_id")
+	if tenant.Rows != 1000 || tenant.Segments != 1 || tenant.Codec != "dictionary" {
+		t.Fatalf("tenant storage stats = %+v, want 1000 rows in one dictionary segment", tenant)
+	}
+	if tenant.DictionarySegments != 1 || tenant.MinDictionaryValues != 4 || tenant.MaxDictionaryValues != 4 {
+		t.Fatalf("tenant dictionary stats = %+v, want four dictionary values", tenant)
+	}
+	if tenant.PackedIDSegments != 1 || tenant.MinPackedIDBitWidth != 2 || tenant.MaxPackedIDBitWidth != 2 {
+		t.Fatalf("tenant id stats = %+v, want packed 2-bit ids", tenant)
+	}
+	if tenant.CompressionRatio() <= 1 {
+		t.Fatalf("tenant compression ratio = %.2f, want above 1", tenant.CompressionRatio())
+	}
+
+	event := columnStorageStats(t, stats, "event_type")
+	if event.Codec != "dictionary" || event.FilterPath != "dict-id" || event.GroupPath != "dict-counts" {
+		t.Fatalf("event storage stats = %+v, want dictionary filter/group paths", event)
+	}
 }
 
 func TestCreateRejectsExistingManifest(t *testing.T) {
@@ -145,6 +188,17 @@ func appendBatch(t testing.TB, tbl *Table, tenants []int64, events []string) {
 	)); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func columnStorageStats(t *testing.T, stats []ColumnStorageStats, name string) ColumnStorageStats {
+	t.Helper()
+	for _, col := range stats {
+		if col.Name == name {
+			return col
+		}
+	}
+	t.Fatalf("missing column storage stats for %q", name)
+	return ColumnStorageStats{}
 }
 
 func mustBatch(t testing.TB, columns ...vector.Column) vector.Batch {

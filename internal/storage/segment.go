@@ -23,6 +23,19 @@ type ColumnStats struct {
 	MinInt64   int64
 	MaxInt64   int64
 	EncodedLen int
+	Encoding   ColumnEncoding
+}
+
+// ColumnEncoding describes the payload codec selected for one encoded column.
+type ColumnEncoding struct {
+	Codec                    string
+	PlainBytes               int
+	DictionaryValues         int
+	DictionaryIDWidth        int
+	DictionaryPacked         bool
+	DictionaryPackedBitWidth int
+	FilterPath               string
+	GroupPath                string
 }
 
 // SegmentStats describes a written segment.
@@ -132,7 +145,7 @@ func ReadSegmentColumns(r io.Reader, names ...string) (vector.Batch, SegmentStat
 		}
 
 		if _, ok := wanted[colStats.Name]; ok {
-			col, err := sr.readColumnPayload(colStats)
+			col, colStats, err := sr.readColumnPayload(colStats)
 			if err != nil {
 				return vector.Batch{}, SegmentStats{}, err
 			}
@@ -205,7 +218,7 @@ func (s *segmentReader) readSegmentColumnsFromFooter(rows int, names []string, w
 		if err := checkFooterColumnName(entry, colStats); err != nil {
 			return vector.Batch{}, SegmentStats{}, err
 		}
-		col, err := s.readColumnPayload(colStats)
+		col, colStats, err := s.readColumnPayload(colStats)
 		if err != nil {
 			return vector.Batch{}, SegmentStats{}, err
 		}
