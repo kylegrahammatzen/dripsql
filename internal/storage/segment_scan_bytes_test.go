@@ -85,6 +85,60 @@ func TestCountSegmentInt64EqualAt(t *testing.T) {
 	}
 }
 
+func TestSegmentColumnPayloadRanges(t *testing.T) {
+	data := writeSegmentBytes(t,
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "cancel"})},
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 11})},
+	)
+	ranges, err := SegmentColumnPayloadRanges(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ranges) != 2 {
+		t.Fatalf("ranges = %d, want 2", len(ranges))
+	}
+	tenantRange := mustColumnPayloadRange(t, ranges, "tenant_id")
+	if tenantRange.Offset <= 0 || tenantRange.Bytes != 32 || tenantRange.Offset+tenantRange.Bytes >= int64(len(data)) {
+		t.Fatalf("tenant range = %+v, segment bytes = %d", tenantRange, len(data))
+	}
+	tenantStats, _, found, err := findColumnPayloadBytes(data, "tenant_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("missing tenant_id column")
+	}
+	count, scratch, bytesRead, err := CountColumnInt64EqualAt(bytes.NewReader(data), tenantRange.Offset, tenantRange.Bytes, tenantStats, 7, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("tenant count = %d, want 2", count)
+	}
+	if len(scratch) == 0 || bytesRead != tenantRange.Bytes {
+		t.Fatalf("scratch len / bytes read = %d / %d, want payload bytes %d", len(scratch), bytesRead, tenantRange.Bytes)
+	}
+
+	eventRange := mustColumnPayloadRange(t, ranges, "event_type")
+	eventStats, _, found, err := findColumnPayloadBytes(data, "event_type")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("missing event_type column")
+	}
+	count, scratch, bytesRead, err = CountColumnStringEqualAt(bytes.NewReader(data), eventRange.Offset, eventRange.Bytes, eventStats, "checkout", scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("event count = %d, want 1", count)
+	}
+	if bytesRead != eventRange.Bytes {
+		t.Fatalf("bytes read = %d, want %d", bytesRead, eventRange.Bytes)
+	}
+}
+
 func TestCountSegmentStringEqualBytes(t *testing.T) {
 	data := writeSegmentBytes(t,
 		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "cancel", "checkout"})},
@@ -359,4 +413,15 @@ func BenchmarkGroupSegmentStringCountsBytes(b *testing.B) {
 			b.Fatalf("checkout count = %d, want 25000", counts["checkout"])
 		}
 	}
+}
+
+func mustColumnPayloadRange(t testing.TB, ranges []ColumnPayloadRange, name string) ColumnPayloadRange {
+	t.Helper()
+	for _, columnRange := range ranges {
+		if columnRange.Name == name {
+			return columnRange
+		}
+	}
+	t.Fatalf("missing column range %q", name)
+	return ColumnPayloadRange{}
 }

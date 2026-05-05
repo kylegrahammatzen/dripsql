@@ -177,6 +177,113 @@ type segmentColumnLocation struct {
 	payloadLen    int
 }
 
+// ColumnPayloadRange describes one column payload's byte range inside an encoded segment.
+type ColumnPayloadRange struct {
+	Name   string
+	Offset int64
+	Bytes  int64
+}
+
+// SegmentColumnPayloadRanges returns segment-relative payload byte ranges for every column.
+func SegmentColumnPayloadRanges(data []byte) ([]ColumnPayloadRange, error) {
+	_, cols, segmentLen, err := readSegmentHeader(data)
+	if err != nil {
+		return nil, err
+	}
+	segment := data[:segmentLen]
+	trailer := segment[segmentLen-footerTrailerLen:]
+	footerStart, _, err := footerPayloadRangeBytes(segmentLen, trailer)
+	if err != nil {
+		return nil, err
+	}
+	footer, err := footerPayloadBytes(segment)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := parseFooterPayload(footer, cols)
+	if err != nil {
+		return nil, err
+	}
+
+	ranges := make([]ColumnPayloadRange, 0, len(entries))
+	for _, entry := range entries {
+		columnOffset, err := checkedInt("column offset", entry.Offset)
+		if err != nil {
+			return nil, err
+		}
+		if columnOffset < segmentHeaderLen || columnOffset >= footerStart {
+			return nil, io.ErrUnexpectedEOF
+		}
+		offset := columnOffset
+		name, stats, err := readColumnHeaderBytes(segment, &offset)
+		if err != nil {
+			return nil, err
+		}
+		if !bytesEqualString(name, entry.Name) {
+			return nil, fmt.Errorf("segment footer offset for %q points to column %q", entry.Name, string(name))
+		}
+		if stats.EncodedLen > footerStart-offset {
+			return nil, io.ErrUnexpectedEOF
+		}
+		ranges = append(ranges, ColumnPayloadRange{
+			Name:   entry.Name,
+			Offset: int64(offset),
+			Bytes:  int64(stats.EncodedLen),
+		})
+	}
+	return ranges, nil
+}
+
+// CountColumnInt64EqualAt reads one int64 column payload range and counts matches.
+func CountColumnInt64EqualAt(r io.ReaderAt, payloadOffset int64, payloadBytes int64, stats ColumnStats, value int64, scratch []byte) (count int, outScratch []byte, bytesRead int64, err error) {
+	if stats.Kind != vector.KindInt64 {
+		return 0, scratch, 0, fmt.Errorf("column %q is %s, want int64", stats.Name, stats.Kind)
+	}
+	if canSkipInt64Equal(stats, value) {
+		return 0, scratch, 0, nil
+	}
+	payload, scratch, bytesRead, err := readPayloadRangeAt(r, payloadOffset, payloadBytes, stats, scratch)
+	if err != nil {
+		return 0, scratch, bytesRead, err
+	}
+	count, err = countInt64EqualPayload(payload, stats, value)
+	if err != nil {
+		return 0, scratch, bytesRead, err
+	}
+	return count, scratch, bytesRead, nil
+}
+
+// CountColumnStringEqualAt reads one string column payload range and counts matches.
+func CountColumnStringEqualAt(r io.ReaderAt, payloadOffset int64, payloadBytes int64, stats ColumnStats, value string, scratch []byte) (count int, outScratch []byte, bytesRead int64, err error) {
+	if stats.Kind != vector.KindString {
+		return 0, scratch, 0, fmt.Errorf("column %q is %s, want string", stats.Name, stats.Kind)
+	}
+	payload, scratch, bytesRead, err := readPayloadRangeAt(r, payloadOffset, payloadBytes, stats, scratch)
+	if err != nil {
+		return 0, scratch, bytesRead, err
+	}
+	count, err = countStringEqualPayload(payload, stats, value)
+	if err != nil {
+		return 0, scratch, bytesRead, err
+	}
+	return count, scratch, bytesRead, nil
+}
+
+// GroupColumnStringCountsAt reads one string column payload range and groups values.
+func GroupColumnStringCountsAt(r io.ReaderAt, payloadOffset int64, payloadBytes int64, stats ColumnStats, counts map[string]int, scratch []byte) (outScratch []byte, bytesRead int64, err error) {
+	if stats.Kind != vector.KindString {
+		return scratch, 0, fmt.Errorf("column %q is %s, want string", stats.Name, stats.Kind)
+	}
+	payload, scratch, bytesRead, err := readPayloadRangeAt(r, payloadOffset, payloadBytes, stats, scratch)
+	if err != nil {
+		return scratch, bytesRead, err
+	}
+	if err := groupStringCountsPayload(payload, stats, counts); err != nil {
+		return scratch, bytesRead, err
+	}
+	return scratch, bytesRead, nil
+}
+
 func findColumnPayloadBytes(data []byte, column string) (ColumnStats, []byte, bool, error) {
 	_, cols, segmentLen, err := readSegmentHeader(data)
 	if err != nil {
@@ -300,6 +407,25 @@ func readColumnPayloadAt(r io.ReaderAt, loc segmentColumnLocation, scratch []byt
 		return nil, scratch, 0, err
 	}
 	return payload, scratch, int64(loc.payloadLen), nil
+}
+
+func readPayloadRangeAt(r io.ReaderAt, payloadOffset int64, payloadBytes int64, stats ColumnStats, scratch []byte) ([]byte, []byte, int64, error) {
+	if payloadBytes < 0 {
+		return nil, scratch, 0, fmt.Errorf("column %q has negative payload byte length %d", stats.Name, payloadBytes)
+	}
+	payloadLen, err := checkedInt("column payload length", uint64(payloadBytes))
+	if err != nil {
+		return nil, scratch, 0, err
+	}
+	if payloadLen != stats.EncodedLen {
+		return nil, scratch, 0, fmt.Errorf("column %q payload length %d does not match stats length %d", stats.Name, payloadLen, stats.EncodedLen)
+	}
+	scratch = ensureScratch(scratch, payloadLen)
+	payload := scratch[:payloadLen]
+	if err := readFullAt(r, payload, payloadOffset); err != nil {
+		return nil, scratch, 0, err
+	}
+	return payload, scratch, payloadBytes, nil
 }
 
 func readSegmentHeader(data []byte) (offset int, cols int, segmentLen int, err error) {

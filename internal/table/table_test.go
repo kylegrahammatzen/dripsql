@@ -309,6 +309,9 @@ func TestScannerStatsTrackInt64Pruning(t *testing.T) {
 	if stats.BytesTotal != tbl.Bytes() || stats.BytesScanned <= 0 || stats.BytesSkipped <= 0 {
 		t.Fatalf("byte stats = %+v, table bytes = %d", stats, tbl.Bytes())
 	}
+	if stats.BytesSkipped != stats.BytesTotal-stats.BytesScanned {
+		t.Fatalf("bytes skipped = %d, want total-scanned %d", stats.BytesSkipped, stats.BytesTotal-stats.BytesScanned)
+	}
 }
 
 func TestScannerStatsTrackSelectedColumnBytes(t *testing.T) {
@@ -334,6 +337,9 @@ func TestScannerStatsTrackSelectedColumnBytes(t *testing.T) {
 	stats := scanner.Stats()
 	if stats.BytesScanned <= 0 || stats.BytesScanned >= stats.BytesTotal {
 		t.Fatalf("bytes scanned = %d, want selected-column scan below total %d", stats.BytesScanned, stats.BytesTotal)
+	}
+	if stats.BytesSkipped != stats.BytesTotal-stats.BytesScanned {
+		t.Fatalf("bytes skipped = %d, want total-scanned %d", stats.BytesSkipped, stats.BytesTotal-stats.BytesScanned)
 	}
 }
 
@@ -396,6 +402,24 @@ func TestManifestPersistsStats(t *testing.T) {
 	if segment.Offset != 0 || segment.Bytes <= 0 {
 		t.Fatalf("segment offset/bytes = %d/%d, want 0/positive", segment.Offset, segment.Bytes)
 	}
+	if len(segment.Columns) != 2 {
+		t.Fatalf("column ranges = %d, want 2", len(segment.Columns))
+	}
+	var tenantRange ColumnRange
+	foundTenantRange := false
+	for _, columnRange := range segment.Columns {
+		if columnRange.Name == "tenant_id" {
+			tenantRange = columnRange
+			foundTenantRange = true
+			break
+		}
+	}
+	if !foundTenantRange {
+		t.Fatal("missing tenant_id column range")
+	}
+	if tenantRange.Offset <= 0 || tenantRange.Bytes <= 0 || tenantRange.Offset+tenantRange.Bytes > segment.Bytes {
+		t.Fatalf("tenant range = %+v, segment bytes = %d", tenantRange, segment.Bytes)
+	}
 	stats, ok := segment.Stats.Column("tenant_id")
 	if !ok {
 		t.Fatal("missing tenant_id stats")
@@ -409,7 +433,10 @@ func TestCreateRejectsExistingManifest(t *testing.T) {
 	dir := t.TempDir()
 	createEventsTable(t, dir)
 
-	_, err := Create(dir, eventsSchema())
+	_, err := Create(dir, []Column{
+		{Name: "tenant_id", Kind: vector.KindInt64},
+		{Name: "event_type", Kind: vector.KindString},
+	})
 	if err == nil {
 		t.Fatal("expected existing manifest error")
 	}
@@ -534,18 +561,14 @@ func BenchmarkScannerGroupStringCountsTable(b *testing.B) {
 
 func createEventsTable(t testing.TB, dir string) *Table {
 	t.Helper()
-	tbl, err := Create(dir, eventsSchema())
+	tbl, err := Create(dir, []Column{
+		{Name: "tenant_id", Kind: vector.KindInt64},
+		{Name: "event_type", Kind: vector.KindString},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return tbl
-}
-
-func eventsSchema() []Column {
-	return []Column{
-		{Name: "tenant_id", Kind: vector.KindInt64},
-		{Name: "event_type", Kind: vector.KindString},
-	}
 }
 
 func appendBatch(t testing.TB, tbl *Table, tenants []int64, events []string) {

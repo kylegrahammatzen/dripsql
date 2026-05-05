@@ -25,13 +25,21 @@ type Column struct {
 	Kind vector.Kind
 }
 
+// ColumnRange describes one encoded column payload range inside a segment.
+type ColumnRange struct {
+	Name   string `json:"name"`
+	Offset int64  `json:"offset"`
+	Bytes  int64  `json:"bytes"`
+}
+
 // Segment describes one immutable segment recorded in a table manifest.
 type Segment struct {
-	ID     uint64               `json:"id"`
-	Offset int64                `json:"offset"`
-	Rows   int                  `json:"rows"`
-	Bytes  int64                `json:"bytes"`
-	Stats  storage.SegmentStats `json:"stats"`
+	ID      uint64               `json:"id"`
+	Offset  int64                `json:"offset"`
+	Rows    int                  `json:"rows"`
+	Bytes   int64                `json:"bytes"`
+	Stats   storage.SegmentStats `json:"stats"`
+	Columns []ColumnRange        `json:"columns,omitempty"`
 }
 
 type manifest struct {
@@ -92,7 +100,7 @@ type ScanStats struct {
 	BytesSkipped    int64
 }
 
-// Create initializes a new table directory with a manifest and segment directory.
+// Create initializes a new table directory with a manifest and data file.
 func Create(dir string, schema []Column) (*Table, error) {
 	manifestSchema, err := encodeSchema(schema)
 	if err != nil {
@@ -100,7 +108,7 @@ func Create(dir string, schema []Column) (*Table, error) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, manifestFile)); err == nil {
 		return nil, fmt.Errorf("table manifest already exists: %s", filepath.Join(dir, manifestFile))
-	} else if err != nil && !os.IsNotExist(err) {
+	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -147,9 +155,10 @@ func Open(dir string) (*Table, error) {
 
 // Schema returns the table schema.
 func (t *Table) Schema() []Column {
-	schema, err := decodeSchema(t.manifest.Schema)
-	if err != nil {
-		return nil
+	schema := make([]Column, 0, len(t.manifest.Schema))
+	for _, col := range t.manifest.Schema {
+		kind, _ := parseKind(col.Kind)
+		schema = append(schema, Column{Name: col.Name, Kind: kind})
 	}
 	return schema
 }
@@ -244,6 +253,18 @@ func (t *Table) dataEnd() int64 {
 	return offset
 }
 
+func readColumnRanges(data []byte) ([]ColumnRange, error) {
+	ranges, err := storage.SegmentColumnPayloadRanges(data)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ColumnRange, 0, len(ranges))
+	for _, columnRange := range ranges {
+		out = append(out, ColumnRange{Name: columnRange.Name, Offset: columnRange.Offset, Bytes: columnRange.Bytes})
+	}
+	return out, nil
+}
+
 // Append writes batch as one immutable segment in this append session.
 func (a *Appender) Append(batch vector.Batch) error {
 	if a == nil || a.table == nil || a.file == nil || a.closed {
@@ -261,6 +282,10 @@ func (a *Appender) Append(batch vector.Batch) error {
 	if err != nil {
 		return err
 	}
+	columnRanges, err := readColumnRanges(buf.Bytes())
+	if err != nil {
+		return err
+	}
 	if n, err := a.file.Write(buf.Bytes()); err != nil {
 		_ = a.file.Truncate(a.offset)
 		_, _ = a.file.Seek(a.offset, io.SeekStart)
@@ -271,7 +296,7 @@ func (a *Appender) Append(batch vector.Batch) error {
 		return io.ErrShortWrite
 	}
 
-	entry := Segment{ID: id, Offset: a.offset, Rows: stats.Rows, Bytes: int64(buf.Len()), Stats: stats}
+	entry := Segment{ID: id, Offset: a.offset, Rows: stats.Rows, Bytes: int64(buf.Len()), Stats: stats, Columns: columnRanges}
 	t.manifest.NextSegmentID++
 	t.manifest.Segments = append(t.manifest.Segments, entry)
 	a.offset += int64(buf.Len())
@@ -329,6 +354,15 @@ func (a *Appender) rollback() error {
 	return os.Truncate(a.dataPath, a.initialOffset)
 }
 
+func segmentColumnRange(segment Segment, column string) (ColumnRange, bool) {
+	for _, columnRange := range segment.Columns {
+		if columnRange.Name == column {
+			return columnRange, true
+		}
+	}
+	return ColumnRange{}, false
+}
+
 // CountInt64Equal counts rows across all table segments where column equals value.
 func (t *Table) CountInt64Equal(column string, value int64) (int, error) {
 	scanner := t.NewScanner()
@@ -356,7 +390,7 @@ func (s *Scanner) CountInt64Equal(column string, value int64) (int, error) {
 		if stats.Kind != vector.KindInt64 {
 			return 0, fmt.Errorf("segment %d column %q is %s, want int64", segment.ID, column, stats.Kind)
 		}
-		if canSkipInt64(stats, value) {
+		if stats.HasMinMax && (value < stats.MinInt64 || value > stats.MaxInt64) {
 			s.markSkipped(segment)
 			continue
 		}
@@ -365,13 +399,20 @@ func (s *Scanner) CountInt64Equal(column string, value int64) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		segmentCount, ok, buf, bytesRead, err := storage.CountSegmentInt64EqualAt(seekReaderAt{file: file}, segment.Offset, segment.Bytes, column, value, s.buf)
-		s.buf = buf
+		var segmentCount int
+		var bytesRead int64
+		reader := seekReaderAt{file: file}
+		if columnRange, ok := segmentColumnRange(segment, column); ok {
+			segmentCount, s.buf, bytesRead, err = storage.CountColumnInt64EqualAt(reader, segment.Offset+columnRange.Offset, columnRange.Bytes, stats, value, s.buf)
+		} else {
+			var found bool
+			segmentCount, found, s.buf, bytesRead, err = storage.CountSegmentInt64EqualAt(reader, segment.Offset, segment.Bytes, column, value, s.buf)
+			if err == nil && !found {
+				return 0, fmt.Errorf("segment %d missing column %q", segment.ID, column)
+			}
+		}
 		if err != nil {
 			return 0, err
-		}
-		if !ok {
-			return 0, fmt.Errorf("segment %d missing column %q", segment.ID, column)
 		}
 		s.markScanned(segment, bytesRead)
 		count, err = checkedAddCount(count, segmentCount)
@@ -414,13 +455,20 @@ func (s *Scanner) CountStringEqual(column string, value string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		segmentCount, ok, buf, bytesRead, err := storage.CountSegmentStringEqualAt(seekReaderAt{file: file}, segment.Offset, segment.Bytes, column, value, s.buf)
-		s.buf = buf
+		var segmentCount int
+		var bytesRead int64
+		reader := seekReaderAt{file: file}
+		if columnRange, ok := segmentColumnRange(segment, column); ok {
+			segmentCount, s.buf, bytesRead, err = storage.CountColumnStringEqualAt(reader, segment.Offset+columnRange.Offset, columnRange.Bytes, stats, value, s.buf)
+		} else {
+			var found bool
+			segmentCount, found, s.buf, bytesRead, err = storage.CountSegmentStringEqualAt(reader, segment.Offset, segment.Bytes, column, value, s.buf)
+			if err == nil && !found {
+				return 0, fmt.Errorf("segment %d missing column %q", segment.ID, column)
+			}
+		}
 		if err != nil {
 			return 0, err
-		}
-		if !ok {
-			return 0, fmt.Errorf("segment %d missing column %q", segment.ID, column)
 		}
 		s.markScanned(segment, bytesRead)
 		count, err = checkedAddCount(count, segmentCount)
@@ -469,15 +517,19 @@ func (s *Scanner) GroupStringCountsInto(column string, counts map[string]int) (m
 		if err != nil {
 			return nil, err
 		}
-		var buf []byte
 		var bytesRead int64
-		ok, buf, bytesRead, err = storage.GroupSegmentStringCountsAt(seekReaderAt{file: file}, segment.Offset, segment.Bytes, column, counts, s.buf)
-		s.buf = buf
+		reader := seekReaderAt{file: file}
+		if columnRange, ok := segmentColumnRange(segment, column); ok {
+			s.buf, bytesRead, err = storage.GroupColumnStringCountsAt(reader, segment.Offset+columnRange.Offset, columnRange.Bytes, stats, counts, s.buf)
+		} else {
+			var found bool
+			found, s.buf, bytesRead, err = storage.GroupSegmentStringCountsAt(reader, segment.Offset, segment.Bytes, column, counts, s.buf)
+			if err == nil && !found {
+				return nil, fmt.Errorf("segment %d missing column %q", segment.ID, column)
+			}
+		}
 		if err != nil {
 			return nil, err
-		}
-		if !ok {
-			return nil, fmt.Errorf("segment %d missing column %q", segment.ID, column)
 		}
 		s.markScanned(segment, bytesRead)
 	}
@@ -524,29 +576,6 @@ func (s *Scanner) validate() error {
 	return nil
 }
 
-func (s *Scanner) readSegment(segment Segment) ([]byte, error) {
-	if segment.Bytes < 0 {
-		return nil, fmt.Errorf("segment %d has negative byte length %d", segment.ID, segment.Bytes)
-	}
-	if uint64(segment.Bytes) > uint64(int(^uint(0)>>1)) {
-		return nil, fmt.Errorf("segment %d byte length %d overflows int", segment.ID, segment.Bytes)
-	}
-	size := int(segment.Bytes)
-	if cap(s.buf) < size {
-		s.buf = make([]byte, size)
-	}
-	s.buf = s.buf[:size]
-
-	file, err := s.dataFile()
-	if err != nil {
-		return nil, err
-	}
-	if _, err := file.ReadAt(s.buf, segment.Offset); err != nil {
-		return nil, err
-	}
-	return s.buf, nil
-}
-
 func (s *Scanner) dataFile() (*os.File, error) {
 	if s.file != nil {
 		return s.file, nil
@@ -575,9 +604,16 @@ func (s *Scanner) beginScan() {
 }
 
 func (s *Scanner) markScanned(segment Segment, bytesRead int64) {
+	if bytesRead < 0 {
+		bytesRead = 0
+	}
+	if bytesRead > segment.Bytes {
+		bytesRead = segment.Bytes
+	}
 	s.stats.SegmentsScanned++
 	s.stats.RowsScanned += int64(segment.Rows)
 	s.stats.BytesScanned += bytesRead
+	s.stats.BytesSkipped += segment.Bytes - bytesRead
 }
 
 func (s *Scanner) markSkipped(segment Segment) {
@@ -587,10 +623,7 @@ func (s *Scanner) markSkipped(segment Segment) {
 }
 
 func (t *Table) validateBatch(batch vector.Batch) error {
-	schema, err := decodeSchema(t.manifest.Schema)
-	if err != nil {
-		return err
-	}
+	schema := t.manifest.Schema
 	if len(batch.Columns) != len(schema) {
 		return fmt.Errorf("batch column count %d does not match table column count %d", len(batch.Columns), len(schema))
 	}
@@ -602,24 +635,28 @@ func (t *Table) validateBatch(batch vector.Batch) error {
 		if got.Vector == nil {
 			return fmt.Errorf("batch column %q has no vector", got.Name)
 		}
-		if got.Vector.Kind() != want.Kind {
-			return fmt.Errorf("batch column %q is %s, want %s", got.Name, got.Vector.Kind(), want.Kind)
+		wantKind, ok := parseKind(want.Kind)
+		if !ok {
+			return fmt.Errorf("column %q has unsupported kind %q", want.Name, want.Kind)
+		}
+		if got.Vector.Kind() != wantKind {
+			return fmt.Errorf("batch column %q is %s, want %s", got.Name, got.Vector.Kind(), wantKind)
 		}
 	}
 	return nil
 }
 
 func (t *Table) requireColumnKind(column string, kind vector.Kind) error {
-	schema, err := decodeSchema(t.manifest.Schema)
-	if err != nil {
-		return err
-	}
-	for _, col := range schema {
+	for _, col := range t.manifest.Schema {
 		if col.Name != column {
 			continue
 		}
-		if col.Kind != kind {
-			return fmt.Errorf("column %q is %s, want %s", column, col.Kind, kind)
+		got, ok := parseKind(col.Kind)
+		if !ok {
+			return fmt.Errorf("column %q has unsupported kind %q", col.Name, col.Kind)
+		}
+		if got != kind {
+			return fmt.Errorf("column %q is %s, want %s", column, got, kind)
 		}
 		return nil
 	}
@@ -662,6 +699,35 @@ func validateManifest(m manifest) error {
 		if segment.Bytes < 0 {
 			return fmt.Errorf("segment %d has negative byte length %d", segment.ID, segment.Bytes)
 		}
+		if err := validateColumnRanges(segment); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateColumnRanges(segment Segment) error {
+	if len(segment.Columns) == 0 {
+		return nil
+	}
+	for i, columnRange := range segment.Columns {
+		if columnRange.Name == "" {
+			return fmt.Errorf("segment %d column range name is required", segment.ID)
+		}
+		for _, previous := range segment.Columns[:i] {
+			if previous.Name == columnRange.Name {
+				return fmt.Errorf("segment %d has duplicate column range %q", segment.ID, columnRange.Name)
+			}
+		}
+		if columnRange.Offset < 0 {
+			return fmt.Errorf("segment %d column %q has negative offset %d", segment.ID, columnRange.Name, columnRange.Offset)
+		}
+		if columnRange.Bytes < 0 {
+			return fmt.Errorf("segment %d column %q has negative byte length %d", segment.ID, columnRange.Name, columnRange.Bytes)
+		}
+		if columnRange.Offset > segment.Bytes || columnRange.Bytes > segment.Bytes-columnRange.Offset {
+			return fmt.Errorf("segment %d column %q range offset %d length %d exceeds segment byte length %d", segment.ID, columnRange.Name, columnRange.Offset, columnRange.Bytes, segment.Bytes)
+		}
 	}
 	return nil
 }
@@ -671,19 +737,19 @@ func encodeSchema(schema []Column) ([]manifestColumn, error) {
 		return nil, fmt.Errorf("table schema requires at least one column")
 	}
 	out := make([]manifestColumn, 0, len(schema))
-	seen := make(map[string]struct{}, len(schema))
-	for _, col := range schema {
+	for i, col := range schema {
 		if col.Name == "" {
 			return nil, fmt.Errorf("column name is required")
 		}
-		if _, ok := seen[col.Name]; ok {
-			return nil, fmt.Errorf("duplicate column %q", col.Name)
+		for _, previous := range schema[:i] {
+			if previous.Name == col.Name {
+				return nil, fmt.Errorf("duplicate column %q", col.Name)
+			}
 		}
 		kind, ok := kindName(col.Kind)
 		if !ok {
 			return nil, fmt.Errorf("unsupported column %q kind %s", col.Name, col.Kind)
 		}
-		seen[col.Name] = struct{}{}
 		out = append(out, manifestColumn{Name: col.Name, Kind: kind})
 	}
 	return out, nil
@@ -694,19 +760,19 @@ func decodeSchema(schema []manifestColumn) ([]Column, error) {
 		return nil, fmt.Errorf("table schema requires at least one column")
 	}
 	out := make([]Column, 0, len(schema))
-	seen := make(map[string]struct{}, len(schema))
-	for _, col := range schema {
+	for i, col := range schema {
 		if col.Name == "" {
 			return nil, fmt.Errorf("column name is required")
 		}
-		if _, ok := seen[col.Name]; ok {
-			return nil, fmt.Errorf("duplicate column %q", col.Name)
+		for _, previous := range schema[:i] {
+			if previous.Name == col.Name {
+				return nil, fmt.Errorf("duplicate column %q", col.Name)
+			}
 		}
 		kind, ok := parseKind(col.Kind)
 		if !ok {
 			return nil, fmt.Errorf("unsupported column %q kind %q", col.Name, col.Kind)
 		}
-		seen[col.Name] = struct{}{}
 		out = append(out, Column{Name: col.Name, Kind: kind})
 	}
 	return out, nil
@@ -732,10 +798,6 @@ func parseKind(kind string) (vector.Kind, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func canSkipInt64(stats storage.ColumnStats, value int64) bool {
-	return stats.HasMinMax && (value < stats.MinInt64 || value > stats.MaxInt64)
 }
 
 func checkedAddCount(a, b int) (int, error) {
