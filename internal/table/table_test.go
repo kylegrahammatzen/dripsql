@@ -29,6 +29,9 @@ func TestCreateAppendOpenAndCount(t *testing.T) {
 	if tbl.Segments() != 2 {
 		t.Fatalf("segments = %d, want 2", tbl.Segments())
 	}
+	if tbl.Bytes() <= 0 {
+		t.Fatalf("bytes = %d, want positive", tbl.Bytes())
+	}
 
 	reopened, err := Open(dir)
 	if err != nil {
@@ -159,6 +162,10 @@ func TestScannerReusesBufferAcrossCounts(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("tenant count = %d, want 2", count)
 	}
+	stats := scanner.Stats()
+	if stats.RowsTotal != 3 || stats.RowsScanned != 3 || stats.BytesScanned <= 0 {
+		t.Fatalf("stats = %+v, want full 3-row scan", stats)
+	}
 	if cap(scanner.buf) == 0 {
 		t.Fatal("expected scanner buffer to be retained")
 	}
@@ -178,6 +185,34 @@ func TestScannerReusesBufferAcrossCounts(t *testing.T) {
 	scanner.Reset()
 	if scanner.buf != nil {
 		t.Fatal("expected scanner reset to release buffer")
+	}
+	if scanner.Stats() != (ScanStats{}) {
+		t.Fatalf("stats after reset = %+v, want zero", scanner.Stats())
+	}
+}
+
+func TestScannerStatsTrackInt64Pruning(t *testing.T) {
+	tbl := createEventsTable(t, t.TempDir())
+	appendBatch(t, tbl, []int64{1, 2, 3}, []string{"signup", "signup", "signup"})
+	appendBatch(t, tbl, []int64{99, 99}, []string{"checkout", "checkout"})
+
+	scanner := tbl.NewScanner()
+	count, err := scanner.CountInt64Equal("tenant_id", 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+	stats := scanner.Stats()
+	if stats.SegmentsTotal != 2 || stats.SegmentsScanned != 1 || stats.SegmentsSkipped != 1 {
+		t.Fatalf("segment stats = %+v, want 1 scanned and 1 skipped", stats)
+	}
+	if stats.RowsTotal != 5 || stats.RowsScanned != 2 || stats.RowsSkipped != 3 {
+		t.Fatalf("row stats = %+v, want total 5 scanned 2 skipped 3", stats)
+	}
+	if stats.BytesTotal != tbl.Bytes() || stats.BytesScanned <= 0 || stats.BytesSkipped <= 0 {
+		t.Fatalf("byte stats = %+v, table bytes = %d", stats, tbl.Bytes())
 	}
 }
 

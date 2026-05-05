@@ -57,6 +57,20 @@ type Table struct {
 type Scanner struct {
 	table *Table
 	buf   []byte
+	stats ScanStats
+}
+
+// ScanStats describes the amount of table data considered and read by the last scan.
+type ScanStats struct {
+	SegmentsTotal   int
+	SegmentsScanned int
+	SegmentsSkipped int
+	RowsTotal       int64
+	RowsScanned     int64
+	RowsSkipped     int64
+	BytesTotal      int64
+	BytesScanned    int64
+	BytesSkipped    int64
 }
 
 // Create initializes a new table directory with a manifest and segment directory.
@@ -120,6 +134,15 @@ func (t *Table) Rows() int {
 		rows += segment.Rows
 	}
 	return rows
+}
+
+// Bytes returns the total encoded segment bytes recorded in the manifest.
+func (t *Table) Bytes() int64 {
+	bytes := int64(0)
+	for _, segment := range t.manifest.Segments {
+		bytes += segment.Bytes
+	}
+	return bytes
 }
 
 // Segments returns the number of immutable segments recorded in the manifest.
@@ -196,6 +219,7 @@ func (s *Scanner) CountInt64Equal(column string, value int64) (int, error) {
 	if err := t.requireColumnKind(column, vector.KindInt64); err != nil {
 		return 0, err
 	}
+	s.beginScan()
 
 	count := 0
 	for _, segment := range t.manifest.Segments {
@@ -207,9 +231,11 @@ func (s *Scanner) CountInt64Equal(column string, value int64) (int, error) {
 			return 0, fmt.Errorf("segment %d column %q is %s, want int64", segment.ID, column, stats.Kind)
 		}
 		if canSkipInt64(stats, value) {
+			s.markSkipped(segment)
 			continue
 		}
 
+		s.markScanned(segment)
 		data, err := s.readSegment(segment)
 		if err != nil {
 			return 0, err
@@ -243,6 +269,7 @@ func (s *Scanner) CountStringEqual(column string, value string) (int, error) {
 	if err := t.requireColumnKind(column, vector.KindString); err != nil {
 		return 0, err
 	}
+	s.beginScan()
 
 	count := 0
 	for _, segment := range t.manifest.Segments {
@@ -254,6 +281,7 @@ func (s *Scanner) CountStringEqual(column string, value string) (int, error) {
 			return 0, fmt.Errorf("segment %d column %q is %s, want string", segment.ID, column, stats.Kind)
 		}
 
+		s.markScanned(segment)
 		data, err := s.readSegment(segment)
 		if err != nil {
 			return 0, err
@@ -295,6 +323,7 @@ func (s *Scanner) GroupStringCountsInto(column string, counts map[string]int) (m
 	if err := t.requireColumnKind(column, vector.KindString); err != nil {
 		return nil, err
 	}
+	s.beginScan()
 	for _, segment := range t.manifest.Segments {
 		stats, ok := segment.Stats.Column(column)
 		if !ok {
@@ -304,6 +333,7 @@ func (s *Scanner) GroupStringCountsInto(column string, counts map[string]int) (m
 			return nil, fmt.Errorf("segment %d column %q is %s, want string", segment.ID, column, stats.Kind)
 		}
 
+		s.markScanned(segment)
 		data, err := s.readSegment(segment)
 		if err != nil {
 			return nil, err
@@ -322,6 +352,15 @@ func (s *Scanner) GroupStringCountsInto(column string, counts map[string]int) (m
 // Reset releases scanner scratch buffers.
 func (s *Scanner) Reset() {
 	s.buf = nil
+	s.stats = ScanStats{}
+}
+
+// Stats returns statistics for the scanner's most recent scan.
+func (s *Scanner) Stats() ScanStats {
+	if s == nil {
+		return ScanStats{}
+	}
+	return s.stats
 }
 
 func (s *Scanner) validate() error {
@@ -338,6 +377,26 @@ func (s *Scanner) readSegment(segment Segment) ([]byte, error) {
 	}
 	s.buf = data
 	return data, nil
+}
+
+func (s *Scanner) beginScan() {
+	s.stats = ScanStats{SegmentsTotal: len(s.table.manifest.Segments)}
+	for _, segment := range s.table.manifest.Segments {
+		s.stats.RowsTotal += int64(segment.Rows)
+		s.stats.BytesTotal += segment.Bytes
+	}
+}
+
+func (s *Scanner) markScanned(segment Segment) {
+	s.stats.SegmentsScanned++
+	s.stats.RowsScanned += int64(segment.Rows)
+	s.stats.BytesScanned += segment.Bytes
+}
+
+func (s *Scanner) markSkipped(segment Segment) {
+	s.stats.SegmentsSkipped++
+	s.stats.RowsSkipped += int64(segment.Rows)
+	s.stats.BytesSkipped += segment.Bytes
 }
 
 func (t *Table) validateBatch(batch vector.Batch) error {
