@@ -90,7 +90,7 @@ func ReadSegment(r io.Reader) (vector.Batch, SegmentStats, error) {
 		columns = append(columns, col)
 		stats.Columns = append(stats.Columns, colStats)
 	}
-	if err := sr.finishSegment(cols); err != nil {
+	if err := sr.finishSegmentSequential(cols); err != nil {
 		return vector.Batch{}, SegmentStats{}, err
 	}
 
@@ -146,7 +146,7 @@ func ReadSegmentColumns(r io.Reader, names ...string) (vector.Batch, SegmentStat
 			return vector.Batch{}, SegmentStats{}, err
 		}
 	}
-	if err := sr.finishSegment(cols); err != nil {
+	if err := sr.finishSegmentSequential(cols); err != nil {
 		return vector.Batch{}, SegmentStats{}, err
 	}
 	if name, ok := missingRequestedColumn(names, wanted); ok {
@@ -171,11 +171,6 @@ func ReadSegmentStats(r io.Reader) (SegmentStats, error) {
 	if err != nil {
 		return SegmentStats{}, err
 	}
-	if footer, ok, err := sr.readFooter(cols); err != nil {
-		return SegmentStats{}, err
-	} else if ok {
-		return sr.readSegmentStatsFromFooter(rows, footer)
-	}
 
 	stats := SegmentStats{Rows: rows, Columns: make([]ColumnStats, 0, cols)}
 	for range cols {
@@ -185,7 +180,7 @@ func ReadSegmentStats(r io.Reader) (SegmentStats, error) {
 		}
 		stats.Columns = append(stats.Columns, colStats)
 	}
-	if err := sr.finishSegment(cols); err != nil {
+	if err := sr.finishSegmentSequential(cols); err != nil {
 		return SegmentStats{}, err
 	}
 
@@ -205,6 +200,9 @@ func (s *segmentReader) readSegmentColumnsFromFooter(rows int, names []string, w
 		}
 		colStats, err := s.readColumnHeader()
 		if err != nil {
+			return vector.Batch{}, SegmentStats{}, err
+		}
+		if err := checkFooterColumnName(entry, colStats); err != nil {
 			return vector.Batch{}, SegmentStats{}, err
 		}
 		col, err := s.readColumnPayload(colStats)
@@ -232,22 +230,11 @@ func (s *segmentReader) readSegmentColumnsFromFooter(rows int, names []string, w
 	return batch, stats, nil
 }
 
-func (s *segmentReader) readSegmentStatsFromFooter(rows int, footer []columnFooterEntry) (SegmentStats, error) {
-	stats := SegmentStats{Rows: rows, Columns: make([]ColumnStats, 0, len(footer))}
-	for _, entry := range footer {
-		if err := s.seekToSegmentOffset(entry.Offset); err != nil {
-			return SegmentStats{}, err
-		}
-		colStats, err := s.readColumnHeader()
-		if err != nil {
-			return SegmentStats{}, err
-		}
-		stats.Columns = append(stats.Columns, colStats)
+func checkFooterColumnName(entry columnFooterEntry, stats ColumnStats) error {
+	if stats.Name != entry.Name {
+		return fmt.Errorf("segment footer offset for %q points to column %q", entry.Name, stats.Name)
 	}
-	if err := s.seekToSegmentEnd(); err != nil {
-		return SegmentStats{}, err
-	}
-	return stats, nil
+	return nil
 }
 
 func missingRequestedColumn(names []string, wanted map[string]struct{}) (string, bool) {

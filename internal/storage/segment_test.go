@@ -410,6 +410,23 @@ func BenchmarkReadSegmentColumnsInt64WithString(b *testing.B) {
 	}
 }
 
+func BenchmarkReadSegmentColumnsInt64AfterString(b *testing.B) {
+	b.ReportAllocs()
+
+	data := benchmarkStringInt64Segment(b)
+	b.ResetTimer()
+
+	for b.Loop() {
+		batch, _, err := ReadSegmentColumns(bytes.NewReader(data), "tenant_id")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if batch.Count != 100_000 {
+			b.Fatalf("count = %d, want 100000", batch.Count)
+		}
+	}
+}
+
 func BenchmarkWriteSegmentString(b *testing.B) {
 	b.ReportAllocs()
 
@@ -557,6 +574,31 @@ func benchmarkInt64StringSegment(b *testing.B) []byte {
 	batch := mustBatch(b,
 		vector.Column{Name: "tenant_id", Vector: vector.FromInt64(ids)},
 		vector.Column{Name: "event_type", Vector: vector.FromString(events)},
+	)
+
+	var buf bytes.Buffer
+	if _, err := WriteSegment(&buf, batch); err != nil {
+		b.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func benchmarkStringInt64Segment(b *testing.B) []byte {
+	b.Helper()
+
+	events := make([]string, 100_000)
+	for i := range events {
+		events[i] = "event"
+	}
+
+	ids := make([]int64, 100_000)
+	for i := range ids {
+		ids[i] = int64(i % 1024)
+	}
+
+	batch := mustBatch(b,
+		vector.Column{Name: "event_type", Vector: vector.FromString(events)},
+		vector.Column{Name: "tenant_id", Vector: vector.FromInt64(ids)},
 	)
 
 	var buf bytes.Buffer

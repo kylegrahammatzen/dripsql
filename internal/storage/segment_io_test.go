@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
@@ -103,4 +104,69 @@ func TestReadSegmentRejectsTruncatedInput(t *testing.T) {
 			t.Fatalf("expected stats error for truncated segment length %d", i)
 		}
 	}
+}
+
+func TestReadSegmentColumnsRejectsFooterOffsetNameMismatch(t *testing.T) {
+	data := writeSegmentBytes(t,
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout"})},
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42})},
+	)
+
+	eventOffset := footerColumnOffset(t, data, "event_type")
+	data = replaceFooterColumnOffset(t, data, "tenant_id", eventOffset)
+
+	_, _, err := ReadSegmentColumns(bytes.NewReader(data), "tenant_id")
+	if err == nil {
+		t.Fatal("expected footer offset mismatch error")
+	}
+	if !strings.Contains(err.Error(), `footer offset for "tenant_id" points to column "event_type"`) {
+		t.Fatalf("error = %q, want footer offset mismatch", err)
+	}
+}
+
+func footerColumnOffset(t testing.TB, data []byte, column string) uint64 {
+	t.Helper()
+
+	_, _, offsetPos := footerColumnEntry(t, data, column)
+	return binary.LittleEndian.Uint64(data[offsetPos:])
+}
+
+func replaceFooterColumnOffset(t testing.TB, data []byte, column string, offset uint64) []byte {
+	t.Helper()
+
+	copyData := append([]byte(nil), data...)
+	_, _, offsetPos := footerColumnEntry(t, copyData, column)
+	binary.LittleEndian.PutUint64(copyData[offsetPos:], offset)
+	return copyData
+}
+
+func footerColumnEntry(t testing.TB, data []byte, column string) (footerStart int, entryName string, offsetPos int) {
+	t.Helper()
+
+	if len(data) < footerTrailerLen {
+		t.Fatalf("segment len = %d, want footer trailer", len(data))
+	}
+	trailerStart := len(data) - footerTrailerLen
+	footerLen := int(binary.LittleEndian.Uint64(data[trailerStart:]))
+	footerStart = trailerStart - footerLen
+	if footerStart < segmentHeaderLen {
+		t.Fatalf("footer start = %d, want at least %d", footerStart, segmentHeaderLen)
+	}
+
+	offset := footerStart
+	count := int(binary.LittleEndian.Uint32(data[offset:]))
+	offset += 4
+	for range count {
+		nameLen := int(binary.LittleEndian.Uint16(data[offset:]))
+		offset += 2
+		entryName = string(data[offset : offset+nameLen])
+		offset += nameLen
+		offsetPos = offset
+		offset += 8
+		if entryName == column {
+			return footerStart, entryName, offsetPos
+		}
+	}
+	t.Fatalf("missing footer entry for %q", column)
+	return 0, "", 0
 }

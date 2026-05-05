@@ -113,11 +113,10 @@ func (s *segmentWriter) writeColumnHeader(stats ColumnStats, encodedLen uint64) 
 }
 
 type segmentReader struct {
-	r          io.Reader
-	start      int64
-	end        int64
-	hasBounds  bool
-	footerRead bool
+	r         io.Reader
+	start     int64
+	end       int64
+	hasBounds bool
 }
 
 func newSegmentReader(r io.Reader) *segmentReader {
@@ -279,20 +278,25 @@ func (s *segmentReader) readFooter(expectedColumns int) ([]columnFooterEntry, bo
 	if err != nil {
 		return nil, true, err
 	}
-	s.footerRead = true
 	return entries, true, nil
 }
 
-func (s *segmentReader) finishSegment(expectedColumns int) error {
-	if _, ok := s.r.(io.ReadSeeker); ok && s.hasBounds {
-		if !s.footerRead {
-			if _, _, err := s.readFooter(expectedColumns); err != nil {
-				return err
-			}
-		}
-		return s.seekToSegmentEnd()
+func (s *segmentReader) finishSegmentSequential(expectedColumns int) error {
+	if err := s.readFooterSequential(expectedColumns); err != nil {
+		return err
 	}
-	return s.readFooterSequential(expectedColumns)
+	seeker, ok := s.r.(io.Seeker)
+	if !ok || !s.hasBounds {
+		return nil
+	}
+	current, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	if current != s.end {
+		return fmt.Errorf("segment length mismatch: ended at offset %d, want %d", current-s.start, s.end-s.start)
+	}
+	return nil
 }
 
 func (s *segmentReader) seekToSegmentOffset(offset uint64) error {
@@ -334,11 +338,11 @@ func (s *segmentReader) readFooterSequential(expectedColumns int) error {
 	}
 	footerLen := uint64(4)
 	for range count {
-		name, err := readString16(s.r)
+		nameLen, err := s.skipString16()
 		if err != nil {
 			return err
 		}
-		footerLen += uint64(2 + len(name))
+		footerLen += uint64(2 + nameLen)
 		var offsetBuf [8]byte
 		if err := readFull(s.r, offsetBuf[:]); err != nil {
 			return err
@@ -357,6 +361,18 @@ func (s *segmentReader) readFooterSequential(expectedColumns int) error {
 		return fmt.Errorf("invalid segment footer magic %q", string(trailer[8:]))
 	}
 	return nil
+}
+
+func (s *segmentReader) skipString16() (int, error) {
+	var lengthBuf [2]byte
+	if err := readFull(s.r, lengthBuf[:]); err != nil {
+		return 0, err
+	}
+	length := int(binary.LittleEndian.Uint16(lengthBuf[:]))
+	if err := s.skip(length); err != nil {
+		return 0, err
+	}
+	return length, nil
 }
 
 func parseFooterPayload(footer []byte, expectedColumns int) ([]columnFooterEntry, error) {
@@ -404,14 +420,7 @@ func decodeColumnFixedHeader(name string, fixed []byte) (ColumnStats, error) {
 	offset += 8
 	max := int64(binary.LittleEndian.Uint64(fixed[offset:]))
 
-	countLabel := "column count"
-	encodedLenLabel := "column encoded length"
-	if name != "" {
-		countLabel = fmt.Sprintf("column %q count", name)
-		encodedLenLabel = fmt.Sprintf("column %q encoded length", name)
-	}
-
-	columnCount, err := checkedInt(countLabel, count)
+	columnCount, err := checkedColumnInt(name, "count", count)
 	if err != nil {
 		return ColumnStats{}, err
 	}
@@ -421,7 +430,7 @@ func decodeColumnFixedHeader(name string, fixed []byte) (ColumnStats, error) {
 		}
 		return ColumnStats{}, fmt.Errorf("encoded column %q is too large: %d", name, encodedLen)
 	}
-	columnEncodedLen, err := checkedInt(encodedLenLabel, encodedLen)
+	columnEncodedLen, err := checkedColumnInt(name, "encoded length", encodedLen)
 	if err != nil {
 		return ColumnStats{}, err
 	}
@@ -435,6 +444,17 @@ func decodeColumnFixedHeader(name string, fixed []byte) (ColumnStats, error) {
 		MaxInt64:   max,
 		EncodedLen: columnEncodedLen,
 	}, nil
+}
+
+func checkedColumnInt(column string, field string, value uint64) (int, error) {
+	maxInt := uint64(^uint(0) >> 1)
+	if value > maxInt {
+		if column == "" {
+			return 0, fmt.Errorf("column %s overflows int: %d", field, value)
+		}
+		return 0, fmt.Errorf("column %q %s overflows int: %d", column, field, value)
+	}
+	return int(value), nil
 }
 
 func writeString16(w io.Writer, value string) error {

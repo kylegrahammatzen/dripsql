@@ -345,13 +345,38 @@ func scanDictionaryStringEqualPayload(payload []byte, stats ColumnStats, value s
 	if !found {
 		return scratch, nil
 	}
-	for row := range stats.Count {
-		id := stringDictionaryRowID(ids, idWidth, row)
-		if uint64(id) >= uint64(dictCount) {
-			return nil, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+	switch idWidth {
+	case 1:
+		target := byte(targetID)
+		for row := 0; row < stats.Count; row++ {
+			id := ids[row]
+			if int(id) >= dictCount {
+				return nil, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+			}
+			if id == target {
+				scratch = append(scratch, uint32(row))
+			}
 		}
-		if id == targetID {
-			scratch = append(scratch, uint32(row))
+	case 2:
+		target := uint16(targetID)
+		for row := 0; row < stats.Count; row++ {
+			id := binary.LittleEndian.Uint16(ids[row*2:])
+			if int(id) >= dictCount {
+				return nil, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+			}
+			if id == target {
+				scratch = append(scratch, uint32(row))
+			}
+		}
+	case 4:
+		for row := 0; row < stats.Count; row++ {
+			id := binary.LittleEndian.Uint32(ids[row*4:])
+			if uint64(id) >= uint64(dictCount) {
+				return nil, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+			}
+			if id == targetID {
+				scratch = append(scratch, uint32(row))
+			}
 		}
 	}
 	return scratch, nil
@@ -363,13 +388,38 @@ func countDictionaryStringEqualPayload(payload []byte, stats ColumnStats, value 
 		return 0, err
 	}
 	count := 0
-	for row := range stats.Count {
-		id := stringDictionaryRowID(ids, idWidth, row)
-		if uint64(id) >= uint64(dictCount) {
-			return 0, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+	switch idWidth {
+	case 1:
+		target := byte(targetID)
+		for row := 0; row < stats.Count; row++ {
+			id := ids[row]
+			if int(id) >= dictCount {
+				return 0, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+			}
+			if id == target {
+				count++
+			}
 		}
-		if id == targetID {
-			count++
+	case 2:
+		target := uint16(targetID)
+		for row := 0; row < stats.Count; row++ {
+			id := binary.LittleEndian.Uint16(ids[row*2:])
+			if int(id) >= dictCount {
+				return 0, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+			}
+			if id == target {
+				count++
+			}
+		}
+	case 4:
+		for row := 0; row < stats.Count; row++ {
+			id := binary.LittleEndian.Uint32(ids[row*4:])
+			if uint64(id) >= uint64(dictCount) {
+				return 0, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+			}
+			if id == targetID {
+				count++
+			}
 		}
 	}
 	return count, nil
@@ -386,6 +436,12 @@ func findStringDictionaryID(payload []byte, stats ColumnStats, value string) (ta
 	offset++
 	if idWidth != 1 && idWidth != 2 && idWidth != 4 {
 		return 0, nil, 0, 0, false, fmt.Errorf("unsupported string dictionary id width %d", idWidth)
+	}
+	if idWidth == 1 && dictCount > 1<<8 {
+		return 0, nil, 0, 0, false, fmt.Errorf("string dictionary value count %d exceeds id width %d", dictCount, idWidth)
+	}
+	if idWidth == 2 && dictCount > 1<<16 {
+		return 0, nil, 0, 0, false, fmt.Errorf("string dictionary value count %d exceeds id width %d", dictCount, idWidth)
 	}
 	if dictCount > stats.Count {
 		return 0, nil, 0, 0, false, fmt.Errorf("string dictionary value count %d exceeds row count %d", dictCount, stats.Count)
@@ -418,19 +474,6 @@ func findStringDictionaryID(payload []byte, stats ColumnStats, value string) (ta
 		return 0, nil, 0, 0, false, fmt.Errorf("trailing string bytes: %d", len(payload)-offset-idsLen)
 	}
 	return targetID, payload[offset : offset+idsLen], idWidth, dictCount, found, nil
-}
-
-func stringDictionaryRowID(ids []byte, idWidth int, row int) uint32 {
-	switch idWidth {
-	case 1:
-		return uint32(ids[row])
-	case 2:
-		return uint32(binary.LittleEndian.Uint16(ids[row*2:]))
-	case 4:
-		return binary.LittleEndian.Uint32(ids[row*4:])
-	default:
-		return 0
-	}
 }
 
 func bytesEqualString(buf []byte, value string) bool {
