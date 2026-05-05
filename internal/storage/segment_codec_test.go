@@ -22,6 +22,9 @@ func TestEncodeStringUsesDictionaryWhenSmaller(t *testing.T) {
 	if len(encoded) >= plainStringPayloadLen(values) {
 		t.Fatalf("encoded length = %d, want less than plain length %d", len(encoded), plainStringPayloadLen(values))
 	}
+	if !stringDictionaryIDEncodingIsPacked(int(encoded[5])) {
+		t.Fatalf("string dictionary id encoding = %d, want packed", encoded[5])
+	}
 
 	decoded, err := decodeString(encoded, len(values))
 	if err != nil {
@@ -58,6 +61,9 @@ func TestEncodeStringDictionaryHandlesEmptyStrings(t *testing.T) {
 	if encoded[0] != stringCodecDictionary {
 		t.Fatalf("string codec = %d, want dictionary", encoded[0])
 	}
+	if stringDictionaryPackedBitWidth(int(encoded[5])) != 0 {
+		t.Fatalf("string dictionary id encoding = %d, want packed bit width 0", encoded[5])
+	}
 
 	decoded, err := decodeString(encoded, len(values))
 	if err != nil {
@@ -89,6 +95,18 @@ func TestDecodeStringRejectsBadPayload(t *testing.T) {
 	shortDictionaryData = append(shortDictionaryData, 1)
 	shortDictionaryData = binary.LittleEndian.AppendUint32(shortDictionaryData, 2)
 	shortDictionaryData = append(shortDictionaryData, 'a')
+	shortPackedIDs := []byte{stringCodecDictionary}
+	shortPackedIDs = binary.LittleEndian.AppendUint32(shortPackedIDs, 2)
+	shortPackedIDs = append(shortPackedIDs, stringDictionaryPackedIDFlag|1)
+	shortPackedIDs = binary.LittleEndian.AppendUint32(shortPackedIDs, 1)
+	shortPackedIDs = append(shortPackedIDs, 'a')
+	shortPackedIDs = binary.LittleEndian.AppendUint32(shortPackedIDs, 1)
+	shortPackedIDs = append(shortPackedIDs, 'b')
+	packedIDOutOfRange := []byte{stringCodecDictionary}
+	packedIDOutOfRange = binary.LittleEndian.AppendUint32(packedIDOutOfRange, 1)
+	packedIDOutOfRange = append(packedIDOutOfRange, stringDictionaryPackedIDFlag|1)
+	packedIDOutOfRange = binary.LittleEndian.AppendUint32(packedIDOutOfRange, 1)
+	packedIDOutOfRange = append(packedIDOutOfRange, 'a', 1)
 
 	tests := []struct {
 		name    string
@@ -102,9 +120,12 @@ func TestDecodeStringRejectsBadPayload(t *testing.T) {
 		{name: "plain trailing", encoded: []byte{stringCodecPlain, 0}, wantErr: "trailing string bytes"},
 		{name: "short dictionary header", encoded: []byte{stringCodecDictionary, 0, 0, 0}, wantErr: "short string dictionary header"},
 		{name: "bad dictionary id width", encoded: []byte{stringCodecDictionary, 0, 0, 0, 0, 3}, wantErr: "unsupported string dictionary id width"},
+		{name: "bad packed bit width", encoded: []byte{stringCodecDictionary, 0, 0, 0, 0, stringDictionaryPackedIDFlag | 33}, wantErr: "unsupported string dictionary packed bit width"},
 		{name: "short dictionary data", encoded: shortDictionaryData, count: 1, wantErr: "short string dictionary data"},
 		{name: "short dictionary ids", encoded: append(slices.Clone(validOneValueDictionary), 0), count: 2, wantErr: "short string dictionary ids"},
 		{name: "dictionary id out of range", encoded: append(slices.Clone(validOneValueDictionary), 1), count: 1, wantErr: "out of range"},
+		{name: "short packed ids", encoded: shortPackedIDs, count: 2, wantErr: "short string dictionary ids"},
+		{name: "packed id out of range", encoded: packedIDOutOfRange, count: 1, wantErr: "out of range"},
 	}
 
 	for _, tt := range tests {

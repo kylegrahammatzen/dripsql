@@ -14,6 +14,7 @@ const (
 	maxLinearInt64DictionaryValues       = 16
 	stringCodecPlain                byte = 1
 	stringCodecDictionary           byte = 2
+	stringDictionaryPackedIDFlag    byte = 1 << 7
 	maxLinearStringDictionaryValues      = 16
 )
 
@@ -227,7 +228,7 @@ func appendPackedInt64DictionaryIDs(out []byte, values vector.Int64, dictValues 
 		if !ok {
 			return nil, fmt.Errorf("missing int64 dictionary id")
 		}
-		setPackedInt64DictionaryID(ids, row, bitWidth, id)
+		setPackedDictionaryID(ids, row, bitWidth, id)
 	}
 	return out, nil
 }
@@ -330,7 +331,7 @@ func int64DictionaryPackedBitWidth(idEncoding int) int {
 	return idEncoding &^ int(int64DictionaryPackedIDFlag)
 }
 
-func setPackedInt64DictionaryID(ids []byte, row int, bitWidth int, id uint32) {
+func setPackedDictionaryID(ids []byte, row int, bitWidth int, id uint32) {
 	bitOffset := row * bitWidth
 	byteOffset := bitOffset / 8
 	shift := uint(bitOffset % 8)
@@ -350,13 +351,12 @@ func encodeStringVector(values vector.String) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	idWidth := stringDictionaryIDWidth(len(dictValues))
-	dictLen, err := stringDictionaryEncodedLen(dictDataLen, values.Len(), idWidth)
+	idEncoding, dictLen, err := chooseStringDictionaryIDEncoding(dictDataLen, len(dictValues), values.Len())
 	if err != nil {
 		return nil, err
 	}
 	if len(dictValues) > 0 && dictLen < plainLen {
-		return encodeStringDictionary(values, dictValues, dictIDs, dictRowIDs, idWidth, dictLen)
+		return encodeStringDictionary(values, dictValues, dictIDs, dictRowIDs, idEncoding, dictLen)
 	}
 	return encodeStringPlain(values, plainLen), nil
 }
@@ -426,17 +426,20 @@ func encodeStringPlain(values vector.String, size int) []byte {
 	return out
 }
 
-func encodeStringDictionary(values vector.String, dictValues []string, dictIDs map[string]uint32, dictRowIDs []byte, idWidth int, size int) ([]byte, error) {
+func encodeStringDictionary(values vector.String, dictValues []string, dictIDs map[string]uint32, dictRowIDs []byte, idEncoding int, size int) ([]byte, error) {
 	out := make([]byte, 0, size)
 	out = append(out, stringCodecDictionary)
 	out = binary.LittleEndian.AppendUint32(out, uint32(len(dictValues)))
-	out = append(out, byte(idWidth))
+	out = append(out, byte(idEncoding))
 
 	for _, value := range dictValues {
 		out = binary.LittleEndian.AppendUint32(out, uint32(len(value)))
 		out = append(out, value...)
 	}
-	if idWidth == 1 && len(dictRowIDs) == values.Len() {
+	if stringDictionaryIDEncodingIsPacked(idEncoding) {
+		return appendPackedStringDictionaryIDs(out, values, dictValues, dictIDs, stringDictionaryPackedBitWidth(idEncoding))
+	}
+	if idEncoding == 1 && len(dictRowIDs) == values.Len() {
 		out = append(out, dictRowIDs...)
 		return out, nil
 	}
@@ -445,7 +448,7 @@ func encodeStringDictionary(values vector.String, dictValues []string, dictIDs m
 		if !ok {
 			return nil, fmt.Errorf("missing string dictionary id at row %d", i)
 		}
-		switch idWidth {
+		switch idEncoding {
 		case 1:
 			out = append(out, byte(id))
 		case 2:
@@ -453,8 +456,29 @@ func encodeStringDictionary(values vector.String, dictValues []string, dictIDs m
 		case 4:
 			out = binary.LittleEndian.AppendUint32(out, id)
 		default:
-			return nil, fmt.Errorf("unsupported string dictionary id width %d", idWidth)
+			return nil, fmt.Errorf("unsupported string dictionary id width %d", idEncoding)
 		}
+	}
+	return out, nil
+}
+
+func appendPackedStringDictionaryIDs(out []byte, values vector.String, dictValues []string, dictIDs map[string]uint32, bitWidth int) ([]byte, error) {
+	idsLen, err := packedStringDictionaryIDsLen(values.Len(), bitWidth)
+	if err != nil {
+		return nil, err
+	}
+	idsOffset := len(out)
+	out = append(out, make([]byte, idsLen)...)
+	if bitWidth == 0 {
+		return out, nil
+	}
+	ids := out[idsOffset:]
+	for row := 0; row < values.Len(); row++ {
+		id, ok := stringDictionaryID(values.Value(row), dictValues, dictIDs)
+		if !ok {
+			return nil, fmt.Errorf("missing string dictionary id at row %d", row)
+		}
+		setPackedDictionaryID(ids, row, bitWidth, id)
 	}
 	return out, nil
 }
@@ -482,17 +506,66 @@ func stringDictionaryIDWidth(dictCount int) int {
 	return 4
 }
 
-func stringDictionaryEncodedLen(dictDataLen int, count int, idWidth int) (int, error) {
+func chooseStringDictionaryIDEncoding(dictDataLen int, dictCount int, count int) (int, int, error) {
+	fixedEncoding := stringDictionaryIDWidth(dictCount)
+	fixedLen, err := stringDictionaryEncodedLen(dictDataLen, count, fixedEncoding)
+	if err != nil {
+		return 0, 0, err
+	}
+	packedBitWidth := stringDictionaryBitWidth(dictCount)
+	packedEncoding := int(stringDictionaryPackedIDFlag) | packedBitWidth
+	packedLen, err := stringDictionaryEncodedLen(dictDataLen, count, packedEncoding)
+	if err != nil {
+		return 0, 0, err
+	}
+	if packedLen < fixedLen {
+		return packedEncoding, packedLen, nil
+	}
+	return fixedEncoding, fixedLen, nil
+}
+
+func stringDictionaryBitWidth(dictCount int) int {
+	return int64DictionaryBitWidth(dictCount)
+}
+
+func stringDictionaryEncodedLen(dictDataLen int, count int, idEncoding int) (int, error) {
 	size := 1 + 4 + 1
 	size, err := checkedAddInt("string dictionary encoded length", size, dictDataLen)
 	if err != nil {
 		return 0, err
 	}
-	idsLen, err := checkedMulInt("string dictionary ids length", count, idWidth)
+	idsLen, err := stringDictionaryIDsLen(count, idEncoding)
 	if err != nil {
 		return 0, err
 	}
 	return checkedAddInt("string dictionary encoded length", size, idsLen)
+}
+
+func stringDictionaryIDsLen(count int, idEncoding int) (int, error) {
+	if stringDictionaryIDEncodingIsPacked(idEncoding) {
+		return packedStringDictionaryIDsLen(count, stringDictionaryPackedBitWidth(idEncoding))
+	}
+	return checkedMulInt("string dictionary ids length", count, idEncoding)
+}
+
+func packedStringDictionaryIDsLen(count int, bitWidth int) (int, error) {
+	bitsLen, err := checkedMulInt("string dictionary packed id bits", count, bitWidth)
+	if err != nil {
+		return 0, err
+	}
+	bitsLen, err = checkedAddInt("string dictionary packed id bits", bitsLen, 7)
+	if err != nil {
+		return 0, err
+	}
+	return bitsLen / 8, nil
+}
+
+func stringDictionaryIDEncodingIsPacked(idEncoding int) bool {
+	return idEncoding&int(stringDictionaryPackedIDFlag) != 0
+}
+
+func stringDictionaryPackedBitWidth(idEncoding int) int {
+	return idEncoding &^ int(stringDictionaryPackedIDFlag)
 }
 
 func (s *segmentReader) ReadColumn() (vector.Column, ColumnStats, error) {
@@ -626,7 +699,7 @@ func decodeDictionaryInt64(encoded []byte, count int) ([]int64, error) {
 
 func decodePackedDictionaryInt64(values []int64, dict []byte, ids []byte, bitWidth int, dictCount int) ([]int64, error) {
 	for row := range values {
-		id := packedInt64DictionaryIDAt(ids, row, bitWidth)
+		id := packedDictionaryIDAt(ids, row, bitWidth)
 		if uint64(id) >= uint64(dictCount) {
 			return nil, fmt.Errorf("int64 dictionary id %d out of range at row %d", id, row)
 		}
@@ -711,7 +784,7 @@ func validateInt64DictionaryIDEncoding(stats ColumnStats, dictCount int, idEncod
 	return nil
 }
 
-func packedInt64DictionaryIDAt(ids []byte, row int, bitWidth int) uint32 {
+func packedDictionaryIDAt(ids []byte, row int, bitWidth int) uint32 {
 	if bitWidth == 0 {
 		return 0
 	}
@@ -795,13 +868,10 @@ func decodeDictionaryString(encoded []byte, count int) (vector.String, error) {
 		return vector.String{}, err
 	}
 	offset += 4
-	idWidth := int(encoded[offset])
+	idEncoding := int(encoded[offset])
 	offset++
-	if idWidth != 1 && idWidth != 2 && idWidth != 4 {
-		return vector.String{}, fmt.Errorf("unsupported string dictionary id width %d", idWidth)
-	}
-	if dictCount > count {
-		return vector.String{}, fmt.Errorf("string dictionary value count %d exceeds row count %d", dictCount, count)
+	if err := validateStringDictionaryIDEncoding(ColumnStats{Count: count}, dictCount, idEncoding); err != nil {
+		return vector.String{}, err
 	}
 	minDictLen, err := checkedMulInt("string dictionary lengths", dictCount, 4)
 	if err != nil {
@@ -828,7 +898,7 @@ func decodeDictionaryString(encoded []byte, count int) (vector.String, error) {
 		offset += int(length)
 	}
 
-	idsLen, err := checkedMulInt("string dictionary ids length", count, idWidth)
+	idsLen, err := stringDictionaryIDsLen(count, idEncoding)
 	if err != nil {
 		return vector.String{}, err
 	}
@@ -841,22 +911,78 @@ func decodeDictionaryString(encoded []byte, count int) (vector.String, error) {
 
 	ranges := make([]uint64, count)
 	ids := encoded[offset : offset+idsLen]
+	if stringDictionaryIDEncodingIsPacked(idEncoding) {
+		return decodePackedDictionaryString(encoded, ranges, dictRanges, ids, stringDictionaryPackedBitWidth(idEncoding), dictCount)
+	}
 	for row := range ranges {
-		var id uint32
-		switch idWidth {
-		case 1:
-			id = uint32(ids[row])
-		case 2:
-			id = uint32(binary.LittleEndian.Uint16(ids[row*2:]))
-		case 4:
-			id = binary.LittleEndian.Uint32(ids[row*4:])
+		id, err := fixedDictionaryIDAt(ids, row, idEncoding, dictCount, "string")
+		if err != nil {
+			return vector.String{}, err
 		}
+		ranges[row] = dictRanges[id]
+	}
+	return vector.FromStringDataUnsafe(encoded, ranges), nil
+}
+
+func decodePackedDictionaryString(encoded []byte, ranges []uint64, dictRanges []uint64, ids []byte, bitWidth int, dictCount int) (vector.String, error) {
+	for row := range ranges {
+		id := packedDictionaryIDAt(ids, row, bitWidth)
 		if uint64(id) >= uint64(dictCount) {
 			return vector.String{}, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
 		}
 		ranges[row] = dictRanges[id]
 	}
 	return vector.FromStringDataUnsafe(encoded, ranges), nil
+}
+
+func fixedDictionaryIDAt(ids []byte, row int, idEncoding int, dictCount int, label string) (uint32, error) {
+	var id uint32
+	switch idEncoding {
+	case 1:
+		id = uint32(ids[row])
+	case 2:
+		id = uint32(binary.LittleEndian.Uint16(ids[row*2:]))
+	case 4:
+		id = binary.LittleEndian.Uint32(ids[row*4:])
+	}
+	if uint64(id) >= uint64(dictCount) {
+		return 0, fmt.Errorf("%s dictionary id %d out of range at row %d", label, id, row)
+	}
+	return id, nil
+}
+
+func validateStringDictionaryIDEncoding(stats ColumnStats, dictCount int, idEncoding int) error {
+	if stringDictionaryIDEncodingIsPacked(idEncoding) {
+		bitWidth := stringDictionaryPackedBitWidth(idEncoding)
+		if bitWidth > 32 {
+			return fmt.Errorf("unsupported string dictionary packed bit width %d", bitWidth)
+		}
+		if bitWidth == 0 {
+			if dictCount > 1 {
+				return fmt.Errorf("string dictionary value count %d exceeds packed bit width %d", dictCount, bitWidth)
+			}
+		} else if uint64(dictCount) > uint64(1)<<uint(bitWidth) {
+			return fmt.Errorf("string dictionary value count %d exceeds packed bit width %d", dictCount, bitWidth)
+		}
+		if dictCount > stats.Count {
+			return fmt.Errorf("string dictionary value count %d exceeds row count %d", dictCount, stats.Count)
+		}
+		return nil
+	}
+
+	if idEncoding != 1 && idEncoding != 2 && idEncoding != 4 {
+		return fmt.Errorf("unsupported string dictionary id width %d", idEncoding)
+	}
+	if idEncoding == 1 && dictCount > 1<<8 {
+		return fmt.Errorf("string dictionary value count %d exceeds id width %d", dictCount, idEncoding)
+	}
+	if idEncoding == 2 && dictCount > 1<<16 {
+		return fmt.Errorf("string dictionary value count %d exceeds id width %d", dictCount, idEncoding)
+	}
+	if dictCount > stats.Count {
+		return fmt.Errorf("string dictionary value count %d exceeds row count %d", dictCount, stats.Count)
+	}
+	return nil
 }
 
 func checkedInt(name string, value uint64) (int, error) {

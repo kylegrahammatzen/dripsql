@@ -185,6 +185,16 @@ func TestCountSegmentStringEqualBytes(t *testing.T) {
 		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "cancel", "checkout"})},
 		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 11, 42})},
 	)
+	_, payload, found, err := findColumnPayloadBytes(data, "event_type")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("missing event_type column")
+	}
+	if !stringDictionaryIDEncodingIsPacked(int(payload[5])) {
+		t.Fatalf("string dictionary id encoding = %d, want packed", payload[5])
+	}
 
 	count, ok, err := CountSegmentStringEqualBytes(data, "event_type", "checkout")
 	if err != nil {
