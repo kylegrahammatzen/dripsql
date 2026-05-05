@@ -59,12 +59,9 @@ func (s *Scanner) CountInt64Equal(column string, value int64) (int, error) {
 
 	count := 0
 	for _, segment := range t.manifest.Segments {
-		stats, ok := segment.Stats.Column(column)
-		if !ok {
-			return 0, fmt.Errorf("segment %d missing column %q", segment.ID, column)
-		}
-		if stats.Kind != vector.KindInt64 {
-			return 0, fmt.Errorf("segment %d column %q is %s, want int64", segment.ID, column, stats.Kind)
+		stats, err := segmentColumnStats(segment, column, vector.KindInt64)
+		if err != nil {
+			return 0, err
 		}
 		if stats.HasMinMax && (value < stats.MinInt64 || value > stats.MaxInt64) {
 			s.markSkipped(segment)
@@ -110,12 +107,9 @@ func (s *Scanner) CountStringEqual(column string, value string) (int, error) {
 
 	count := 0
 	for _, segment := range t.manifest.Segments {
-		stats, ok := segment.Stats.Column(column)
-		if !ok {
-			return 0, fmt.Errorf("segment %d missing column %q", segment.ID, column)
-		}
-		if stats.Kind != vector.KindString {
-			return 0, fmt.Errorf("segment %d column %q is %s, want string", segment.ID, column, stats.Kind)
+		stats, err := segmentColumnStats(segment, column, vector.KindString)
+		if err != nil {
+			return 0, err
 		}
 
 		file, err := s.dataFile()
@@ -163,12 +157,9 @@ func (s *Scanner) GroupStringCountsInto(column string, counts map[string]int) (m
 	}
 	s.beginScan()
 	for _, segment := range t.manifest.Segments {
-		stats, ok := segment.Stats.Column(column)
-		if !ok {
-			return nil, fmt.Errorf("segment %d missing column %q", segment.ID, column)
-		}
-		if stats.Kind != vector.KindString {
-			return nil, fmt.Errorf("segment %d column %q is %s, want string", segment.ID, column, stats.Kind)
+		stats, err := segmentColumnStats(segment, column, vector.KindString)
+		if err != nil {
+			return nil, err
 		}
 
 		file, err := s.dataFile()
@@ -201,6 +192,17 @@ func segmentColumnRange(segment Segment, column string) (ColumnRange, bool) {
 		}
 	}
 	return ColumnRange{}, false
+}
+
+func segmentColumnStats(segment Segment, column string, kind vector.Kind) (storage.ColumnStats, error) {
+	stats, ok := segment.Stats.Column(column)
+	if !ok {
+		return storage.ColumnStats{}, errMissingSegmentColumn(segment, column)
+	}
+	if stats.Kind != kind {
+		return storage.ColumnStats{}, errWrongSegmentColumnKind(segment, column, stats.Kind, kind.String())
+	}
+	return stats, nil
 }
 
 func scanSegmentInt64Equal(reader io.ReaderAt, segment Segment, stats storage.ColumnStats, value int64, scratch []byte) (int, []byte, int64, error) {

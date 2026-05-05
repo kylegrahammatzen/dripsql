@@ -36,12 +36,9 @@ func (s *Scanner) CountInt64EqualParallel(column string, value int64, workers in
 
 	jobs := make([]countScanJob, 0, len(t.manifest.Segments))
 	for _, segment := range t.manifest.Segments {
-		stats, ok := segment.Stats.Column(column)
-		if !ok {
-			return 0, errMissingSegmentColumn(segment, column)
-		}
-		if stats.Kind != vector.KindInt64 {
-			return 0, errWrongSegmentColumnKind(segment, column, stats.Kind, "int64")
+		stats, err := segmentColumnStats(segment, column, vector.KindInt64)
+		if err != nil {
+			return 0, err
 		}
 		if stats.HasMinMax && (value < stats.MinInt64 || value > stats.MaxInt64) {
 			s.markSkipped(segment)
@@ -66,12 +63,9 @@ func (s *Scanner) CountStringEqualParallel(column string, value string, workers 
 
 	jobs := make([]countScanJob, 0, len(t.manifest.Segments))
 	for _, segment := range t.manifest.Segments {
-		stats, ok := segment.Stats.Column(column)
-		if !ok {
-			return 0, errMissingSegmentColumn(segment, column)
-		}
-		if stats.Kind != vector.KindString {
-			return 0, errWrongSegmentColumnKind(segment, column, stats.Kind, "string")
+		stats, err := segmentColumnStats(segment, column, vector.KindString)
+		if err != nil {
+			return 0, err
 		}
 		jobs = append(jobs, countScanJob{segment: segment, stats: stats})
 	}

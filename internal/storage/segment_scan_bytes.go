@@ -152,10 +152,10 @@ func CountSegmentStringEqualAt(r io.ReaderAt, segmentOffset int64, segmentBytes 
 
 // GroupSegmentStringCountsAtCached reads only the requested string column and reuses stable map keys from keyScratch.
 func GroupSegmentStringCountsAtCached(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, counts map[string]int, scratch []byte, keyScratch []string) (found bool, outScratch []byte, outKeyScratch []string, bytesRead int64, err error) {
-	return groupSegmentStringCountsAt(r, segmentOffset, segmentBytes, column, counts, scratch, keyScratch, true)
+	return groupSegmentStringCountsAt(r, segmentOffset, segmentBytes, column, counts, scratch, keyScratch)
 }
 
-func groupSegmentStringCountsAt(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, counts map[string]int, scratch []byte, keyScratch []string, cacheKeys bool) (found bool, outScratch []byte, outKeyScratch []string, bytesRead int64, err error) {
+func groupSegmentStringCountsAt(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, counts map[string]int, scratch []byte, keyScratch []string) (found bool, outScratch []byte, outKeyScratch []string, bytesRead int64, err error) {
 	loc, scratch, found, bytesRead, err := locateColumnPayloadAt(r, segmentOffset, segmentBytes, column, scratch)
 	if err != nil || !found {
 		return found, scratch, keyScratch, bytesRead, err
@@ -169,7 +169,7 @@ func groupSegmentStringCountsAt(r io.ReaderAt, segmentOffset int64, segmentBytes
 	if err != nil {
 		return true, scratch, keyScratch, bytesRead, err
 	}
-	keyScratch, err = groupStringCountsPayloadWithKeyCache(payload, loc.stats, counts, keyScratch, cacheKeys)
+	keyScratch, err = groupStringCountsPayloadWithKeyCache(payload, loc.stats, counts, keyScratch, true)
 	if err != nil {
 		return true, scratch, keyScratch, bytesRead, err
 	}
@@ -184,9 +184,9 @@ type segmentColumnLocation struct {
 
 // ColumnPayloadRange describes one column payload's byte range inside an encoded segment.
 type ColumnPayloadRange struct {
-	Name   string
-	Offset int64
-	Bytes  int64
+	Name   string `json:"name"`
+	Offset int64  `json:"offset"`
+	Bytes  int64  `json:"bytes"`
 }
 
 // SegmentColumnPayloadRanges returns segment-relative payload byte ranges for every column.
@@ -276,10 +276,10 @@ func CountColumnStringEqualAt(r io.ReaderAt, payloadOffset int64, payloadBytes i
 
 // GroupColumnStringCountsAtCached reads one string column payload range and reuses stable map keys from keyScratch.
 func GroupColumnStringCountsAtCached(r io.ReaderAt, payloadOffset int64, payloadBytes int64, stats ColumnStats, counts map[string]int, scratch []byte, keyScratch []string) (outScratch []byte, outKeyScratch []string, bytesRead int64, err error) {
-	return groupColumnStringCountsAt(r, payloadOffset, payloadBytes, stats, counts, scratch, keyScratch, true)
+	return groupColumnStringCountsAt(r, payloadOffset, payloadBytes, stats, counts, scratch, keyScratch)
 }
 
-func groupColumnStringCountsAt(r io.ReaderAt, payloadOffset int64, payloadBytes int64, stats ColumnStats, counts map[string]int, scratch []byte, keyScratch []string, cacheKeys bool) (outScratch []byte, outKeyScratch []string, bytesRead int64, err error) {
+func groupColumnStringCountsAt(r io.ReaderAt, payloadOffset int64, payloadBytes int64, stats ColumnStats, counts map[string]int, scratch []byte, keyScratch []string) (outScratch []byte, outKeyScratch []string, bytesRead int64, err error) {
 	if stats.Kind != vector.KindString {
 		return scratch, keyScratch, 0, fmt.Errorf("column %q is %s, want string", stats.Name, stats.Kind)
 	}
@@ -287,7 +287,7 @@ func groupColumnStringCountsAt(r io.ReaderAt, payloadOffset int64, payloadBytes 
 	if err != nil {
 		return scratch, keyScratch, bytesRead, err
 	}
-	keyScratch, err = groupStringCountsPayloadWithKeyCache(payload, stats, counts, keyScratch, cacheKeys)
+	keyScratch, err = groupStringCountsPayloadWithKeyCache(payload, stats, counts, keyScratch, true)
 	if err != nil {
 		return scratch, keyScratch, bytesRead, err
 	}

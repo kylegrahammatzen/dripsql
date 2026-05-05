@@ -98,18 +98,6 @@ func (t *Table) dataEnd() int64 {
 	return offset
 }
 
-func readColumnRanges(data []byte) ([]ColumnRange, error) {
-	ranges, err := storage.SegmentColumnPayloadRanges(data)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ColumnRange, 0, len(ranges))
-	for _, columnRange := range ranges {
-		out = append(out, ColumnRange{Name: columnRange.Name, Offset: columnRange.Offset, Bytes: columnRange.Bytes})
-	}
-	return out, nil
-}
-
 // Append writes batch as one or more immutable segments in this append session.
 func (a *Appender) Append(batch vector.Batch) error {
 	if a == nil || a.table == nil || a.file == nil || a.closed {
@@ -161,7 +149,7 @@ func (a *Appender) appendSegment(batch vector.Batch) error {
 	if err != nil {
 		return err
 	}
-	columnRanges, err := readColumnRanges(buf.Bytes())
+	columnRanges, err := storage.SegmentColumnPayloadRanges(buf.Bytes())
 	if err != nil {
 		return err
 	}

@@ -23,11 +23,7 @@ type Column struct {
 }
 
 // ColumnRange describes one encoded column payload range inside a segment.
-type ColumnRange struct {
-	Name   string `json:"name"`
-	Offset int64  `json:"offset"`
-	Bytes  int64  `json:"bytes"`
-}
+type ColumnRange = storage.ColumnPayloadRange
 
 // Segment describes one immutable segment recorded in a table manifest.
 type Segment struct {
