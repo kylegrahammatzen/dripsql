@@ -840,11 +840,16 @@ func countDictionaryStringEqualPayload(payload []byte, stats ColumnStats, value 
 }
 
 func groupDictionaryStringCountsPayload(payload []byte, stats ColumnStats, counts map[string]int) error {
-	dictRanges, ids, idEncoding, dictCount, err := parseStringDictionaryPayload(payload, stats)
+	dictOffset, ids, idEncoding, dictCount, err := parseStringDictionaryPayload(payload, stats)
 	if err != nil {
 		return err
 	}
-	dictCounts := make([]int, dictCount)
+	var smallDictCounts [64]int
+	dictCounts := smallDictCounts[:]
+	if dictCount > len(dictCounts) {
+		dictCounts = make([]int, dictCount)
+	}
+	dictCounts = dictCounts[:dictCount]
 	if stringDictionaryIDEncodingIsPacked(idEncoding) {
 		if err := groupPackedDictionaryStringCountsPayload(ids, stats, stringDictionaryPackedBitWidth(idEncoding), dictCount, dictCounts); err != nil {
 			return err
@@ -877,16 +882,35 @@ func groupDictionaryStringCountsPayload(payload []byte, stats ColumnStats, count
 			}
 		}
 	}
+	return addStringDictionaryCounts(payload, dictOffset, dictCounts, counts)
+}
+
+func addStringDictionaryCounts(payload []byte, offset int, dictCounts []int, counts map[string]int) error {
 	for id, count := range dictCounts {
-		if count == 0 {
-			continue
+		if len(payload)-offset < 4 {
+			return fmt.Errorf("short string dictionary length at value %d", id)
 		}
-		packed := dictRanges[id]
-		start := int(packed >> 32)
-		length := int(uint32(packed))
-		counts[string(payload[start:start+length])] += count
+		length := binary.LittleEndian.Uint32(payload[offset:])
+		offset += 4
+		if uint64(length) > uint64(len(payload)-offset) {
+			return fmt.Errorf("short string dictionary data at value %d", id)
+		}
+		if count != 0 {
+			addStringCount(counts, payload[offset:offset+int(length)], count)
+		}
+		offset += int(length)
 	}
 	return nil
+}
+
+func addStringCount(counts map[string]int, value []byte, count int) {
+	for key := range counts {
+		if bytesEqualString(value, key) {
+			counts[key] += count
+			return
+		}
+	}
+	counts[string(value)] = count
 }
 
 func scanPackedDictionaryStringEqualPayload(ids []byte, stats ColumnStats, targetID uint32, bitWidth int, dictCount int, scratch []uint32) ([]uint32, error) {
@@ -1122,9 +1146,9 @@ func findStringDictionaryID(payload []byte, stats ColumnStats, value string) (ta
 	return targetID, payload[offset : offset+idsLen], idEncoding, dictCount, found, nil
 }
 
-func parseStringDictionaryPayload(payload []byte, stats ColumnStats) (dictRanges []uint64, ids []byte, idEncoding int, dictCount int, err error) {
+func parseStringDictionaryPayload(payload []byte, stats ColumnStats) (dictOffset int, ids []byte, idEncoding int, dictCount int, err error) {
 	if len(payload) < 1+4+1 {
-		return nil, nil, 0, 0, fmt.Errorf("short string dictionary header")
+		return 0, nil, 0, 0, fmt.Errorf("short string dictionary header")
 	}
 	offset := 1
 	dictCount = int(binary.LittleEndian.Uint32(payload[offset:]))
@@ -1132,34 +1156,33 @@ func parseStringDictionaryPayload(payload []byte, stats ColumnStats) (dictRanges
 	idEncoding = int(payload[offset])
 	offset++
 	if err := validateStringDictionaryIDEncoding(stats, dictCount, idEncoding); err != nil {
-		return nil, nil, 0, 0, err
+		return 0, nil, 0, 0, err
 	}
 
-	dictRanges = make([]uint64, dictCount)
+	dictOffset = offset
 	for id := range dictCount {
 		if len(payload)-offset < 4 {
-			return nil, nil, 0, 0, fmt.Errorf("short string dictionary length at value %d", id)
+			return 0, nil, 0, 0, fmt.Errorf("short string dictionary length at value %d", id)
 		}
 		length := binary.LittleEndian.Uint32(payload[offset:])
 		offset += 4
 		if uint64(length) > uint64(len(payload)-offset) {
-			return nil, nil, 0, 0, fmt.Errorf("short string dictionary data at value %d", id)
+			return 0, nil, 0, 0, fmt.Errorf("short string dictionary data at value %d", id)
 		}
-		dictRanges[id] = uint64(offset)<<32 | uint64(length)
 		offset += int(length)
 	}
 
 	idsLen, err := stringDictionaryIDsLen(stats.Count, idEncoding)
 	if err != nil {
-		return nil, nil, 0, 0, err
+		return 0, nil, 0, 0, err
 	}
 	if len(payload)-offset < idsLen {
-		return nil, nil, 0, 0, fmt.Errorf("short string dictionary ids")
+		return 0, nil, 0, 0, fmt.Errorf("short string dictionary ids")
 	}
 	if len(payload)-offset > idsLen {
-		return nil, nil, 0, 0, fmt.Errorf("trailing string bytes: %d", len(payload)-offset-idsLen)
+		return 0, nil, 0, 0, fmt.Errorf("trailing string bytes: %d", len(payload)-offset-idsLen)
 	}
-	return dictRanges, payload[offset : offset+idsLen], idEncoding, dictCount, nil
+	return dictOffset, payload[offset : offset+idsLen], idEncoding, dictCount, nil
 }
 
 func bytesEqualString(buf []byte, value string) bool {
