@@ -139,7 +139,7 @@ func TestSegmentColumnPayloadRanges(t *testing.T) {
 		t.Fatalf("ranges = %d, want 2", len(ranges))
 	}
 	tenantRange := mustColumnPayloadRange(t, ranges, "tenant_id")
-	if tenantRange.Offset <= 0 || tenantRange.Bytes != 33 || tenantRange.Offset+tenantRange.Bytes >= int64(len(data)) {
+	if tenantRange.Offset <= 0 || tenantRange.Bytes != 31 || tenantRange.Offset+tenantRange.Bytes >= int64(len(data)) {
 		t.Fatalf("tenant range = %+v, segment bytes = %d", tenantRange, len(data))
 	}
 	tenantStats, _, found, err := findColumnPayloadBytes(data, "tenant_id")

@@ -116,15 +116,15 @@ func (s *segmentReader) selectDictionaryInt64EqualPayload(stats ColumnStats, val
 		return nil, err
 	}
 	dictCount := int(binary.LittleEndian.Uint32(header[:]))
-	idWidth := int(header[4])
-	if err := validateInt64DictionaryHeader(stats, dictCount, idWidth); err != nil {
+	idEncoding := int(header[4])
+	if err := validateInt64DictionaryIDEncoding(stats, dictCount, idEncoding); err != nil {
 		return nil, err
 	}
 	dictLen, err := checkedMulInt("int64 dictionary values length", dictCount, 8)
 	if err != nil {
 		return nil, err
 	}
-	idsLen, err := checkedMulInt("int64 dictionary ids length", stats.Count, idWidth)
+	idsLen, err := int64DictionaryIDsLen(stats.Count, idEncoding)
 	if err != nil {
 		return nil, err
 	}
@@ -153,11 +153,14 @@ func (s *segmentReader) selectDictionaryInt64EqualPayload(stats ColumnStats, val
 		}
 	}
 
-	return s.selectInt64DictionaryIDs(stats, targetID, idWidth, dictCount, found, scratch)
+	return s.selectInt64DictionaryIDs(stats, targetID, idEncoding, dictCount, found, scratch)
 }
 
-func (s *segmentReader) selectInt64DictionaryIDs(stats ColumnStats, targetID uint32, idWidth int, dictCount int, found bool, scratch []uint32) ([]uint32, error) {
-	switch idWidth {
+func (s *segmentReader) selectInt64DictionaryIDs(stats ColumnStats, targetID uint32, idEncoding int, dictCount int, found bool, scratch []uint32) ([]uint32, error) {
+	if int64DictionaryIDEncodingIsPacked(idEncoding) {
+		return s.selectPackedInt64DictionaryIDs(stats, targetID, int64DictionaryPackedBitWidth(idEncoding), dictCount, found, scratch)
+	}
+	switch idEncoding {
 	case 1:
 		target := byte(targetID)
 		var idBuf [1]byte
@@ -206,6 +209,60 @@ func (s *segmentReader) selectInt64DictionaryIDs(stats ColumnStats, targetID uin
 	return scratch, nil
 }
 
+func (s *segmentReader) selectPackedInt64DictionaryIDs(stats ColumnStats, targetID uint32, bitWidth int, dictCount int, found bool, scratch []uint32) ([]uint32, error) {
+	if bitWidth == 0 {
+		if found {
+			for row := 0; row < stats.Count; row++ {
+				scratch = append(scratch, uint32(row))
+			}
+		}
+		return scratch, nil
+	}
+	idsLen, err := packedInt64DictionaryIDsLen(stats.Count, bitWidth)
+	if err != nil {
+		return nil, err
+	}
+	var buf [32 * 1024]byte
+	chunk := buf[:0]
+	chunkOffset := 0
+	remaining := idsLen
+	bitBuffer := uint64(0)
+	bitsInBuffer := 0
+	mask := (uint64(1) << uint(bitWidth)) - 1
+	if bitWidth == 32 {
+		mask = uint64(^uint32(0))
+	}
+	for row := 0; row < stats.Count; row++ {
+		for bitsInBuffer < bitWidth {
+			if chunkOffset == len(chunk) {
+				if remaining == 0 {
+					return nil, io.ErrUnexpectedEOF
+				}
+				chunkLen := min(remaining, len(buf))
+				if err := readFull(s.r, buf[:chunkLen]); err != nil {
+					return nil, err
+				}
+				chunk = buf[:chunkLen]
+				chunkOffset = 0
+				remaining -= chunkLen
+			}
+			bitBuffer |= uint64(chunk[chunkOffset]) << bitsInBuffer
+			bitsInBuffer += 8
+			chunkOffset++
+		}
+		id := uint32(bitBuffer & mask)
+		bitBuffer >>= bitWidth
+		bitsInBuffer -= bitWidth
+		if uint64(id) >= uint64(dictCount) {
+			return nil, fmt.Errorf("int64 dictionary id %d out of range at row %d", id, row)
+		}
+		if found && id == targetID {
+			scratch = append(scratch, uint32(row))
+		}
+	}
+	return scratch, nil
+}
+
 func selectInt64EqualPayload(payload []byte, stats ColumnStats, value int64, scratch []uint32) ([]uint32, error) {
 	if err := validateInt64SelectionStats(stats); err != nil {
 		return nil, err
@@ -237,14 +294,17 @@ func selectPlainInt64EqualPayload(payload []byte, stats ColumnStats, value int64
 }
 
 func selectDictionaryInt64EqualPayload(payload []byte, stats ColumnStats, value int64, scratch []uint32) ([]uint32, error) {
-	targetID, ids, idWidth, dictCount, found, err := findInt64DictionaryID(payload, stats, value)
+	targetID, ids, idEncoding, dictCount, found, err := findInt64DictionaryID(payload, stats, value)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
 		return scratch, nil
 	}
-	switch idWidth {
+	if int64DictionaryIDEncodingIsPacked(idEncoding) {
+		return selectPackedDictionaryInt64EqualPayload(ids, stats, targetID, int64DictionaryPackedBitWidth(idEncoding), dictCount, scratch)
+	}
+	switch idEncoding {
 	case 1:
 		target := byte(targetID)
 		for row := 0; row < stats.Count; row++ {
@@ -277,6 +337,104 @@ func selectDictionaryInt64EqualPayload(payload []byte, stats ColumnStats, value 
 				scratch = append(scratch, uint32(row))
 			}
 		}
+	}
+	return scratch, nil
+}
+
+func selectPackedDictionaryInt64EqualPayload(ids []byte, stats ColumnStats, targetID uint32, bitWidth int, dictCount int, scratch []uint32) ([]uint32, error) {
+	if bitWidth == 0 {
+		for row := 0; row < stats.Count; row++ {
+			scratch = append(scratch, uint32(row))
+		}
+		return scratch, nil
+	}
+	if bitWidth == 10 {
+		return selectPacked10DictionaryInt64EqualPayload(ids, stats, targetID, dictCount, scratch)
+	}
+	mask := (uint64(1) << uint(bitWidth)) - 1
+	if bitWidth == 32 {
+		mask = uint64(^uint32(0))
+	}
+	checkRange := uint64(dictCount) < uint64(1)<<uint(bitWidth)
+	bitBuffer := uint64(0)
+	bitsInBuffer := 0
+	offset := 0
+	for row := 0; row < stats.Count; row++ {
+		for bitsInBuffer < bitWidth {
+			bitBuffer |= uint64(ids[offset]) << bitsInBuffer
+			bitsInBuffer += 8
+			offset++
+		}
+		id := uint32(bitBuffer & mask)
+		bitBuffer >>= bitWidth
+		bitsInBuffer -= bitWidth
+		if checkRange && uint64(id) >= uint64(dictCount) {
+			return nil, fmt.Errorf("int64 dictionary id %d out of range at row %d", id, row)
+		}
+		if id == targetID {
+			scratch = append(scratch, uint32(row))
+		}
+	}
+	return scratch, nil
+}
+
+func selectPacked10DictionaryInt64EqualPayload(ids []byte, stats ColumnStats, targetID uint32, dictCount int, scratch []uint32) ([]uint32, error) {
+	checkRange := dictCount < 1<<10
+	row := 0
+	offset := 0
+	groups := stats.Count / 4
+	target := targetID
+	for range groups {
+		packed := uint64(ids[offset]) |
+			uint64(ids[offset+1])<<8 |
+			uint64(ids[offset+2])<<16 |
+			uint64(ids[offset+3])<<24 |
+			uint64(ids[offset+4])<<32
+		id0 := uint32(packed & 0x3ff)
+		id1 := uint32((packed >> 10) & 0x3ff)
+		id2 := uint32((packed >> 20) & 0x3ff)
+		id3 := uint32((packed >> 30) & 0x3ff)
+		if checkRange && (int(id0) >= dictCount || int(id1) >= dictCount || int(id2) >= dictCount || int(id3) >= dictCount) {
+			return nil, fmt.Errorf("int64 dictionary id out of range near row %d", row)
+		}
+		if id0 == target {
+			scratch = append(scratch, uint32(row))
+		}
+		if id1 == target {
+			scratch = append(scratch, uint32(row+1))
+		}
+		if id2 == target {
+			scratch = append(scratch, uint32(row+2))
+		}
+		if id3 == target {
+			scratch = append(scratch, uint32(row+3))
+		}
+		row += 4
+		offset += 5
+	}
+
+	remainingRows := stats.Count - row
+	if remainingRows == 0 {
+		return scratch, nil
+	}
+	bitBuffer := uint64(0)
+	bitsInBuffer := 0
+	for remaining := 0; remaining < remainingRows; remaining++ {
+		for bitsInBuffer < 10 {
+			bitBuffer |= uint64(ids[offset]) << bitsInBuffer
+			bitsInBuffer += 8
+			offset++
+		}
+		id := uint32(bitBuffer & 0x3ff)
+		bitBuffer >>= 10
+		bitsInBuffer -= 10
+		if checkRange && int(id) >= dictCount {
+			return nil, fmt.Errorf("int64 dictionary id %d out of range at row %d", id, row)
+		}
+		if id == target {
+			scratch = append(scratch, uint32(row))
+		}
+		row++
 	}
 	return scratch, nil
 }
@@ -309,12 +467,15 @@ func countPlainInt64EqualPayload(payload []byte, stats ColumnStats, value int64)
 }
 
 func countDictionaryInt64EqualPayload(payload []byte, stats ColumnStats, value int64) (int, error) {
-	targetID, ids, idWidth, dictCount, found, err := findInt64DictionaryID(payload, stats, value)
+	targetID, ids, idEncoding, dictCount, found, err := findInt64DictionaryID(payload, stats, value)
 	if err != nil || !found {
 		return 0, err
 	}
 	count := 0
-	switch idWidth {
+	if int64DictionaryIDEncodingIsPacked(idEncoding) {
+		return countPackedDictionaryInt64EqualPayload(ids, stats, targetID, int64DictionaryPackedBitWidth(idEncoding), dictCount)
+	}
+	switch idEncoding {
 	case 1:
 		target := byte(targetID)
 		for row := 0; row < stats.Count; row++ {
@@ -351,8 +512,105 @@ func countDictionaryInt64EqualPayload(payload []byte, stats ColumnStats, value i
 	return count, nil
 }
 
-func findInt64DictionaryID(payload []byte, stats ColumnStats, value int64) (targetID uint32, ids []byte, idWidth int, dictCount int, found bool, err error) {
-	dict, ids, idWidth, dictCount, err := parseInt64DictionaryPayload(payload, stats)
+func countPackedDictionaryInt64EqualPayload(ids []byte, stats ColumnStats, targetID uint32, bitWidth int, dictCount int) (int, error) {
+	if bitWidth == 0 {
+		return stats.Count, nil
+	}
+	if bitWidth == 10 {
+		return countPacked10DictionaryInt64EqualPayload(ids, stats, targetID, dictCount)
+	}
+	count := 0
+	mask := (uint64(1) << uint(bitWidth)) - 1
+	if bitWidth == 32 {
+		mask = uint64(^uint32(0))
+	}
+	checkRange := uint64(dictCount) < uint64(1)<<uint(bitWidth)
+	bitBuffer := uint64(0)
+	bitsInBuffer := 0
+	offset := 0
+	for row := 0; row < stats.Count; row++ {
+		for bitsInBuffer < bitWidth {
+			bitBuffer |= uint64(ids[offset]) << bitsInBuffer
+			bitsInBuffer += 8
+			offset++
+		}
+		id := uint32(bitBuffer & mask)
+		bitBuffer >>= bitWidth
+		bitsInBuffer -= bitWidth
+		if checkRange && uint64(id) >= uint64(dictCount) {
+			return 0, fmt.Errorf("int64 dictionary id %d out of range at row %d", id, row)
+		}
+		if id == targetID {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func countPacked10DictionaryInt64EqualPayload(ids []byte, stats ColumnStats, targetID uint32, dictCount int) (int, error) {
+	count := 0
+	checkRange := dictCount < 1<<10
+	row := 0
+	offset := 0
+	groups := stats.Count / 4
+	target := targetID
+	for range groups {
+		packed := uint64(ids[offset]) |
+			uint64(ids[offset+1])<<8 |
+			uint64(ids[offset+2])<<16 |
+			uint64(ids[offset+3])<<24 |
+			uint64(ids[offset+4])<<32
+		id0 := uint32(packed & 0x3ff)
+		id1 := uint32((packed >> 10) & 0x3ff)
+		id2 := uint32((packed >> 20) & 0x3ff)
+		id3 := uint32((packed >> 30) & 0x3ff)
+		if checkRange && (int(id0) >= dictCount || int(id1) >= dictCount || int(id2) >= dictCount || int(id3) >= dictCount) {
+			return 0, fmt.Errorf("int64 dictionary id out of range near row %d", row)
+		}
+		if id0 == target {
+			count++
+		}
+		if id1 == target {
+			count++
+		}
+		if id2 == target {
+			count++
+		}
+		if id3 == target {
+			count++
+		}
+		row += 4
+		offset += 5
+	}
+
+	remainingRows := stats.Count - row
+	if remainingRows == 0 {
+		return count, nil
+	}
+	bitBuffer := uint64(0)
+	bitsInBuffer := 0
+	for remaining := 0; remaining < remainingRows; remaining++ {
+		for bitsInBuffer < 10 {
+			bitBuffer |= uint64(ids[offset]) << bitsInBuffer
+			bitsInBuffer += 8
+			offset++
+		}
+		id := uint32(bitBuffer & 0x3ff)
+		bitBuffer >>= 10
+		bitsInBuffer -= 10
+		if checkRange && int(id) >= dictCount {
+			return 0, fmt.Errorf("int64 dictionary id %d out of range at row %d", id, row)
+		}
+		if id == target {
+			count++
+		}
+		row++
+	}
+	return count, nil
+}
+
+func findInt64DictionaryID(payload []byte, stats ColumnStats, value int64) (targetID uint32, ids []byte, idEncoding int, dictCount int, found bool, err error) {
+	dict, ids, idEncoding, dictCount, err := parseInt64DictionaryPayload(payload, stats)
 	if err != nil {
 		return 0, nil, 0, 0, false, err
 	}
@@ -362,7 +620,7 @@ func findInt64DictionaryID(payload []byte, stats ColumnStats, value int64) (targ
 			found = true
 		}
 	}
-	return targetID, ids, idWidth, dictCount, found, nil
+	return targetID, ids, idEncoding, dictCount, found, nil
 }
 
 func validateInt64SelectionStats(stats ColumnStats) error {
@@ -371,22 +629,6 @@ func validateInt64SelectionStats(stats ColumnStats) error {
 	}
 	if uint64(stats.Count) > uint64(^uint32(0)) {
 		return fmt.Errorf("column %q count %d exceeds selection vector capacity", stats.Name, stats.Count)
-	}
-	return nil
-}
-
-func validateInt64DictionaryHeader(stats ColumnStats, dictCount int, idWidth int) error {
-	if idWidth != 1 && idWidth != 2 && idWidth != 4 {
-		return fmt.Errorf("unsupported int64 dictionary id width %d", idWidth)
-	}
-	if idWidth == 1 && dictCount > 1<<8 {
-		return fmt.Errorf("int64 dictionary value count %d exceeds id width %d", dictCount, idWidth)
-	}
-	if idWidth == 2 && dictCount > 1<<16 {
-		return fmt.Errorf("int64 dictionary value count %d exceeds id width %d", dictCount, idWidth)
-	}
-	if dictCount > stats.Count {
-		return fmt.Errorf("int64 dictionary value count %d exceeds row count %d", dictCount, stats.Count)
 	}
 	return nil
 }

@@ -130,6 +130,30 @@ func TestEncodeInt64UsesDictionaryWhenSmaller(t *testing.T) {
 	if len(encoded) >= plainInt64PayloadLen(values) {
 		t.Fatalf("encoded length = %d, want less than plain length %d", len(encoded), plainInt64PayloadLen(values))
 	}
+	if !int64DictionaryIDEncodingIsPacked(int(encoded[5])) {
+		t.Fatalf("int64 dictionary id encoding = %d, want packed", encoded[5])
+	}
+
+	decoded, err := decodeInt64(encoded, len(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireVectorEqual(t, vector.NewInt64(values), vector.FromInt64(decoded))
+}
+
+func TestEncodeInt64DictionaryUsesFixedIDsWhenPackedTies(t *testing.T) {
+	values := make([]int64, 512)
+	for row := range values {
+		values[row] = int64(row % 256)
+	}
+
+	encoded := encodeInt64(values)
+	if encoded[0] != int64CodecDictionary {
+		t.Fatalf("int64 codec = %d, want dictionary", encoded[0])
+	}
+	if encoded[5] != 1 {
+		t.Fatalf("int64 dictionary id encoding = %d, want fixed width 1", encoded[5])
+	}
 
 	decoded, err := decodeInt64(encoded, len(values))
 	if err != nil {
@@ -162,6 +186,16 @@ func TestDecodeInt64RejectsBadPayload(t *testing.T) {
 	shortDictionaryValues := []byte{int64CodecDictionary}
 	shortDictionaryValues = binary.LittleEndian.AppendUint32(shortDictionaryValues, 1)
 	shortDictionaryValues = append(shortDictionaryValues, 1, 1, 2, 3)
+	shortPackedIDs := []byte{int64CodecDictionary}
+	shortPackedIDs = binary.LittleEndian.AppendUint32(shortPackedIDs, 2)
+	shortPackedIDs = append(shortPackedIDs, int64DictionaryPackedIDFlag|1)
+	shortPackedIDs = binary.LittleEndian.AppendUint64(shortPackedIDs, 7)
+	shortPackedIDs = binary.LittleEndian.AppendUint64(shortPackedIDs, 42)
+	packedIDOutOfRange := []byte{int64CodecDictionary}
+	packedIDOutOfRange = binary.LittleEndian.AppendUint32(packedIDOutOfRange, 1)
+	packedIDOutOfRange = append(packedIDOutOfRange, int64DictionaryPackedIDFlag|1)
+	packedIDOutOfRange = binary.LittleEndian.AppendUint64(packedIDOutOfRange, 7)
+	packedIDOutOfRange = append(packedIDOutOfRange, 1)
 
 	tests := []struct {
 		name    string
@@ -174,9 +208,12 @@ func TestDecodeInt64RejectsBadPayload(t *testing.T) {
 		{name: "short plain", encoded: []byte{int64CodecPlain, 0, 0, 0}, count: 1, wantErr: "invalid int64 encoded length"},
 		{name: "short dictionary header", encoded: []byte{int64CodecDictionary, 0, 0, 0}, wantErr: "short int64 dictionary header"},
 		{name: "bad dictionary id width", encoded: []byte{int64CodecDictionary, 0, 0, 0, 0, 3}, wantErr: "unsupported int64 dictionary id width"},
+		{name: "bad packed bit width", encoded: []byte{int64CodecDictionary, 0, 0, 0, 0, int64DictionaryPackedIDFlag | 33}, wantErr: "unsupported int64 dictionary packed bit width"},
 		{name: "short dictionary values", encoded: shortDictionaryValues, count: 1, wantErr: "short int64 dictionary values"},
 		{name: "short dictionary ids", encoded: append(slices.Clone(validOneValueDictionary), 0), count: 2, wantErr: "short int64 dictionary ids"},
 		{name: "dictionary id out of range", encoded: append(slices.Clone(validOneValueDictionary), 1), count: 1, wantErr: "out of range"},
+		{name: "short packed ids", encoded: shortPackedIDs, count: 2, wantErr: "short int64 dictionary ids"},
+		{name: "packed id out of range", encoded: packedIDOutOfRange, count: 1, wantErr: "out of range"},
 	}
 
 	for _, tt := range tests {
