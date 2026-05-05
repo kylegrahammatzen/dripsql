@@ -752,11 +752,6 @@ func countPlainStringEqualPayload(payload []byte, stats ColumnStats, value strin
 	return count, nil
 }
 
-func groupPlainStringCountsPayload(payload []byte, stats ColumnStats, counts map[string]int) error {
-	_, err := groupPlainStringCountsPayloadWithKeyCache(payload, stats, counts, nil, false)
-	return err
-}
-
 func groupPlainStringCountsPayloadWithKeyCache(payload []byte, stats ColumnStats, counts map[string]int, keyScratch []string, cacheKeys bool) ([]string, error) {
 	offset := 1
 	for row := range stats.Count {
@@ -869,11 +864,6 @@ func countDictionaryStringEqualPayload(payload []byte, stats ColumnStats, value 
 		}
 	}
 	return count, nil
-}
-
-func groupDictionaryStringCountsPayload(payload []byte, stats ColumnStats, counts map[string]int) error {
-	_, err := groupDictionaryStringCountsPayloadWithKeyCache(payload, stats, counts, nil, false)
-	return err
 }
 
 func groupDictionaryStringCountsPayloadWithKeyCache(payload []byte, stats ColumnStats, counts map[string]int, keyScratch []string, cacheKeys bool) ([]string, error) {
