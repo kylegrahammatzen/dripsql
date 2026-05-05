@@ -60,6 +60,43 @@ func TestCountInt64EqualSegmentRejectsWrongType(t *testing.T) {
 	}
 }
 
+func TestCountStringEqualSegment(t *testing.T) {
+	data := mustSegment(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 11})},
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "cancel", "checkout"})},
+	)
+
+	count, err := CountStringEqualSegment(data, "event_type", "checkout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+}
+
+func TestCountStringEqualSegmentRejectsMissingColumn(t *testing.T) {
+	data := mustSegment(t,
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout"})},
+	)
+
+	_, err := CountStringEqualSegment(data, "missing", "checkout")
+	if err == nil {
+		t.Fatal("expected missing column error")
+	}
+}
+
+func TestCountStringEqualSegmentRejectsWrongType(t *testing.T) {
+	data := mustSegment(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42})},
+	)
+
+	_, err := CountStringEqualSegment(data, "tenant_id", "checkout")
+	if err == nil {
+		t.Fatal("expected wrong type error")
+	}
+}
+
 func BenchmarkCountInt64EqualSegmentSkip(b *testing.B) {
 	data := benchmarkSegment(b, 100_000, 0, 1_000_000)
 
@@ -86,6 +123,21 @@ func BenchmarkCountInt64EqualSegmentMatch(b *testing.B) {
 		}
 		if count != 50_000 {
 			b.Fatalf("count = %d, want 50000", count)
+		}
+	}
+}
+
+func BenchmarkCountStringEqualSegmentMatch(b *testing.B) {
+	data := benchmarkSegment(b, 100_000, 2, 100)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		count, err := CountStringEqualSegment(data, "event_type", "event")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if count != 100_000 {
+			b.Fatalf("count = %d, want 100000", count)
 		}
 	}
 }

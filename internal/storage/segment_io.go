@@ -9,19 +9,37 @@ import (
 )
 
 const (
-	segmentHeaderLen     = len(segmentMagic) + 2 + 8 + 4
+	segmentHeaderLen     = len(segmentMagic) + 2 + 8 + 4 + 8
 	columnFixedHeaderLen = 1 + 8 + 8 + 1 + 8 + 8
+	segmentFooterMagic   = "DRIPFTR1"
+	footerTrailerLen     = 8 + len(segmentFooterMagic)
 )
 
+type columnFooterEntry struct {
+	Name   string
+	Offset uint64
+}
+
+type countingWriter struct {
+	w      io.Writer
+	offset uint64
+}
+
+func (w *countingWriter) Write(buf []byte) (int, error) {
+	n, err := w.w.Write(buf)
+	w.offset += uint64(n)
+	return n, err
+}
+
 type segmentWriter struct {
-	w io.Writer
+	w *countingWriter
 }
 
 func newSegmentWriter(w io.Writer) *segmentWriter {
-	return &segmentWriter{w: w}
+	return &segmentWriter{w: &countingWriter{w: w}}
 }
 
-func (s *segmentWriter) WriteHeader(rows int, columns int) error {
+func (s *segmentWriter) WriteHeader(rows int, columns int, segmentLen uint64) error {
 	if rows < 0 {
 		return fmt.Errorf("negative row count %d", rows)
 	}
@@ -39,6 +57,8 @@ func (s *segmentWriter) WriteHeader(rows int, columns int) error {
 	binary.LittleEndian.PutUint64(buf[offset:], uint64(rows))
 	offset += 8
 	binary.LittleEndian.PutUint32(buf[offset:], uint32(columns))
+	offset += 4
+	binary.LittleEndian.PutUint64(buf[offset:], segmentLen)
 	return writeFull(s.w, buf[:])
 }
 
@@ -47,6 +67,26 @@ func (s *segmentWriter) WriteColumn(stats ColumnStats, encoded []byte) error {
 		return err
 	}
 	return writeFull(s.w, encoded)
+}
+
+func (s *segmentWriter) WriteFooter(entries []columnFooterEntry) error {
+	footer := binary.LittleEndian.AppendUint32(nil, uint32(len(entries)))
+	for _, entry := range entries {
+		var err error
+		footer, err = appendString16(footer, entry.Name)
+		if err != nil {
+			return err
+		}
+		footer = binary.LittleEndian.AppendUint64(footer, entry.Offset)
+	}
+	if err := writeFull(s.w, footer); err != nil {
+		return err
+	}
+
+	var trailer [footerTrailerLen]byte
+	binary.LittleEndian.PutUint64(trailer[:], uint64(len(footer)))
+	copy(trailer[8:], segmentFooterMagic)
+	return writeFull(s.w, trailer[:])
 }
 
 func (s *segmentWriter) writeColumnHeader(stats ColumnStats, encodedLen uint64) error {
@@ -73,7 +113,11 @@ func (s *segmentWriter) writeColumnHeader(stats ColumnStats, encodedLen uint64) 
 }
 
 type segmentReader struct {
-	r io.Reader
+	r          io.Reader
+	start      int64
+	end        int64
+	hasBounds  bool
+	footerRead bool
 }
 
 func newSegmentReader(r io.Reader) *segmentReader {
@@ -97,6 +141,14 @@ func (s *segmentReader) readHeaderChecked() (rows int, cols int, err error) {
 }
 
 func (s *segmentReader) ReadHeader() (rows uint64, columns uint32, err error) {
+	if seeker, ok := s.r.(io.Seeker); ok {
+		start, err := seeker.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return 0, 0, err
+		}
+		s.start = start
+	}
+
 	var buf [segmentHeaderLen]byte
 	if err := readFull(s.r, buf[:]); err != nil {
 		return 0, 0, err
@@ -115,6 +167,15 @@ func (s *segmentReader) ReadHeader() (rows uint64, columns uint32, err error) {
 	rows = binary.LittleEndian.Uint64(buf[offset:])
 	offset += 8
 	columns = binary.LittleEndian.Uint32(buf[offset:])
+	offset += 4
+	segmentLen := binary.LittleEndian.Uint64(buf[offset:])
+	if segmentLen < uint64(segmentHeaderLen+footerTrailerLen) {
+		return 0, 0, fmt.Errorf("invalid segment length %d", segmentLen)
+	}
+	if _, ok := s.r.(io.Seeker); ok {
+		s.end = s.start + int64(segmentLen)
+		s.hasBounds = true
+	}
 	return rows, columns, nil
 }
 
@@ -168,6 +229,162 @@ func (s *segmentReader) readColumnHeader() (ColumnStats, error) {
 		return ColumnStats{}, err
 	}
 	return decodeColumnFixedHeader(name, buf[:])
+}
+
+func (s *segmentReader) readFooter(expectedColumns int) ([]columnFooterEntry, bool, error) {
+	seeker, ok := s.r.(io.ReadSeeker)
+	if !ok || !s.hasBounds {
+		return nil, false, nil
+	}
+	if s.end-s.start < int64(segmentHeaderLen+footerTrailerLen) {
+		return nil, true, io.ErrUnexpectedEOF
+	}
+
+	fileEnd, err := seeker.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, true, err
+	}
+	if s.end > fileEnd {
+		return nil, true, io.ErrUnexpectedEOF
+	}
+	trailerStart := s.end - int64(footerTrailerLen)
+	if _, err := seeker.Seek(trailerStart, io.SeekStart); err != nil {
+		return nil, true, err
+	}
+
+	var trailer [footerTrailerLen]byte
+	if err := readFull(s.r, trailer[:]); err != nil {
+		return nil, true, err
+	}
+	if string(trailer[8:]) != segmentFooterMagic {
+		return nil, true, fmt.Errorf("invalid segment footer magic %q", string(trailer[8:]))
+	}
+	footerLen := binary.LittleEndian.Uint64(trailer[:])
+	footerStart := trailerStart - int64(footerLen)
+	if footerStart < s.start+int64(segmentHeaderLen) {
+		return nil, true, io.ErrUnexpectedEOF
+	}
+	if _, err := seeker.Seek(footerStart, io.SeekStart); err != nil {
+		return nil, true, err
+	}
+	footerSize, err := checkedInt("segment footer length", footerLen)
+	if err != nil {
+		return nil, true, err
+	}
+	footer := make([]byte, footerSize)
+	if err := readFull(s.r, footer); err != nil {
+		return nil, true, err
+	}
+	entries, err := parseFooterPayload(footer, expectedColumns)
+	if err != nil {
+		return nil, true, err
+	}
+	s.footerRead = true
+	return entries, true, nil
+}
+
+func (s *segmentReader) finishSegment(expectedColumns int) error {
+	if _, ok := s.r.(io.ReadSeeker); ok && s.hasBounds {
+		if !s.footerRead {
+			if _, _, err := s.readFooter(expectedColumns); err != nil {
+				return err
+			}
+		}
+		return s.seekToSegmentEnd()
+	}
+	return s.readFooterSequential(expectedColumns)
+}
+
+func (s *segmentReader) seekToSegmentOffset(offset uint64) error {
+	seeker, ok := s.r.(io.Seeker)
+	if !ok || !s.hasBounds {
+		return fmt.Errorf("segment reader does not support seeking")
+	}
+	if offset > uint64(s.end-s.start) {
+		return io.ErrUnexpectedEOF
+	}
+	_, err := seeker.Seek(s.start+int64(offset), io.SeekStart)
+	return err
+}
+
+func (s *segmentReader) seekToSegmentEnd() error {
+	seeker, ok := s.r.(io.Seeker)
+	if !ok || !s.hasBounds {
+		return nil
+	}
+	fileEnd, err := seeker.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	if s.end > fileEnd {
+		return io.ErrUnexpectedEOF
+	}
+	_, err = seeker.Seek(s.end, io.SeekStart)
+	return err
+}
+
+func (s *segmentReader) readFooterSequential(expectedColumns int) error {
+	var countBuf [4]byte
+	if err := readFull(s.r, countBuf[:]); err != nil {
+		return err
+	}
+	count := binary.LittleEndian.Uint32(countBuf[:])
+	if int(count) != expectedColumns {
+		return fmt.Errorf("segment footer column count %d does not match header count %d", count, expectedColumns)
+	}
+	footerLen := uint64(4)
+	for range count {
+		name, err := readString16(s.r)
+		if err != nil {
+			return err
+		}
+		footerLen += uint64(2 + len(name))
+		var offsetBuf [8]byte
+		if err := readFull(s.r, offsetBuf[:]); err != nil {
+			return err
+		}
+		footerLen += 8
+	}
+
+	var trailer [footerTrailerLen]byte
+	if err := readFull(s.r, trailer[:]); err != nil {
+		return err
+	}
+	if binary.LittleEndian.Uint64(trailer[:]) != footerLen {
+		return fmt.Errorf("segment footer length mismatch")
+	}
+	if string(trailer[8:]) != segmentFooterMagic {
+		return fmt.Errorf("invalid segment footer magic %q", string(trailer[8:]))
+	}
+	return nil
+}
+
+func parseFooterPayload(footer []byte, expectedColumns int) ([]columnFooterEntry, error) {
+	offset := 0
+	countBytes, err := readBytes(footer, &offset, 4)
+	if err != nil {
+		return nil, err
+	}
+	count := binary.LittleEndian.Uint32(countBytes)
+	if int(count) != expectedColumns {
+		return nil, fmt.Errorf("segment footer column count %d does not match header count %d", count, expectedColumns)
+	}
+	entries := make([]columnFooterEntry, 0, count)
+	for range count {
+		nameBytes, err := readString16Bytes(footer, &offset)
+		if err != nil {
+			return nil, err
+		}
+		offsetBytes, err := readBytes(footer, &offset, 8)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, columnFooterEntry{Name: string(nameBytes), Offset: binary.LittleEndian.Uint64(offsetBytes)})
+	}
+	if offset != len(footer) {
+		return nil, fmt.Errorf("trailing segment footer bytes: %d", len(footer)-offset)
+	}
+	return entries, nil
 }
 
 func decodeColumnFixedHeader(name string, fixed []byte) (ColumnStats, error) {
@@ -232,6 +449,22 @@ func writeString16(w io.Writer, value string) error {
 	}
 	_, err := io.WriteString(w, value)
 	return err
+}
+
+func appendString16(buf []byte, value string) ([]byte, error) {
+	if len(value) > 1<<16-1 {
+		return nil, fmt.Errorf("string %q is too long", value)
+	}
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(value)))
+	buf = append(buf, value...)
+	return buf, nil
+}
+
+func footerEntryLen(name string) (uint64, error) {
+	if len(name) > 1<<16-1 {
+		return 0, fmt.Errorf("string %q is too long", name)
+	}
+	return uint64(2 + len(name) + 8), nil
 }
 
 func readString16(r io.Reader) (string, error) {

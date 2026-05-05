@@ -10,7 +10,7 @@ import (
 
 const (
 	segmentMagic               = "DRIPSEG1"
-	segmentVersion      uint16 = 1
+	segmentVersion      uint16 = 2
 	maxEncodedColumnLen uint64 = 1 << 30
 )
 
@@ -43,18 +43,30 @@ func (s SegmentStats) Column(name string) (ColumnStats, bool) {
 
 // WriteSegment writes a small immutable columnar segment.
 func WriteSegment(w io.Writer, batch vector.Batch) (SegmentStats, error) {
+	prepared, segmentLen, err := prepareSegmentColumns(batch)
+	if err != nil {
+		return SegmentStats{}, err
+	}
+
 	sw := newSegmentWriter(w)
-	if err := sw.WriteHeader(batch.Count, len(batch.Columns)); err != nil {
+	if err := sw.WriteHeader(batch.Count, len(batch.Columns), segmentLen); err != nil {
 		return SegmentStats{}, err
 	}
 
 	stats := SegmentStats{Rows: batch.Count, Columns: make([]ColumnStats, 0, len(batch.Columns))}
-	for _, col := range batch.Columns {
-		colStats, err := sw.writeVectorColumn(col)
-		if err != nil {
+	footer := make([]columnFooterEntry, 0, len(prepared))
+	for _, col := range prepared {
+		if err := sw.writePreparedColumn(col); err != nil {
 			return SegmentStats{}, err
 		}
-		stats.Columns = append(stats.Columns, colStats)
+		stats.Columns = append(stats.Columns, col.stats)
+		footer = append(footer, columnFooterEntry{Name: col.stats.Name, Offset: col.offset})
+	}
+	if err := sw.WriteFooter(footer); err != nil {
+		return SegmentStats{}, err
+	}
+	if sw.w.offset != segmentLen {
+		return SegmentStats{}, fmt.Errorf("written segment length %d does not match planned length %d", sw.w.offset, segmentLen)
 	}
 
 	return stats, nil
@@ -77,6 +89,9 @@ func ReadSegment(r io.Reader) (vector.Batch, SegmentStats, error) {
 		}
 		columns = append(columns, col)
 		stats.Columns = append(stats.Columns, colStats)
+	}
+	if err := sr.finishSegment(cols); err != nil {
+		return vector.Batch{}, SegmentStats{}, err
 	}
 
 	batch, err := vector.NewBatch(columns...)
@@ -102,6 +117,11 @@ func ReadSegmentColumns(r io.Reader, names ...string) (vector.Batch, SegmentStat
 	if err != nil {
 		return vector.Batch{}, SegmentStats{}, err
 	}
+	if footer, ok, err := sr.readFooter(cols); err != nil {
+		return vector.Batch{}, SegmentStats{}, err
+	} else if ok {
+		return sr.readSegmentColumnsFromFooter(rows, names, wanted, footer)
+	}
 
 	columns := make([]vector.Column, 0, len(wanted))
 	stats := SegmentStats{Rows: rows, Columns: make([]ColumnStats, 0, len(wanted))}
@@ -126,6 +146,9 @@ func ReadSegmentColumns(r io.Reader, names ...string) (vector.Batch, SegmentStat
 			return vector.Batch{}, SegmentStats{}, err
 		}
 	}
+	if err := sr.finishSegment(cols); err != nil {
+		return vector.Batch{}, SegmentStats{}, err
+	}
 	if name, ok := missingRequestedColumn(names, wanted); ok {
 		return vector.Batch{}, SegmentStats{}, fmt.Errorf("missing column %q", name)
 	}
@@ -148,6 +171,11 @@ func ReadSegmentStats(r io.Reader) (SegmentStats, error) {
 	if err != nil {
 		return SegmentStats{}, err
 	}
+	if footer, ok, err := sr.readFooter(cols); err != nil {
+		return SegmentStats{}, err
+	} else if ok {
+		return sr.readSegmentStatsFromFooter(rows, footer)
+	}
 
 	stats := SegmentStats{Rows: rows, Columns: make([]ColumnStats, 0, cols)}
 	for range cols {
@@ -157,7 +185,68 @@ func ReadSegmentStats(r io.Reader) (SegmentStats, error) {
 		}
 		stats.Columns = append(stats.Columns, colStats)
 	}
+	if err := sr.finishSegment(cols); err != nil {
+		return SegmentStats{}, err
+	}
 
+	return stats, nil
+}
+
+func (s *segmentReader) readSegmentColumnsFromFooter(rows int, names []string, wanted map[string]struct{}, footer []columnFooterEntry) (vector.Batch, SegmentStats, error) {
+	columns := make([]vector.Column, 0, len(wanted))
+	stats := SegmentStats{Rows: rows, Columns: make([]ColumnStats, 0, len(wanted))}
+	for _, entry := range footer {
+		if _, ok := wanted[entry.Name]; !ok {
+			continue
+		}
+
+		if err := s.seekToSegmentOffset(entry.Offset); err != nil {
+			return vector.Batch{}, SegmentStats{}, err
+		}
+		colStats, err := s.readColumnHeader()
+		if err != nil {
+			return vector.Batch{}, SegmentStats{}, err
+		}
+		col, err := s.readColumnPayload(colStats)
+		if err != nil {
+			return vector.Batch{}, SegmentStats{}, err
+		}
+		columns = append(columns, col)
+		stats.Columns = append(stats.Columns, colStats)
+		delete(wanted, entry.Name)
+	}
+	if err := s.seekToSegmentEnd(); err != nil {
+		return vector.Batch{}, SegmentStats{}, err
+	}
+	if name, ok := missingRequestedColumn(names, wanted); ok {
+		return vector.Batch{}, SegmentStats{}, fmt.Errorf("missing column %q", name)
+	}
+
+	batch, err := vector.NewBatch(columns...)
+	if err != nil {
+		return vector.Batch{}, SegmentStats{}, err
+	}
+	if batch.Count != rows {
+		return vector.Batch{}, SegmentStats{}, fmt.Errorf("segment row count %d does not match decoded batch count %d", rows, batch.Count)
+	}
+	return batch, stats, nil
+}
+
+func (s *segmentReader) readSegmentStatsFromFooter(rows int, footer []columnFooterEntry) (SegmentStats, error) {
+	stats := SegmentStats{Rows: rows, Columns: make([]ColumnStats, 0, len(footer))}
+	for _, entry := range footer {
+		if err := s.seekToSegmentOffset(entry.Offset); err != nil {
+			return SegmentStats{}, err
+		}
+		colStats, err := s.readColumnHeader()
+		if err != nil {
+			return SegmentStats{}, err
+		}
+		stats.Columns = append(stats.Columns, colStats)
+	}
+	if err := s.seekToSegmentEnd(); err != nil {
+		return SegmentStats{}, err
+	}
 	return stats, nil
 }
 

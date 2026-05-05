@@ -50,6 +50,9 @@ func SelectSegmentInt64Equal(r io.Reader, column string, value int64, scratch []
 			return scratch, true, err
 		}
 	}
+	if err := sr.finishSegment(cols); err != nil {
+		return scratch, found, err
+	}
 
 	return selected, found, nil
 }

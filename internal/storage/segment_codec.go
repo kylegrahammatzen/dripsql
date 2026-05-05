@@ -13,7 +13,42 @@ const (
 	maxLinearStringDictionaryValues      = 16
 )
 
-func (s *segmentWriter) writeVectorColumn(col vector.Column) (ColumnStats, error) {
+type preparedColumn struct {
+	col     vector.Column
+	stats   ColumnStats
+	encoded []byte
+	offset  uint64
+}
+
+func prepareSegmentColumns(batch vector.Batch) ([]preparedColumn, uint64, error) {
+	prepared := make([]preparedColumn, 0, len(batch.Columns))
+	segmentLen := uint64(segmentHeaderLen)
+	footerLen := uint64(4)
+
+	for _, col := range batch.Columns {
+		preparedCol, err := prepareColumn(col)
+		if err != nil {
+			return nil, 0, err
+		}
+		preparedCol.offset = segmentLen
+		columnLen, err := encodedColumnLen(preparedCol.stats)
+		if err != nil {
+			return nil, 0, err
+		}
+		segmentLen += columnLen
+
+		entryLen, err := footerEntryLen(preparedCol.stats.Name)
+		if err != nil {
+			return nil, 0, err
+		}
+		footerLen += entryLen
+		prepared = append(prepared, preparedCol)
+	}
+	segmentLen += footerLen + uint64(footerTrailerLen)
+	return prepared, segmentLen, nil
+}
+
+func prepareColumn(col vector.Column) (preparedColumn, error) {
 	stats := ColumnStats{Name: col.Name, Kind: col.Vector.Kind(), Count: col.Vector.Len()}
 
 	switch values := col.Vector.(type) {
@@ -25,31 +60,44 @@ func (s *segmentWriter) writeVectorColumn(col vector.Column) (ColumnStats, error
 
 		encodedLen, err := checkedMulInt("int64 encoded length", len(values.Values), 8)
 		if err != nil {
-			return ColumnStats{}, err
+			return preparedColumn{}, err
 		}
 		stats.EncodedLen = encodedLen
-		if err := s.writeColumnHeader(stats, uint64(encodedLen)); err != nil {
-			return ColumnStats{}, err
-		}
-		if err := s.writeInt64Payload(values.Values); err != nil {
-			return ColumnStats{}, err
-		}
-		return stats, nil
+		return preparedColumn{col: col, stats: stats}, nil
 
 	case vector.String:
 		encoded, err := encodeStringVector(values)
 		if err != nil {
-			return ColumnStats{}, fmt.Errorf("encode column %q: %w", col.Name, err)
+			return preparedColumn{}, fmt.Errorf("encode column %q: %w", col.Name, err)
 		}
 		stats.EncodedLen = len(encoded)
-		if err := s.WriteColumn(stats, encoded); err != nil {
-			return ColumnStats{}, err
-		}
-		return stats, nil
+		return preparedColumn{col: col, stats: stats, encoded: encoded}, nil
 
 	default:
-		return ColumnStats{}, fmt.Errorf("segment encoding is not implemented for %s vectors", col.Vector.Kind())
+		return preparedColumn{}, fmt.Errorf("segment encoding is not implemented for %s vectors", col.Vector.Kind())
 	}
+}
+
+func (s *segmentWriter) writePreparedColumn(col preparedColumn) error {
+	if err := s.writeColumnHeader(col.stats, uint64(col.stats.EncodedLen)); err != nil {
+		return err
+	}
+	switch values := col.col.Vector.(type) {
+	case vector.Int64:
+		return s.writeInt64Payload(values.Values)
+	case vector.String:
+		return writeFull(s.w, col.encoded)
+	default:
+		return fmt.Errorf("segment encoding is not implemented for %s vectors", col.col.Vector.Kind())
+	}
+}
+
+func encodedColumnLen(stats ColumnStats) (uint64, error) {
+	nameLen, err := checkedAddInt("column name encoded length", 2, len(stats.Name))
+	if err != nil {
+		return 0, err
+	}
+	return uint64(nameLen) + uint64(columnFixedHeaderLen) + uint64(stats.EncodedLen), nil
 }
 
 func encodeInt64(values []int64) []byte {

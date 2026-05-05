@@ -21,6 +21,7 @@ func TestReadSegmentRejectsBadInput(t *testing.T) {
 		data = binary.LittleEndian.AppendUint16(data, segmentVersion+1)
 		data = binary.LittleEndian.AppendUint64(data, 0)
 		data = binary.LittleEndian.AppendUint32(data, 0)
+		data = binary.LittleEndian.AppendUint64(data, uint64(segmentHeaderLen+footerTrailerLen))
 
 		_, _, err := ReadSegment(bytes.NewReader(data))
 		if err == nil {
@@ -32,7 +33,7 @@ func TestReadSegmentRejectsBadInput(t *testing.T) {
 		var buf bytes.Buffer
 		sw := newSegmentWriter(&buf)
 
-		if err := sw.WriteHeader(1, 1); err != nil {
+		if err := sw.WriteHeader(1, 1, uint64(segmentHeaderLen+64)); err != nil {
 			t.Fatal(err)
 		}
 
@@ -51,7 +52,8 @@ func TestReadSegmentRejectsBadInput(t *testing.T) {
 		var buf bytes.Buffer
 		sw := newSegmentWriter(&buf)
 
-		if err := sw.WriteHeader(1, 1); err != nil {
+		segmentLen := uint64(segmentHeaderLen+2+len("tenant_id")+columnFixedHeaderLen) + maxEncodedColumnLen + 1 + 4 + uint64(footerTrailerLen)
+		if err := sw.WriteHeader(1, 1, segmentLen); err != nil {
 			t.Fatal(err)
 		}
 		stats := ColumnStats{Name: "tenant_id", Kind: vector.KindInt64, Count: 1}
@@ -70,10 +72,10 @@ func TestWriteHeaderRejectsInvalidCounts(t *testing.T) {
 	var buf bytes.Buffer
 	sw := newSegmentWriter(&buf)
 
-	if err := sw.WriteHeader(-1, 1); err == nil {
+	if err := sw.WriteHeader(-1, 1, uint64(segmentHeaderLen+footerTrailerLen)); err == nil {
 		t.Fatal("expected negative row count error")
 	}
-	if err := sw.WriteHeader(1, -1); err == nil {
+	if err := sw.WriteHeader(1, -1, uint64(segmentHeaderLen+footerTrailerLen)); err == nil {
 		t.Fatal("expected negative column count error")
 	}
 }

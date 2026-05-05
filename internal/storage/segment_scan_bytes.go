@@ -10,14 +10,17 @@ import (
 
 // SelectSegmentInt64EqualBytes appends matching row indexes from one encoded segment byte slice.
 func SelectSegmentInt64EqualBytes(data []byte, column string, value int64, scratch []uint32) ([]uint32, bool, error) {
-	stats, payload, found, skip, err := findInt64EqualPayloadBytes(data, column, value)
+	stats, payload, found, err := findColumnPayloadBytes(data, column)
 	if err != nil {
 		return scratch, found, err
 	}
 	if !found {
 		return scratch, false, nil
 	}
-	if skip {
+	if stats.Kind != vector.KindInt64 {
+		return scratch, true, fmt.Errorf("column %q is %s, want int64", column, stats.Kind)
+	}
+	if canSkipInt64Equal(stats, value) {
 		return scratch[:0], true, nil
 	}
 
@@ -30,9 +33,15 @@ func SelectSegmentInt64EqualBytes(data []byte, column string, value int64, scrat
 
 // CountSegmentInt64EqualBytes counts matching rows from one encoded segment byte slice.
 func CountSegmentInt64EqualBytes(data []byte, column string, value int64) (int, bool, error) {
-	stats, payload, found, skip, err := findInt64EqualPayloadBytes(data, column, value)
-	if err != nil || !found || skip {
+	stats, payload, found, err := findColumnPayloadBytes(data, column)
+	if err != nil || !found {
 		return 0, found, err
+	}
+	if stats.Kind != vector.KindInt64 {
+		return 0, true, fmt.Errorf("column %q is %s, want int64", column, stats.Kind)
+	}
+	if canSkipInt64Equal(stats, value) {
+		return 0, true, nil
 	}
 
 	count, err := countInt64EqualPayload(payload, stats, value)
@@ -42,67 +51,159 @@ func CountSegmentInt64EqualBytes(data []byte, column string, value int64) (int, 
 	return count, true, nil
 }
 
-func findInt64EqualPayloadBytes(data []byte, column string, value int64) (ColumnStats, []byte, bool, bool, error) {
-	offset, cols, err := readSegmentHeader(data)
+// SelectSegmentStringEqualBytes appends matching row indexes from one encoded string column byte slice.
+func SelectSegmentStringEqualBytes(data []byte, column string, value string, scratch []uint32) ([]uint32, bool, error) {
+	stats, payload, found, err := findColumnPayloadBytes(data, column)
 	if err != nil {
-		return ColumnStats{}, nil, false, false, err
+		return scratch, found, err
+	}
+	if !found {
+		return scratch, false, nil
+	}
+	if stats.Kind != vector.KindString {
+		return scratch, true, fmt.Errorf("column %q is %s, want string", column, stats.Kind)
 	}
 
-	found := false
-	skip := false
-	var foundStats ColumnStats
-	var foundPayload []byte
-	for range cols {
-		name, stats, payload, err := readColumnBytes(data, &offset)
-		if err != nil {
-			return ColumnStats{}, nil, false, false, err
-		}
-		if !bytesEqualString(name, column) || found {
-			continue
-		}
-
-		found = true
-		stats.Name = column
-		if stats.Kind != vector.KindInt64 {
-			return ColumnStats{}, nil, true, false, fmt.Errorf("column %q is %s, want int64", column, stats.Kind)
-		}
-		if canSkipInt64Equal(stats, value) {
-			skip = true
-			continue
-		}
-		foundStats = stats
-		foundPayload = payload
+	selected, err := selectStringEqualPayload(payload, stats, value, scratch)
+	if err != nil {
+		return scratch, true, err
 	}
-
-	return foundStats, foundPayload, found, skip, nil
+	return selected, true, nil
 }
 
-func readSegmentHeader(data []byte) (offset int, cols int, err error) {
+// CountSegmentStringEqualBytes counts matching rows from one encoded string column byte slice.
+func CountSegmentStringEqualBytes(data []byte, column string, value string) (int, bool, error) {
+	stats, payload, found, err := findColumnPayloadBytes(data, column)
+	if err != nil || !found {
+		return 0, found, err
+	}
+	if stats.Kind != vector.KindString {
+		return 0, true, fmt.Errorf("column %q is %s, want string", column, stats.Kind)
+	}
+
+	count, err := countStringEqualPayload(payload, stats, value)
+	if err != nil {
+		return 0, true, err
+	}
+	return count, true, nil
+}
+
+func findColumnPayloadBytes(data []byte, column string) (ColumnStats, []byte, bool, error) {
+	_, cols, segmentLen, err := readSegmentHeader(data)
+	if err != nil {
+		return ColumnStats{}, nil, false, err
+	}
+	columnOffset, found, err := findColumnOffsetBytes(data, cols, segmentLen, column)
+	if err != nil || !found {
+		return ColumnStats{}, nil, found, err
+	}
+	segment := data[:segmentLen]
+	offset := columnOffset
+	name, stats, payload, err := readColumnBytes(segment, &offset)
+	if err != nil {
+		return ColumnStats{}, nil, true, err
+	}
+	if !bytesEqualString(name, column) {
+		return ColumnStats{}, nil, true, fmt.Errorf("segment footer offset for %q points to column %q", column, string(name))
+	}
+	stats.Name = column
+	return stats, payload, true, nil
+}
+
+func readSegmentHeader(data []byte) (offset int, cols int, segmentLen int, err error) {
 	if len(data) < segmentHeaderLen {
-		return 0, 0, io.ErrUnexpectedEOF
+		return 0, 0, 0, io.ErrUnexpectedEOF
 	}
 	if !bytesEqualString(data[:len(segmentMagic)], segmentMagic) {
-		return 0, 0, fmt.Errorf("invalid segment magic %q", string(data[:len(segmentMagic)]))
+		return 0, 0, 0, fmt.Errorf("invalid segment magic %q", string(data[:len(segmentMagic)]))
 	}
 	offset = len(segmentMagic)
 
 	version := binary.LittleEndian.Uint16(data[offset:])
 	offset += 2
 	if version != segmentVersion {
-		return 0, 0, fmt.Errorf("unsupported segment version %d", version)
+		return 0, 0, 0, fmt.Errorf("unsupported segment version %d", version)
 	}
 	rowCount := binary.LittleEndian.Uint64(data[offset:])
 	offset += 8
 	if _, err := checkedInt("segment row count", rowCount); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	columnCount := binary.LittleEndian.Uint32(data[offset:])
 	offset += 4
 	cols, err = checkedInt("segment column count", uint64(columnCount))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	return offset, cols, nil
+	encodedSegmentLen := binary.LittleEndian.Uint64(data[offset:])
+	offset += 8
+	segmentLen, err = checkedInt("segment length", encodedSegmentLen)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if segmentLen < segmentHeaderLen+footerTrailerLen || segmentLen > len(data) {
+		return 0, 0, 0, io.ErrUnexpectedEOF
+	}
+	return offset, cols, segmentLen, nil
+}
+
+func findColumnOffsetBytes(data []byte, cols int, segmentLen int, column string) (int, bool, error) {
+	footer, err := footerPayloadBytes(data[:segmentLen])
+	if err != nil {
+		return 0, false, err
+	}
+	offset := 0
+	countBytes, err := readBytes(footer, &offset, 4)
+	if err != nil {
+		return 0, false, err
+	}
+	count := binary.LittleEndian.Uint32(countBytes)
+	if int(count) != cols {
+		return 0, false, fmt.Errorf("segment footer column count %d does not match header count %d", count, cols)
+	}
+	for range count {
+		name, err := readString16Bytes(footer, &offset)
+		if err != nil {
+			return 0, false, err
+		}
+		offsetBytes, err := readBytes(footer, &offset, 8)
+		if err != nil {
+			return 0, false, err
+		}
+		columnOffset, err := checkedInt("column offset", binary.LittleEndian.Uint64(offsetBytes))
+		if err != nil {
+			return 0, false, err
+		}
+		if bytesEqualString(name, column) {
+			if columnOffset < segmentHeaderLen || columnOffset >= segmentLen-footerTrailerLen {
+				return 0, true, io.ErrUnexpectedEOF
+			}
+			return columnOffset, true, nil
+		}
+	}
+	if offset != len(footer) {
+		return 0, false, fmt.Errorf("trailing segment footer bytes: %d", len(footer)-offset)
+	}
+	return 0, false, nil
+}
+
+func footerPayloadBytes(data []byte) ([]byte, error) {
+	if len(data) < segmentHeaderLen+footerTrailerLen {
+		return nil, io.ErrUnexpectedEOF
+	}
+	trailer := data[len(data)-footerTrailerLen:]
+	if !bytesEqualString(trailer[8:], segmentFooterMagic) {
+		return nil, fmt.Errorf("invalid segment footer magic %q", string(trailer[8:]))
+	}
+	footerLen, err := checkedInt("segment footer length", binary.LittleEndian.Uint64(trailer[:]))
+	if err != nil {
+		return nil, err
+	}
+	footerStart := len(data) - footerTrailerLen - footerLen
+	if footerStart < segmentHeaderLen {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return data[footerStart : len(data)-footerTrailerLen], nil
 }
 
 func readColumnBytes(data []byte, offset *int) ([]byte, ColumnStats, []byte, error) {
@@ -153,6 +254,183 @@ func readBytes(data []byte, offset *int, n int) ([]byte, error) {
 	buf := data[*offset : *offset+n]
 	*offset += n
 	return buf, nil
+}
+
+func selectStringEqualPayload(payload []byte, stats ColumnStats, value string, scratch []uint32) ([]uint32, error) {
+	if uint64(stats.Count) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("column %q count %d exceeds selection vector capacity", stats.Name, stats.Count)
+	}
+	scratch = scratch[:0]
+	return scanStringEqualPayload(payload, stats, value, scratch)
+}
+
+func countStringEqualPayload(payload []byte, stats ColumnStats, value string) (int, error) {
+	if len(payload) == 0 {
+		return 0, fmt.Errorf("missing string codec")
+	}
+	switch payload[0] {
+	case stringCodecPlain:
+		return countPlainStringEqualPayload(payload, stats, value)
+	case stringCodecDictionary:
+		return countDictionaryStringEqualPayload(payload, stats, value)
+	default:
+		return 0, fmt.Errorf("unsupported string codec %d", payload[0])
+	}
+}
+
+func scanStringEqualPayload(payload []byte, stats ColumnStats, value string, scratch []uint32) ([]uint32, error) {
+	if len(payload) == 0 {
+		return nil, fmt.Errorf("missing string codec")
+	}
+	switch payload[0] {
+	case stringCodecPlain:
+		return scanPlainStringEqualPayload(payload, stats, value, scratch)
+	case stringCodecDictionary:
+		return scanDictionaryStringEqualPayload(payload, stats, value, scratch)
+	default:
+		return nil, fmt.Errorf("unsupported string codec %d", payload[0])
+	}
+}
+
+func scanPlainStringEqualPayload(payload []byte, stats ColumnStats, value string, scratch []uint32) ([]uint32, error) {
+	offset := 1
+	for row := range stats.Count {
+		if len(payload)-offset < 4 {
+			return nil, fmt.Errorf("short string length at row %d", row)
+		}
+		length := binary.LittleEndian.Uint32(payload[offset:])
+		offset += 4
+		if uint64(length) > uint64(len(payload)-offset) {
+			return nil, fmt.Errorf("short string data at row %d", row)
+		}
+		if int(length) == len(value) && bytesEqualString(payload[offset:offset+int(length)], value) {
+			scratch = append(scratch, uint32(row))
+		}
+		offset += int(length)
+	}
+	if offset != len(payload) {
+		return nil, fmt.Errorf("trailing string bytes: %d", len(payload)-offset)
+	}
+	return scratch, nil
+}
+
+func countPlainStringEqualPayload(payload []byte, stats ColumnStats, value string) (int, error) {
+	count := 0
+	offset := 1
+	for row := range stats.Count {
+		if len(payload)-offset < 4 {
+			return 0, fmt.Errorf("short string length at row %d", row)
+		}
+		length := binary.LittleEndian.Uint32(payload[offset:])
+		offset += 4
+		if uint64(length) > uint64(len(payload)-offset) {
+			return 0, fmt.Errorf("short string data at row %d", row)
+		}
+		if int(length) == len(value) && bytesEqualString(payload[offset:offset+int(length)], value) {
+			count++
+		}
+		offset += int(length)
+	}
+	if offset != len(payload) {
+		return 0, fmt.Errorf("trailing string bytes: %d", len(payload)-offset)
+	}
+	return count, nil
+}
+
+func scanDictionaryStringEqualPayload(payload []byte, stats ColumnStats, value string, scratch []uint32) ([]uint32, error) {
+	targetID, ids, idWidth, dictCount, found, err := findStringDictionaryID(payload, stats, value)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return scratch, nil
+	}
+	for row := range stats.Count {
+		id := stringDictionaryRowID(ids, idWidth, row)
+		if uint64(id) >= uint64(dictCount) {
+			return nil, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+		}
+		if id == targetID {
+			scratch = append(scratch, uint32(row))
+		}
+	}
+	return scratch, nil
+}
+
+func countDictionaryStringEqualPayload(payload []byte, stats ColumnStats, value string) (int, error) {
+	targetID, ids, idWidth, dictCount, found, err := findStringDictionaryID(payload, stats, value)
+	if err != nil || !found {
+		return 0, err
+	}
+	count := 0
+	for row := range stats.Count {
+		id := stringDictionaryRowID(ids, idWidth, row)
+		if uint64(id) >= uint64(dictCount) {
+			return 0, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+		}
+		if id == targetID {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func findStringDictionaryID(payload []byte, stats ColumnStats, value string) (targetID uint32, ids []byte, idWidth int, dictCount int, found bool, err error) {
+	if len(payload) < 1+4+1 {
+		return 0, nil, 0, 0, false, fmt.Errorf("short string dictionary header")
+	}
+	offset := 1
+	dictCount = int(binary.LittleEndian.Uint32(payload[offset:]))
+	offset += 4
+	idWidth = int(payload[offset])
+	offset++
+	if idWidth != 1 && idWidth != 2 && idWidth != 4 {
+		return 0, nil, 0, 0, false, fmt.Errorf("unsupported string dictionary id width %d", idWidth)
+	}
+	if dictCount > stats.Count {
+		return 0, nil, 0, 0, false, fmt.Errorf("string dictionary value count %d exceeds row count %d", dictCount, stats.Count)
+	}
+
+	for id := range dictCount {
+		if len(payload)-offset < 4 {
+			return 0, nil, 0, 0, false, fmt.Errorf("short string dictionary length at value %d", id)
+		}
+		length := binary.LittleEndian.Uint32(payload[offset:])
+		offset += 4
+		if uint64(length) > uint64(len(payload)-offset) {
+			return 0, nil, 0, 0, false, fmt.Errorf("short string dictionary data at value %d", id)
+		}
+		if int(length) == len(value) && bytesEqualString(payload[offset:offset+int(length)], value) {
+			targetID = uint32(id)
+			found = true
+		}
+		offset += int(length)
+	}
+
+	idsLen, err := checkedMulInt("string dictionary ids length", stats.Count, idWidth)
+	if err != nil {
+		return 0, nil, 0, 0, false, err
+	}
+	if len(payload)-offset < idsLen {
+		return 0, nil, 0, 0, false, fmt.Errorf("short string dictionary ids")
+	}
+	if len(payload)-offset > idsLen {
+		return 0, nil, 0, 0, false, fmt.Errorf("trailing string bytes: %d", len(payload)-offset-idsLen)
+	}
+	return targetID, payload[offset : offset+idsLen], idWidth, dictCount, found, nil
+}
+
+func stringDictionaryRowID(ids []byte, idWidth int, row int) uint32 {
+	switch idWidth {
+	case 1:
+		return uint32(ids[row])
+	case 2:
+		return uint32(binary.LittleEndian.Uint16(ids[row*2:]))
+	case 4:
+		return binary.LittleEndian.Uint32(ids[row*4:])
+	default:
+		return 0
+	}
 }
 
 func bytesEqualString(buf []byte, value string) bool {
