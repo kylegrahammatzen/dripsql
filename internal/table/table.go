@@ -178,6 +178,7 @@ func (t *Table) CountInt64Equal(column string, value int64) (int, error) {
 	}
 
 	count := 0
+	var buf []byte
 	for _, segment := range t.manifest.Segments {
 		stats, ok := segment.Stats.Column(column)
 		if !ok {
@@ -190,10 +191,11 @@ func (t *Table) CountInt64Equal(column string, value int64) (int, error) {
 			continue
 		}
 
-		data, err := t.readSegment(segment)
+		data, err := t.readSegmentInto(segment, buf)
 		if err != nil {
 			return 0, err
 		}
+		buf = data
 		segmentCount, ok, err := storage.CountSegmentInt64EqualBytes(data, column, value)
 		if err != nil {
 			return 0, err
@@ -216,6 +218,7 @@ func (t *Table) CountStringEqual(column string, value string) (int, error) {
 	}
 
 	count := 0
+	var buf []byte
 	for _, segment := range t.manifest.Segments {
 		stats, ok := segment.Stats.Column(column)
 		if !ok {
@@ -225,10 +228,11 @@ func (t *Table) CountStringEqual(column string, value string) (int, error) {
 			return 0, fmt.Errorf("segment %d column %q is %s, want string", segment.ID, column, stats.Kind)
 		}
 
-		data, err := t.readSegment(segment)
+		data, err := t.readSegmentInto(segment, buf)
 		if err != nil {
 			return 0, err
 		}
+		buf = data
 		segmentCount, ok, err := storage.CountSegmentStringEqualBytes(data, column, value)
 		if err != nil {
 			return 0, err
@@ -284,15 +288,34 @@ func (t *Table) requireColumnKind(column string, kind vector.Kind) error {
 	return fmt.Errorf("missing column %q", column)
 }
 
-func (t *Table) readSegment(segment Segment) ([]byte, error) {
-	data, err := os.ReadFile(filepath.Join(t.dir, filepath.FromSlash(segment.File)))
+func (t *Table) readSegmentInto(segment Segment, buf []byte) ([]byte, error) {
+	if segment.Bytes < 0 {
+		return nil, fmt.Errorf("segment %d has negative byte length %d", segment.ID, segment.Bytes)
+	}
+	if uint64(segment.Bytes) > uint64(int(^uint(0)>>1)) {
+		return nil, fmt.Errorf("segment %d byte length %d overflows int", segment.ID, segment.Bytes)
+	}
+	size := int(segment.Bytes)
+	if cap(buf) < size {
+		buf = make([]byte, size)
+	}
+	buf = buf[:size]
+
+	file, err := os.Open(filepath.Join(t.dir, filepath.FromSlash(segment.File)))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(data)) != segment.Bytes {
-		return nil, fmt.Errorf("segment %d byte length %d does not match manifest length %d", segment.ID, len(data), segment.Bytes)
+	defer file.Close()
+	if _, err := io.ReadFull(file, buf); err != nil {
+		return nil, err
 	}
-	return data, nil
+	var extraBuf [1]byte
+	if extra, err := file.Read(extraBuf[:]); err != nil && err != io.EOF {
+		return nil, err
+	} else if extra != 0 {
+		return nil, fmt.Errorf("segment %d byte length exceeds manifest length %d", segment.ID, segment.Bytes)
+	}
+	return buf, nil
 }
 
 func (t *Table) writeManifest() error {
