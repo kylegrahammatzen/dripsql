@@ -323,14 +323,14 @@ func TestGroupSegmentStringCountsBytes(t *testing.T) {
 	}
 }
 
-func TestGroupSegmentStringCountsAt(t *testing.T) {
+func TestGroupSegmentStringCountsAtCached(t *testing.T) {
 	data := writeSegmentBytes(t,
 		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "cancel", "checkout"})},
 		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 11, 42})},
 	)
 	counts := map[string]int{"existing": 3}
 
-	ok, scratch, bytesRead, err := GroupSegmentStringCountsAt(bytes.NewReader(data), 0, int64(len(data)), "event_type", counts, nil)
+	ok, scratch, keyScratch, bytesRead, err := GroupSegmentStringCountsAtCached(bytes.NewReader(data), 0, int64(len(data)), "event_type", counts, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,6 +343,9 @@ func TestGroupSegmentStringCountsAt(t *testing.T) {
 	}
 	if len(scratch) == 0 {
 		t.Fatal("expected scratch to retain column payload")
+	}
+	if len(keyScratch) != 3 {
+		t.Fatalf("key scratch length = %d, want 3", len(keyScratch))
 	}
 	if bytesRead <= 0 || bytesRead >= int64(len(data)) {
 		t.Fatalf("bytes read = %d, want between 1 and full segment %d", bytesRead, len(data))

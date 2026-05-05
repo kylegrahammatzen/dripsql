@@ -98,11 +98,6 @@ func NewFloat64(values []float64) Float64 {
 	return Float64{Values: slices.Clone(values)}
 }
 
-// FromFloat64 returns a float64 vector that owns values without copying them.
-func FromFloat64(values []float64) Float64 {
-	return Float64{Values: values}
-}
-
 func (v Float64) Kind() Kind { return KindFloat64 }
 
 func (v Float64) Len() int { return len(v.Values) }

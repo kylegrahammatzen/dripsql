@@ -150,12 +150,6 @@ func CountSegmentStringEqualAt(r io.ReaderAt, segmentOffset int64, segmentBytes 
 	return count, true, scratch, bytesRead, nil
 }
 
-// GroupSegmentStringCountsAt reads only the requested string column from one encoded segment and groups values.
-func GroupSegmentStringCountsAt(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, counts map[string]int, scratch []byte) (found bool, outScratch []byte, bytesRead int64, err error) {
-	found, scratch, _, bytesRead, err = groupSegmentStringCountsAt(r, segmentOffset, segmentBytes, column, counts, scratch, nil, false)
-	return found, scratch, bytesRead, err
-}
-
 // GroupSegmentStringCountsAtCached reads only the requested string column and reuses stable map keys from keyScratch.
 func GroupSegmentStringCountsAtCached(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, counts map[string]int, scratch []byte, keyScratch []string) (found bool, outScratch []byte, outKeyScratch []string, bytesRead int64, err error) {
 	return groupSegmentStringCountsAt(r, segmentOffset, segmentBytes, column, counts, scratch, keyScratch, true)
@@ -278,12 +272,6 @@ func CountColumnStringEqualAt(r io.ReaderAt, payloadOffset int64, payloadBytes i
 		return 0, scratch, bytesRead, err
 	}
 	return count, scratch, bytesRead, nil
-}
-
-// GroupColumnStringCountsAt reads one string column payload range and groups values.
-func GroupColumnStringCountsAt(r io.ReaderAt, payloadOffset int64, payloadBytes int64, stats ColumnStats, counts map[string]int, scratch []byte) (outScratch []byte, bytesRead int64, err error) {
-	scratch, _, bytesRead, err = groupColumnStringCountsAt(r, payloadOffset, payloadBytes, stats, counts, scratch, nil, false)
-	return scratch, bytesRead, err
 }
 
 // GroupColumnStringCountsAtCached reads one string column payload range and reuses stable map keys from keyScratch.

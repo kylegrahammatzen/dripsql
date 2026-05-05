@@ -24,13 +24,6 @@ type countScanResult struct {
 }
 
 // CountInt64EqualParallel counts rows across table segments using up to workers file readers.
-func (t *Table) CountInt64EqualParallel(column string, value int64, workers int) (int, error) {
-	scanner := t.NewScanner()
-	defer scanner.Close()
-	return scanner.CountInt64EqualParallel(column, value, workers)
-}
-
-// CountInt64EqualParallel counts rows across table segments using up to workers file readers.
 func (s *Scanner) CountInt64EqualParallel(column string, value int64, workers int) (int, error) {
 	if err := s.validate(); err != nil {
 		return 0, err
@@ -58,13 +51,6 @@ func (s *Scanner) CountInt64EqualParallel(column string, value int64, workers in
 	}
 
 	return s.countInt64JobsParallel(jobs, value, workers)
-}
-
-// CountStringEqualParallel counts rows across table segments using up to workers file readers.
-func (t *Table) CountStringEqualParallel(column string, value string, workers int) (int, error) {
-	scanner := t.NewScanner()
-	defer scanner.Close()
-	return scanner.CountStringEqualParallel(column, value, workers)
 }
 
 // CountStringEqualParallel counts rows across table segments using up to workers file readers.

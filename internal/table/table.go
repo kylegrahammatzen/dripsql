@@ -82,16 +82,6 @@ func Create(dir string, schema []Column) (*Table, error) {
 	return t, nil
 }
 
-// Schema returns the table schema.
-func (t *Table) Schema() []Column {
-	schema := make([]Column, 0, len(t.manifest.Schema))
-	for _, col := range t.manifest.Schema {
-		kind, _ := parseKind(col.Kind)
-		schema = append(schema, Column{Name: col.Name, Kind: kind})
-	}
-	return schema
-}
-
 // Rows returns the total row count recorded in the manifest.
 func (t *Table) Rows() int {
 	rows := 0
