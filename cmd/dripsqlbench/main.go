@@ -100,6 +100,7 @@ func main() {
 	}
 
 	scanner := tbl.NewScanner()
+	defer scanner.Close()
 	results := make([]benchResult, 0, 3)
 
 	bench := func(name string, fn func() (int, error)) {
@@ -278,15 +279,22 @@ func printQueries(results []benchResult, rows int64) {
 			"%s\t%s\t%s\t%s\t%s\t%s\t%.2f MiB\n",
 			result.Name,
 			commas(result.Count),
-			result.First,
-			result.Best,
-			result.Avg,
+			formatDuration(result.First),
+			formatDuration(result.Best),
+			formatDuration(result.Avg),
 			commas(int64(rowsPerSec)),
 			float64(result.Stats.BytesScanned)/mib,
 		)
 	}
 
 	w.Flush()
+}
+
+func formatDuration(duration time.Duration) string {
+	if duration == 0 {
+		return "<1us"
+	}
+	return duration.String()
 }
 
 func printGroups(groups map[string]int) {

@@ -32,6 +32,15 @@ func TestCreateAppendOpenAndCount(t *testing.T) {
 	if tbl.Bytes() <= 0 {
 		t.Fatalf("bytes = %d, want positive", tbl.Bytes())
 	}
+	if len(tbl.manifest.Segments) != 2 {
+		t.Fatalf("manifest segments = %d, want 2", len(tbl.manifest.Segments))
+	}
+	if tbl.manifest.Segments[0].Offset != 0 {
+		t.Fatalf("first offset = %d, want 0", tbl.manifest.Segments[0].Offset)
+	}
+	if tbl.manifest.Segments[1].Offset != tbl.manifest.Segments[0].Bytes {
+		t.Fatalf("second offset = %d, want %d", tbl.manifest.Segments[1].Offset, tbl.manifest.Segments[0].Bytes)
+	}
 
 	reopened, err := Open(dir)
 	if err != nil {
@@ -111,8 +120,8 @@ func TestCountInt64EqualPrunesSegmentsBeforeOpeningFiles(t *testing.T) {
 	tbl := createEventsTable(t, t.TempDir())
 	appendBatch(t, tbl, []int64{1, 2, 3}, []string{"signup", "signup", "signup"})
 
-	segmentPath := filepath.Join(tbl.dir, filepath.FromSlash(tbl.manifest.Segments[0].File))
-	if err := os.WriteFile(segmentPath, []byte("not-a-segment"), 0o644); err != nil {
+	dataPath := filepath.Join(tbl.dir, dataFile)
+	if err := os.WriteFile(dataPath, []byte("not-a-segment"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,6 +164,7 @@ func TestScannerReusesBufferAcrossCounts(t *testing.T) {
 	appendBatch(t, tbl, []int64{7, 42, 7}, []string{"signup", "checkout", "checkout"})
 
 	scanner := tbl.NewScanner()
+	t.Cleanup(func() { _ = scanner.Close() })
 	count, err := scanner.CountInt64Equal("tenant_id", 7)
 	if err != nil {
 		t.Fatal(err)
@@ -197,6 +207,7 @@ func TestScannerStatsTrackInt64Pruning(t *testing.T) {
 	appendBatch(t, tbl, []int64{99, 99}, []string{"checkout", "checkout"})
 
 	scanner := tbl.NewScanner()
+	t.Cleanup(func() { _ = scanner.Close() })
 	count, err := scanner.CountInt64Equal("tenant_id", 99)
 	if err != nil {
 		t.Fatal(err)
@@ -245,6 +256,7 @@ func TestScannerGroupStringCountsInto(t *testing.T) {
 	)
 
 	scanner := tbl.NewScanner()
+	t.Cleanup(func() { _ = scanner.Close() })
 	counts, err := scanner.GroupStringCountsInto("event_type", map[string]int{"existing": 4})
 	if err != nil {
 		t.Fatal(err)
@@ -270,6 +282,9 @@ func TestManifestPersistsStats(t *testing.T) {
 	segment := reopened.manifest.Segments[0]
 	if segment.Rows != 3 || segment.Stats.Rows != 3 {
 		t.Fatalf("segment rows = %d/%d, want 3/3", segment.Rows, segment.Stats.Rows)
+	}
+	if segment.Offset != 0 || segment.Bytes <= 0 {
+		t.Fatalf("segment offset/bytes = %d/%d, want 0/positive", segment.Offset, segment.Bytes)
 	}
 	stats, ok := segment.Stats.Column("tenant_id")
 	if !ok {
@@ -325,6 +340,7 @@ func BenchmarkCountStringEqualTable(b *testing.B) {
 func BenchmarkScannerCountInt64EqualTable(b *testing.B) {
 	tbl := benchmarkEventsTable(b, 10, 100_000)
 	scanner := tbl.NewScanner()
+	b.Cleanup(func() { _ = scanner.Close() })
 	if count, err := scanner.CountInt64Equal("tenant_id", 7); err != nil {
 		b.Fatal(err)
 	} else if count != 980 {
@@ -347,6 +363,7 @@ func BenchmarkScannerCountInt64EqualTable(b *testing.B) {
 func BenchmarkScannerCountStringEqualTable(b *testing.B) {
 	tbl := benchmarkEventsTable(b, 10, 100_000)
 	scanner := tbl.NewScanner()
+	b.Cleanup(func() { _ = scanner.Close() })
 	if count, err := scanner.CountStringEqual("event_type", "checkout"); err != nil {
 		b.Fatal(err)
 	} else if count != 250_000 {
@@ -385,6 +402,7 @@ func BenchmarkGroupStringCountsTable(b *testing.B) {
 func BenchmarkScannerGroupStringCountsTable(b *testing.B) {
 	tbl := benchmarkEventsTable(b, 10, 100_000)
 	scanner := tbl.NewScanner()
+	b.Cleanup(func() { _ = scanner.Close() })
 	counts := make(map[string]int, 4)
 	if _, err := scanner.GroupStringCountsInto("event_type", counts); err != nil {
 		b.Fatal(err)

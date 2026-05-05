@@ -14,10 +14,9 @@ import (
 )
 
 const (
-	manifestVersion = 1
+	manifestVersion = 2
 	manifestFile    = "manifest.json"
-	segmentsDir     = "segments"
-	segmentExt      = ".dripseg"
+	dataFile        = "table.dripdata"
 )
 
 // Column describes one table column's physical storage type.
@@ -28,11 +27,11 @@ type Column struct {
 
 // Segment describes one immutable segment recorded in a table manifest.
 type Segment struct {
-	ID    uint64               `json:"id"`
-	File  string               `json:"file"`
-	Rows  int                  `json:"rows"`
-	Bytes int64                `json:"bytes"`
-	Stats storage.SegmentStats `json:"stats"`
+	ID     uint64               `json:"id"`
+	Offset int64                `json:"offset"`
+	Rows   int                  `json:"rows"`
+	Bytes  int64                `json:"bytes"`
+	Stats  storage.SegmentStats `json:"stats"`
 }
 
 type manifest struct {
@@ -56,6 +55,7 @@ type Table struct {
 // Scanner reuses scratch buffers across table scans. It is not safe for concurrent use.
 type Scanner struct {
 	table *Table
+	file  *os.File
 	buf   []byte
 	stats ScanStats
 }
@@ -84,7 +84,14 @@ func Create(dir string, schema []Column) (*Table, error) {
 	} else if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Join(dir, segmentsDir), 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(filepath.Join(dir, dataFile), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := file.Close(); err != nil {
 		return nil, err
 	}
 
@@ -97,6 +104,7 @@ func Create(dir string, schema []Column) (*Table, error) {
 		},
 	}
 	if err := t.writeManifest(); err != nil {
+		_ = os.Remove(filepath.Join(dir, dataFile))
 		return nil, err
 	}
 	return t, nil
@@ -162,36 +170,36 @@ func (t *Table) Append(batch vector.Batch) error {
 	}
 
 	id := t.manifest.NextSegmentID
-	file := segmentFile(id)
-	path := filepath.Join(t.dir, filepath.FromSlash(file))
 
 	var buf bytes.Buffer
 	stats, err := storage.WriteSegment(&buf, batch)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	segmentFile, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	data, err := os.OpenFile(filepath.Join(t.dir, dataFile), os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return err
 	}
-	if n, err := segmentFile.Write(buf.Bytes()); err != nil {
-		_ = segmentFile.Close()
-		_ = os.Remove(path)
+	offset, err := data.Seek(0, io.SeekEnd)
+	if err != nil {
+		_ = data.Close()
+		return err
+	}
+	if n, err := data.Write(buf.Bytes()); err != nil {
+		_ = data.Truncate(offset)
+		_ = data.Close()
 		return err
 	} else if n != buf.Len() {
-		_ = segmentFile.Close()
-		_ = os.Remove(path)
+		_ = data.Truncate(offset)
+		_ = data.Close()
 		return io.ErrShortWrite
 	}
-	if err := segmentFile.Close(); err != nil {
-		_ = os.Remove(path)
+	if err := data.Close(); err != nil {
+		_ = os.Truncate(filepath.Join(t.dir, dataFile), offset)
 		return err
 	}
 
-	entry := Segment{ID: id, File: file, Rows: stats.Rows, Bytes: int64(buf.Len()), Stats: stats}
+	entry := Segment{ID: id, Offset: offset, Rows: stats.Rows, Bytes: int64(buf.Len()), Stats: stats}
 	oldNext := t.manifest.NextSegmentID
 	oldLen := len(t.manifest.Segments)
 	t.manifest.NextSegmentID++
@@ -199,7 +207,7 @@ func (t *Table) Append(batch vector.Batch) error {
 	if err := t.writeManifest(); err != nil {
 		t.manifest.NextSegmentID = oldNext
 		t.manifest.Segments = t.manifest.Segments[:oldLen]
-		_ = os.Remove(path)
+		_ = os.Truncate(filepath.Join(t.dir, dataFile), offset)
 		return err
 	}
 	return nil
@@ -207,7 +215,9 @@ func (t *Table) Append(batch vector.Batch) error {
 
 // CountInt64Equal counts rows across all table segments where column equals value.
 func (t *Table) CountInt64Equal(column string, value int64) (int, error) {
-	return t.NewScanner().CountInt64Equal(column, value)
+	scanner := t.NewScanner()
+	defer scanner.Close()
+	return scanner.CountInt64Equal(column, value)
 }
 
 // CountInt64Equal counts rows across all table segments where column equals value.
@@ -257,7 +267,9 @@ func (s *Scanner) CountInt64Equal(column string, value int64) (int, error) {
 
 // CountStringEqual counts rows across all table segments where column equals value.
 func (t *Table) CountStringEqual(column string, value string) (int, error) {
-	return t.NewScanner().CountStringEqual(column, value)
+	scanner := t.NewScanner()
+	defer scanner.Close()
+	return scanner.CountStringEqual(column, value)
 }
 
 // CountStringEqual counts rows across all table segments where column equals value.
@@ -303,7 +315,9 @@ func (s *Scanner) CountStringEqual(column string, value string) (int, error) {
 
 // GroupStringCounts returns per-value row counts for one string column.
 func (t *Table) GroupStringCounts(column string) (map[string]int, error) {
-	return t.NewScanner().GroupStringCounts(column)
+	scanner := t.NewScanner()
+	defer scanner.Close()
+	return scanner.GroupStringCounts(column)
 }
 
 // GroupStringCounts returns per-value row counts for one string column.
@@ -351,8 +365,27 @@ func (s *Scanner) GroupStringCountsInto(column string, counts map[string]int) (m
 
 // Reset releases scanner scratch buffers.
 func (s *Scanner) Reset() {
+	if s.file != nil {
+		_ = s.file.Close()
+	}
+	s.file = nil
 	s.buf = nil
 	s.stats = ScanStats{}
+}
+
+// Close releases scanner file handles and scratch buffers.
+func (s *Scanner) Close() error {
+	if s == nil {
+		return nil
+	}
+	file := s.file
+	s.file = nil
+	s.buf = nil
+	s.stats = ScanStats{}
+	if file == nil {
+		return nil
+	}
+	return file.Close()
 }
 
 // Stats returns statistics for the scanner's most recent scan.
@@ -371,12 +404,38 @@ func (s *Scanner) validate() error {
 }
 
 func (s *Scanner) readSegment(segment Segment) ([]byte, error) {
-	data, err := s.table.readSegmentInto(segment, s.buf)
+	if segment.Bytes < 0 {
+		return nil, fmt.Errorf("segment %d has negative byte length %d", segment.ID, segment.Bytes)
+	}
+	if uint64(segment.Bytes) > uint64(int(^uint(0)>>1)) {
+		return nil, fmt.Errorf("segment %d byte length %d overflows int", segment.ID, segment.Bytes)
+	}
+	size := int(segment.Bytes)
+	if cap(s.buf) < size {
+		s.buf = make([]byte, size)
+	}
+	s.buf = s.buf[:size]
+
+	file, err := s.dataFile()
 	if err != nil {
 		return nil, err
 	}
-	s.buf = data
-	return data, nil
+	if _, err := file.ReadAt(s.buf, segment.Offset); err != nil {
+		return nil, err
+	}
+	return s.buf, nil
+}
+
+func (s *Scanner) dataFile() (*os.File, error) {
+	if s.file != nil {
+		return s.file, nil
+	}
+	file, err := os.Open(filepath.Join(s.table.dir, dataFile))
+	if err != nil {
+		return nil, err
+	}
+	s.file = file
+	return file, nil
 }
 
 func (s *Scanner) beginScan() {
@@ -439,36 +498,6 @@ func (t *Table) requireColumnKind(column string, kind vector.Kind) error {
 	return fmt.Errorf("missing column %q", column)
 }
 
-func (t *Table) readSegmentInto(segment Segment, buf []byte) ([]byte, error) {
-	if segment.Bytes < 0 {
-		return nil, fmt.Errorf("segment %d has negative byte length %d", segment.ID, segment.Bytes)
-	}
-	if uint64(segment.Bytes) > uint64(int(^uint(0)>>1)) {
-		return nil, fmt.Errorf("segment %d byte length %d overflows int", segment.ID, segment.Bytes)
-	}
-	size := int(segment.Bytes)
-	if cap(buf) < size {
-		buf = make([]byte, size)
-	}
-	buf = buf[:size]
-
-	file, err := os.Open(filepath.Join(t.dir, filepath.FromSlash(segment.File)))
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	if _, err := io.ReadFull(file, buf); err != nil {
-		return nil, err
-	}
-	var extraBuf [1]byte
-	if extra, err := file.Read(extraBuf[:]); err != nil && err != io.EOF {
-		return nil, err
-	} else if extra != 0 {
-		return nil, fmt.Errorf("segment %d byte length exceeds manifest length %d", segment.ID, segment.Bytes)
-	}
-	return buf, nil
-}
-
 func (t *Table) writeManifest() error {
 	data, err := json.MarshalIndent(t.manifest, "", "  ")
 	if err != nil {
@@ -496,8 +525,8 @@ func validateManifest(m manifest) error {
 		if segment.ID == 0 {
 			return fmt.Errorf("segment id is required")
 		}
-		if segment.File == "" {
-			return fmt.Errorf("segment %d file is required", segment.ID)
+		if segment.Offset < 0 {
+			return fmt.Errorf("segment %d has negative offset %d", segment.ID, segment.Offset)
 		}
 		if segment.Rows < 0 {
 			return fmt.Errorf("segment %d has negative row count %d", segment.ID, segment.Rows)
@@ -575,10 +604,6 @@ func parseKind(kind string) (vector.Kind, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func segmentFile(id uint64) string {
-	return filepath.ToSlash(filepath.Join(segmentsDir, fmt.Sprintf("%020d%s", id, segmentExt)))
 }
 
 func canSkipInt64(stats storage.ColumnStats, value int64) bool {
