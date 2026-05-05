@@ -167,28 +167,44 @@ func (s *segmentReader) readColumnHeader() (ColumnStats, error) {
 	if err := readFull(s.r, buf[:]); err != nil {
 		return ColumnStats{}, err
 	}
+	return decodeColumnFixedHeader(name, buf[:])
+}
 
+func decodeColumnFixedHeader(name string, fixed []byte) (ColumnStats, error) {
+	if len(fixed) != columnFixedHeaderLen {
+		return ColumnStats{}, io.ErrUnexpectedEOF
+	}
 	offset := 0
-	kindByte := buf[offset]
+	kindByte := fixed[offset]
 	offset++
-	count := binary.LittleEndian.Uint64(buf[offset:])
+	count := binary.LittleEndian.Uint64(fixed[offset:])
 	offset += 8
-	encodedLen := binary.LittleEndian.Uint64(buf[offset:])
+	encodedLen := binary.LittleEndian.Uint64(fixed[offset:])
 	offset += 8
-	hasMinMax := buf[offset] != 0
+	hasMinMax := fixed[offset] != 0
 	offset++
-	min := int64(binary.LittleEndian.Uint64(buf[offset:]))
+	min := int64(binary.LittleEndian.Uint64(fixed[offset:]))
 	offset += 8
-	max := int64(binary.LittleEndian.Uint64(buf[offset:]))
+	max := int64(binary.LittleEndian.Uint64(fixed[offset:]))
 
-	columnCount, err := checkedInt(fmt.Sprintf("column %q count", name), count)
+	countLabel := "column count"
+	encodedLenLabel := "column encoded length"
+	if name != "" {
+		countLabel = fmt.Sprintf("column %q count", name)
+		encodedLenLabel = fmt.Sprintf("column %q encoded length", name)
+	}
+
+	columnCount, err := checkedInt(countLabel, count)
 	if err != nil {
 		return ColumnStats{}, err
 	}
 	if encodedLen > maxEncodedColumnLen {
+		if name == "" {
+			return ColumnStats{}, fmt.Errorf("encoded column is too large: %d", encodedLen)
+		}
 		return ColumnStats{}, fmt.Errorf("encoded column %q is too large: %d", name, encodedLen)
 	}
-	columnEncodedLen, err := checkedInt(fmt.Sprintf("column %q encoded length", name), encodedLen)
+	columnEncodedLen, err := checkedInt(encodedLenLabel, encodedLen)
 	if err != nil {
 		return ColumnStats{}, err
 	}

@@ -15,6 +15,8 @@ const (
 	KindInt64 Kind = iota + 1
 	KindFloat64
 	KindString
+
+	MaxSelectionRows uint64 = 1 << 32
 )
 
 func (k Kind) String() string {
@@ -57,12 +59,8 @@ func (v Int64) Kind() Kind { return KindInt64 }
 func (v Int64) Len() int { return len(v.Values) }
 
 func (v Int64) Take(sel []uint32) (Vector, error) {
-	if len(sel) == 0 {
-		return Int64{}, nil
-	}
-	maxRow := slices.Max(sel)
-	if uint64(maxRow) >= uint64(len(v.Values)) {
-		return nil, fmt.Errorf("selection row %d out of range for int64 vector length %d", maxRow, len(v.Values))
+	if err := ValidateSelection(sel, len(v.Values)); err != nil {
+		return nil, fmt.Errorf("int64 vector: %w", err)
 	}
 
 	out := make([]int64, len(sel))
@@ -110,12 +108,8 @@ func (v Float64) Kind() Kind { return KindFloat64 }
 func (v Float64) Len() int { return len(v.Values) }
 
 func (v Float64) Take(sel []uint32) (Vector, error) {
-	if len(sel) == 0 {
-		return Float64{}, nil
-	}
-	maxRow := slices.Max(sel)
-	if uint64(maxRow) >= uint64(len(v.Values)) {
-		return nil, fmt.Errorf("selection row %d out of range for float64 vector length %d", maxRow, len(v.Values))
+	if err := ValidateSelection(sel, len(v.Values)); err != nil {
+		return nil, fmt.Errorf("float64 vector: %w", err)
 	}
 
 	out := make([]float64, len(sel))
@@ -168,9 +162,18 @@ func StringRange(start, length uint32) uint64 {
 	return uint64(start)<<32 | uint64(length)
 }
 
-// FromStringData returns a string vector backed by immutable data and packed ranges.
+// NewStringData validates ranges and returns a compact string vector backed by immutable data.
 // Callers must not mutate data while the returned vector exists.
-func FromStringData(data []byte, ranges []uint64) String {
+func NewStringData(data []byte, ranges []uint64) (String, error) {
+	if err := validateStringRanges(data, ranges); err != nil {
+		return String{}, err
+	}
+	return String{Data: data, Ranges: slices.Clone(ranges)}, nil
+}
+
+// FromStringDataUnsafe returns a compact string vector without validating ranges or copying.
+// Callers must pass valid ranges and must not mutate data while the returned vector exists.
+func FromStringDataUnsafe(data []byte, ranges []uint64) String {
 	return String{Data: data, Ranges: ranges}
 }
 
@@ -198,12 +201,16 @@ func (v String) Value(row int) string {
 }
 
 func (v String) Take(sel []uint32) (Vector, error) {
-	if len(sel) == 0 {
-		return String{}, nil
+	if err := ValidateSelection(sel, v.Len()); err != nil {
+		return nil, fmt.Errorf("string vector: %w", err)
 	}
-	maxRow := slices.Max(sel)
-	if uint64(maxRow) >= uint64(v.Len()) {
-		return nil, fmt.Errorf("selection row %d out of range for string vector length %d", maxRow, v.Len())
+
+	if v.Values == nil && v.Data != nil {
+		ranges := make([]uint64, len(sel))
+		for i, row := range sel {
+			ranges[i] = v.Ranges[row]
+		}
+		return String{Data: v.Data, Ranges: ranges}, nil
 	}
 
 	out := make([]string, len(sel))
@@ -211,6 +218,44 @@ func (v String) Take(sel []uint32) (Vector, error) {
 		out[i] = v.Value(int(row))
 	}
 	return String{Values: out}, nil
+}
+
+// ValidateSelectionCapacity reports whether rowCount can be represented by uint32 row indexes.
+func ValidateSelectionCapacity(rowCount int) error {
+	if rowCount < 0 {
+		return fmt.Errorf("negative row count %d", rowCount)
+	}
+	if uint64(rowCount) > MaxSelectionRows {
+		return fmt.Errorf("row count %d exceeds selection vector capacity", rowCount)
+	}
+	return nil
+}
+
+// ValidateSelection reports whether sel contains only row indexes within rowCount.
+func ValidateSelection(sel []uint32, rowCount int) error {
+	if err := ValidateSelectionCapacity(rowCount); err != nil {
+		return err
+	}
+	if len(sel) == 0 {
+		return nil
+	}
+	maxRow := slices.Max(sel)
+	if uint64(maxRow) >= uint64(rowCount) {
+		return fmt.Errorf("selection row %d out of range for row count %d", maxRow, rowCount)
+	}
+	return nil
+}
+
+func validateStringRanges(data []byte, ranges []uint64) error {
+	dataLen := uint64(len(data))
+	for row, packed := range ranges {
+		start := packed >> 32
+		length := uint64(uint32(packed))
+		if start > dataLen || length > dataLen-start {
+			return fmt.Errorf("string range at row %d out of bounds", row)
+		}
+	}
+	return nil
 }
 
 // Column names a typed vector inside a batch.
@@ -270,6 +315,9 @@ func NewBatch(columns ...Column) (Batch, error) {
 				}
 			}
 		}
+	}
+	if err := ValidateSelectionCapacity(count); err != nil {
+		return Batch{}, err
 	}
 
 	return Batch{Columns: slices.Clone(columns), Count: count}, nil

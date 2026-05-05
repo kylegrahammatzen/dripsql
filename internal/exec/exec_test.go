@@ -9,21 +9,6 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-func TestCount(t *testing.T) {
-	batch := mustBatch(t,
-		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7})},
-	)
-
-	if got := Count(batch); got != 3 {
-		t.Fatalf("count = %d, want 3", got)
-	}
-
-	batch.Sel = []uint32{0, 2}
-	if got := Count(batch); got != 2 {
-		t.Fatalf("selected count = %d, want 2", got)
-	}
-}
-
 func TestFilterInt64Equal(t *testing.T) {
 	batch := mustBatch(t,
 		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 11})},
@@ -39,8 +24,8 @@ func TestFilterInt64Equal(t *testing.T) {
 	if !slices.Equal(got.Sel, want) {
 		t.Fatalf("selection = %v, want %v", got.Sel, want)
 	}
-	if Count(got) != 2 {
-		t.Fatalf("count = %d, want 2", Count(got))
+	if got.VisibleCount() != 2 {
+		t.Fatalf("count = %d, want 2", got.VisibleCount())
 	}
 }
 
@@ -125,7 +110,7 @@ func TestFilterInt64EqualAfterSegmentRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := Count(filtered); got != 2 {
+	if got := filtered.VisibleCount(); got != 2 {
 		t.Fatalf("count after storage scan = %d, want 2", got)
 	}
 }
@@ -173,8 +158,8 @@ func BenchmarkFilterInt64EqualSparse(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if Count(got) != 10 {
-			b.Fatalf("count = %d, want 10", Count(got))
+		if got.VisibleCount() != 10 {
+			b.Fatalf("count = %d, want 10", got.VisibleCount())
 		}
 	}
 }
@@ -189,8 +174,8 @@ func BenchmarkFilterInt64EqualIntoSparse(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if Count(got) != 10 {
-			b.Fatalf("count = %d, want 10", Count(got))
+		if got.VisibleCount() != 10 {
+			b.Fatalf("count = %d, want 10", got.VisibleCount())
 		}
 		scratch = returned
 	}
@@ -206,8 +191,8 @@ func BenchmarkFilterInt64EqualAtIntoSparse(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if Count(got) != 10 {
-			b.Fatalf("count = %d, want 10", Count(got))
+		if got.VisibleCount() != 10 {
+			b.Fatalf("count = %d, want 10", got.VisibleCount())
 		}
 		scratch = returned
 	}
@@ -222,8 +207,8 @@ func BenchmarkFilterInt64EqualDense(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if Count(got) != 50_000 {
-			b.Fatalf("count = %d, want 50000", Count(got))
+		if got.VisibleCount() != 50_000 {
+			b.Fatalf("count = %d, want 50000", got.VisibleCount())
 		}
 	}
 }
@@ -238,8 +223,8 @@ func BenchmarkFilterInt64EqualIntoDense(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if Count(got) != 50_000 {
-			b.Fatalf("count = %d, want 50000", Count(got))
+		if got.VisibleCount() != 50_000 {
+			b.Fatalf("count = %d, want 50000", got.VisibleCount())
 		}
 		scratch = returned
 	}
@@ -255,8 +240,8 @@ func BenchmarkFilterInt64EqualAtIntoDense(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if Count(got) != 50_000 {
-			b.Fatalf("count = %d, want 50000", Count(got))
+		if got.VisibleCount() != 50_000 {
+			b.Fatalf("count = %d, want 50000", got.VisibleCount())
 		}
 		scratch = returned
 	}
@@ -275,8 +260,8 @@ func BenchmarkFilterInt64EqualWithSelection(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if Count(got) != 1_000 {
-			b.Fatalf("count = %d, want 1000", Count(got))
+		if got.VisibleCount() != 1_000 {
+			b.Fatalf("count = %d, want 1000", got.VisibleCount())
 		}
 	}
 }
@@ -295,8 +280,8 @@ func BenchmarkFilterInt64EqualIntoWithSelection(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if Count(got) != 1_000 {
-			b.Fatalf("count = %d, want 1000", Count(got))
+		if got.VisibleCount() != 1_000 {
+			b.Fatalf("count = %d, want 1000", got.VisibleCount())
 		}
 		scratch = returned
 	}
@@ -316,8 +301,8 @@ func BenchmarkFilterInt64EqualAtIntoWithSelection(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if Count(got) != 1_000 {
-			b.Fatalf("count = %d, want 1000", Count(got))
+		if got.VisibleCount() != 1_000 {
+			b.Fatalf("count = %d, want 1000", got.VisibleCount())
 		}
 		scratch = returned
 	}
@@ -336,8 +321,8 @@ func BenchmarkFilterInt64EqualChainsSelection(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if Count(got) != 1_000 {
-			b.Fatalf("count = %d, want 1000", Count(got))
+		if got.VisibleCount() != 1_000 {
+			b.Fatalf("count = %d, want 1000", got.VisibleCount())
 		}
 	}
 }

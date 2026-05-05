@@ -10,54 +10,52 @@ import (
 
 // SelectSegmentInt64EqualBytes appends matching row indexes from one encoded segment byte slice.
 func SelectSegmentInt64EqualBytes(data []byte, column string, value int64, scratch []uint32) ([]uint32, bool, error) {
-	offset, cols, err := readSegmentHeader(data)
+	stats, payload, found, skip, err := findInt64EqualPayloadBytes(data, column, value)
 	if err != nil {
-		return scratch, false, err
+		return scratch, found, err
+	}
+	if !found {
+		return scratch, false, nil
+	}
+	if skip {
+		return scratch[:0], true, nil
 	}
 
-	selected := scratch
-	found := false
-	for range cols {
-		name, stats, payload, err := readColumnBytes(data, &offset)
-		if err != nil {
-			return scratch, false, err
-		}
-		if !bytesEqualString(name, column) || found {
-			continue
-		}
-
-		found = true
-		stats.Name = column
-		if stats.Kind != vector.KindInt64 {
-			return scratch, true, fmt.Errorf("column %q is %s, want int64", column, stats.Kind)
-		}
-		if canSkipInt64Equal(stats, value) {
-			selected = scratch[:0]
-			continue
-		}
-
-		selected, err = selectInt64EqualPayload(payload, stats, value, scratch)
-		if err != nil {
-			return scratch, true, err
-		}
+	selected, err := selectInt64EqualPayload(payload, stats, value, scratch)
+	if err != nil {
+		return scratch, true, err
 	}
-
 	return selected, found, nil
 }
 
 // CountSegmentInt64EqualBytes counts matching rows from one encoded segment byte slice.
 func CountSegmentInt64EqualBytes(data []byte, column string, value int64) (int, bool, error) {
-	offset, cols, err := readSegmentHeader(data)
-	if err != nil {
-		return 0, false, err
+	stats, payload, found, skip, err := findInt64EqualPayloadBytes(data, column, value)
+	if err != nil || !found || skip {
+		return 0, found, err
 	}
 
-	count := 0
+	count, err := countInt64EqualPayload(payload, stats, value)
+	if err != nil {
+		return 0, true, err
+	}
+	return count, true, nil
+}
+
+func findInt64EqualPayloadBytes(data []byte, column string, value int64) (ColumnStats, []byte, bool, bool, error) {
+	offset, cols, err := readSegmentHeader(data)
+	if err != nil {
+		return ColumnStats{}, nil, false, false, err
+	}
+
 	found := false
+	skip := false
+	var foundStats ColumnStats
+	var foundPayload []byte
 	for range cols {
 		name, stats, payload, err := readColumnBytes(data, &offset)
 		if err != nil {
-			return 0, false, err
+			return ColumnStats{}, nil, false, false, err
 		}
 		if !bytesEqualString(name, column) || found {
 			continue
@@ -66,19 +64,17 @@ func CountSegmentInt64EqualBytes(data []byte, column string, value int64) (int, 
 		found = true
 		stats.Name = column
 		if stats.Kind != vector.KindInt64 {
-			return 0, true, fmt.Errorf("column %q is %s, want int64", column, stats.Kind)
+			return ColumnStats{}, nil, true, false, fmt.Errorf("column %q is %s, want int64", column, stats.Kind)
 		}
 		if canSkipInt64Equal(stats, value) {
+			skip = true
 			continue
 		}
-
-		count, err = countInt64EqualPayload(payload, stats, value)
-		if err != nil {
-			return 0, true, err
-		}
+		foundStats = stats
+		foundPayload = payload
 	}
 
-	return count, found, nil
+	return foundStats, foundPayload, found, skip, nil
 }
 
 func readSegmentHeader(data []byte) (offset int, cols int, err error) {
@@ -131,38 +127,9 @@ func readColumnHeaderBytes(data []byte, offset *int) ([]byte, ColumnStats, error
 		return nil, ColumnStats{}, err
 	}
 
-	fixedOffset := 0
-	kindByte := fixed[fixedOffset]
-	fixedOffset++
-	count := binary.LittleEndian.Uint64(fixed[fixedOffset:])
-	fixedOffset += 8
-	encodedLen := binary.LittleEndian.Uint64(fixed[fixedOffset:])
-	fixedOffset += 8
-	hasMinMax := fixed[fixedOffset] != 0
-	fixedOffset++
-	min := int64(binary.LittleEndian.Uint64(fixed[fixedOffset:]))
-	fixedOffset += 8
-	max := int64(binary.LittleEndian.Uint64(fixed[fixedOffset:]))
-
-	columnCount, err := checkedInt("column count", count)
+	stats, err := decodeColumnFixedHeader("", fixed)
 	if err != nil {
 		return nil, ColumnStats{}, err
-	}
-	if encodedLen > maxEncodedColumnLen {
-		return nil, ColumnStats{}, fmt.Errorf("encoded column %q is too large: %d", string(name), encodedLen)
-	}
-	columnEncodedLen, err := checkedInt("column encoded length", encodedLen)
-	if err != nil {
-		return nil, ColumnStats{}, err
-	}
-
-	stats := ColumnStats{
-		Kind:       vector.Kind(kindByte),
-		Count:      columnCount,
-		HasMinMax:  hasMinMax,
-		MinInt64:   min,
-		MaxInt64:   max,
-		EncodedLen: columnEncodedLen,
 	}
 	return name, stats, nil
 }

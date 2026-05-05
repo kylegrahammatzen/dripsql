@@ -52,30 +52,6 @@ func (s *segmentWriter) writeVectorColumn(col vector.Column) (ColumnStats, error
 	}
 }
 
-func encodeColumn(col vector.Column) ([]byte, ColumnStats, error) {
-	stats := ColumnStats{Name: col.Name, Kind: col.Vector.Kind(), Count: col.Vector.Len()}
-
-	switch values := col.Vector.(type) {
-	case vector.Int64:
-		min, max, ok := values.MinMax()
-		stats.HasMinMax = ok
-		stats.MinInt64 = min
-		stats.MaxInt64 = max
-		encoded := encodeInt64(values.Values)
-		stats.EncodedLen = len(encoded)
-		return encoded, stats, nil
-	case vector.String:
-		encoded, err := encodeStringVector(values)
-		if err != nil {
-			return nil, ColumnStats{}, fmt.Errorf("encode column %q: %w", col.Name, err)
-		}
-		stats.EncodedLen = len(encoded)
-		return encoded, stats, nil
-	default:
-		return nil, ColumnStats{}, fmt.Errorf("segment encoding is not implemented for %s vectors", col.Vector.Kind())
-	}
-}
-
 func encodeInt64(values []int64) []byte {
 	out := make([]byte, 0, len(values)*8)
 	for _, value := range values {
@@ -396,7 +372,7 @@ func decodePlainString(encoded []byte, count int) (vector.String, error) {
 	if offset != len(encoded) {
 		return vector.String{}, fmt.Errorf("trailing string bytes: %d", len(encoded)-offset)
 	}
-	return vector.FromStringData(encoded, ranges), nil
+	return vector.FromStringDataUnsafe(encoded, ranges), nil
 }
 
 func decodeDictionaryString(encoded []byte, count int) (vector.String, error) {
@@ -471,7 +447,7 @@ func decodeDictionaryString(encoded []byte, count int) (vector.String, error) {
 		}
 		ranges[row] = dictRanges[id]
 	}
-	return vector.FromStringData(encoded, ranges), nil
+	return vector.FromStringDataUnsafe(encoded, ranges), nil
 }
 
 func checkedInt(name string, value uint64) (int, error) {

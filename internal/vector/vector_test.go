@@ -88,11 +88,14 @@ func TestFloat64MinMaxRejectsNaN(t *testing.T) {
 
 func TestStringData(t *testing.T) {
 	data := []byte("alphabeta")
-	v := FromStringData(data, []uint64{
+	v, err := NewStringData(data, []uint64{
 		StringRange(0, 5),
 		StringRange(5, 0),
 		StringRange(5, 4),
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if v.Len() != 3 {
 		t.Fatalf("len = %d, want 3", v.Len())
@@ -115,8 +118,18 @@ func TestStringData(t *testing.T) {
 	if !ok {
 		t.Fatalf("got %T, want String", taken)
 	}
-	if !slices.Equal(takenStrings.Values, []string{"beta", "alpha"}) {
-		t.Fatalf("taken = %v, want [beta alpha]", takenStrings.Values)
+	if takenStrings.Data == nil || len(takenStrings.Ranges) != 2 {
+		t.Fatalf("expected compact taken string vector: %+v", takenStrings)
+	}
+	if takenStrings.Value(0) != "beta" || takenStrings.Value(1) != "alpha" {
+		t.Fatalf("taken = [%q %q], want [beta alpha]", takenStrings.Value(0), takenStrings.Value(1))
+	}
+}
+
+func TestNewStringDataRejectsInvalidRanges(t *testing.T) {
+	_, err := NewStringData([]byte("alpha"), []uint64{StringRange(4, 2)})
+	if err == nil {
+		t.Fatal("expected invalid range error")
 	}
 }
 
