@@ -15,6 +15,7 @@ type Scanner struct {
 	table         *Table
 	file          *os.File
 	buf           []byte
+	stringKeys    []string
 	parallelFiles []*os.File
 	parallelBufs  [][]byte
 	stats         ScanStats
@@ -177,10 +178,10 @@ func (s *Scanner) GroupStringCountsInto(column string, counts map[string]int) (m
 		var bytesRead int64
 		reader := seekReaderAt{file: file}
 		if columnRange, ok := segmentColumnRange(segment, column); ok {
-			s.buf, bytesRead, err = storage.GroupColumnStringCountsAt(reader, segment.Offset+columnRange.Offset, columnRange.Bytes, stats, counts, s.buf)
+			s.buf, s.stringKeys, bytesRead, err = storage.GroupColumnStringCountsAtCached(reader, segment.Offset+columnRange.Offset, columnRange.Bytes, stats, counts, s.buf, s.stringKeys)
 		} else {
 			var found bool
-			found, s.buf, bytesRead, err = storage.GroupSegmentStringCountsAt(reader, segment.Offset, segment.Bytes, column, counts, s.buf)
+			found, s.buf, s.stringKeys, bytesRead, err = storage.GroupSegmentStringCountsAtCached(reader, segment.Offset, segment.Bytes, column, counts, s.buf, s.stringKeys)
 			if err == nil && !found {
 				return nil, fmt.Errorf("segment %d missing column %q", segment.ID, column)
 			}
@@ -238,6 +239,7 @@ func (s *Scanner) Reset() {
 	_ = s.closeParallelFiles()
 	s.file = nil
 	s.buf = nil
+	s.stringKeys = nil
 	s.parallelBufs = nil
 	s.stats = ScanStats{}
 }
@@ -250,6 +252,7 @@ func (s *Scanner) Close() error {
 	file := s.file
 	s.file = nil
 	s.buf = nil
+	s.stringKeys = nil
 	s.parallelBufs = nil
 	s.stats = ScanStats{}
 	parallelErr := s.closeParallelFiles()

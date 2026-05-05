@@ -152,23 +152,34 @@ func CountSegmentStringEqualAt(r io.ReaderAt, segmentOffset int64, segmentBytes 
 
 // GroupSegmentStringCountsAt reads only the requested string column from one encoded segment and groups values.
 func GroupSegmentStringCountsAt(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, counts map[string]int, scratch []byte) (found bool, outScratch []byte, bytesRead int64, err error) {
+	found, scratch, _, bytesRead, err = groupSegmentStringCountsAt(r, segmentOffset, segmentBytes, column, counts, scratch, nil, false)
+	return found, scratch, bytesRead, err
+}
+
+// GroupSegmentStringCountsAtCached reads only the requested string column and reuses stable map keys from keyScratch.
+func GroupSegmentStringCountsAtCached(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, counts map[string]int, scratch []byte, keyScratch []string) (found bool, outScratch []byte, outKeyScratch []string, bytesRead int64, err error) {
+	return groupSegmentStringCountsAt(r, segmentOffset, segmentBytes, column, counts, scratch, keyScratch, true)
+}
+
+func groupSegmentStringCountsAt(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, counts map[string]int, scratch []byte, keyScratch []string, cacheKeys bool) (found bool, outScratch []byte, outKeyScratch []string, bytesRead int64, err error) {
 	loc, scratch, found, bytesRead, err := locateColumnPayloadAt(r, segmentOffset, segmentBytes, column, scratch)
 	if err != nil || !found {
-		return found, scratch, bytesRead, err
+		return found, scratch, keyScratch, bytesRead, err
 	}
 	if loc.stats.Kind != vector.KindString {
-		return true, scratch, bytesRead, fmt.Errorf("column %q is %s, want string", column, loc.stats.Kind)
+		return true, scratch, keyScratch, bytesRead, fmt.Errorf("column %q is %s, want string", column, loc.stats.Kind)
 	}
 
 	payload, scratch, payloadBytesRead, err := readColumnPayloadAt(r, loc, scratch)
 	bytesRead += payloadBytesRead
 	if err != nil {
-		return true, scratch, bytesRead, err
+		return true, scratch, keyScratch, bytesRead, err
 	}
-	if err := groupStringCountsPayload(payload, loc.stats, counts); err != nil {
-		return true, scratch, bytesRead, err
+	keyScratch, err = groupStringCountsPayloadWithKeyCache(payload, loc.stats, counts, keyScratch, cacheKeys)
+	if err != nil {
+		return true, scratch, keyScratch, bytesRead, err
 	}
-	return true, scratch, bytesRead, nil
+	return true, scratch, keyScratch, bytesRead, nil
 }
 
 type segmentColumnLocation struct {
@@ -271,17 +282,28 @@ func CountColumnStringEqualAt(r io.ReaderAt, payloadOffset int64, payloadBytes i
 
 // GroupColumnStringCountsAt reads one string column payload range and groups values.
 func GroupColumnStringCountsAt(r io.ReaderAt, payloadOffset int64, payloadBytes int64, stats ColumnStats, counts map[string]int, scratch []byte) (outScratch []byte, bytesRead int64, err error) {
+	scratch, _, bytesRead, err = groupColumnStringCountsAt(r, payloadOffset, payloadBytes, stats, counts, scratch, nil, false)
+	return scratch, bytesRead, err
+}
+
+// GroupColumnStringCountsAtCached reads one string column payload range and reuses stable map keys from keyScratch.
+func GroupColumnStringCountsAtCached(r io.ReaderAt, payloadOffset int64, payloadBytes int64, stats ColumnStats, counts map[string]int, scratch []byte, keyScratch []string) (outScratch []byte, outKeyScratch []string, bytesRead int64, err error) {
+	return groupColumnStringCountsAt(r, payloadOffset, payloadBytes, stats, counts, scratch, keyScratch, true)
+}
+
+func groupColumnStringCountsAt(r io.ReaderAt, payloadOffset int64, payloadBytes int64, stats ColumnStats, counts map[string]int, scratch []byte, keyScratch []string, cacheKeys bool) (outScratch []byte, outKeyScratch []string, bytesRead int64, err error) {
 	if stats.Kind != vector.KindString {
-		return scratch, 0, fmt.Errorf("column %q is %s, want string", stats.Name, stats.Kind)
+		return scratch, keyScratch, 0, fmt.Errorf("column %q is %s, want string", stats.Name, stats.Kind)
 	}
 	payload, scratch, bytesRead, err := readPayloadRangeAt(r, payloadOffset, payloadBytes, stats, scratch)
 	if err != nil {
-		return scratch, bytesRead, err
+		return scratch, keyScratch, bytesRead, err
 	}
-	if err := groupStringCountsPayload(payload, stats, counts); err != nil {
-		return scratch, bytesRead, err
+	keyScratch, err = groupStringCountsPayloadWithKeyCache(payload, stats, counts, keyScratch, cacheKeys)
+	if err != nil {
+		return scratch, keyScratch, bytesRead, err
 	}
-	return scratch, bytesRead, nil
+	return scratch, keyScratch, bytesRead, nil
 }
 
 func findColumnPayloadBytes(data []byte, column string) (ColumnStats, []byte, bool, error) {
@@ -667,16 +689,21 @@ func scanStringEqualPayload(payload []byte, stats ColumnStats, value string, scr
 }
 
 func groupStringCountsPayload(payload []byte, stats ColumnStats, counts map[string]int) error {
+	_, err := groupStringCountsPayloadWithKeyCache(payload, stats, counts, nil, false)
+	return err
+}
+
+func groupStringCountsPayloadWithKeyCache(payload []byte, stats ColumnStats, counts map[string]int, keyScratch []string, cacheKeys bool) ([]string, error) {
 	if len(payload) == 0 {
-		return fmt.Errorf("missing string codec")
+		return keyScratch, fmt.Errorf("missing string codec")
 	}
 	switch payload[0] {
 	case stringCodecPlain:
-		return groupPlainStringCountsPayload(payload, stats, counts)
+		return groupPlainStringCountsPayloadWithKeyCache(payload, stats, counts, keyScratch, cacheKeys)
 	case stringCodecDictionary:
-		return groupDictionaryStringCountsPayload(payload, stats, counts)
+		return groupDictionaryStringCountsPayloadWithKeyCache(payload, stats, counts, keyScratch, cacheKeys)
 	default:
-		return fmt.Errorf("unsupported string codec %d", payload[0])
+		return keyScratch, fmt.Errorf("unsupported string codec %d", payload[0])
 	}
 }
 
@@ -726,23 +753,28 @@ func countPlainStringEqualPayload(payload []byte, stats ColumnStats, value strin
 }
 
 func groupPlainStringCountsPayload(payload []byte, stats ColumnStats, counts map[string]int) error {
+	_, err := groupPlainStringCountsPayloadWithKeyCache(payload, stats, counts, nil, false)
+	return err
+}
+
+func groupPlainStringCountsPayloadWithKeyCache(payload []byte, stats ColumnStats, counts map[string]int, keyScratch []string, cacheKeys bool) ([]string, error) {
 	offset := 1
 	for row := range stats.Count {
 		if len(payload)-offset < 4 {
-			return fmt.Errorf("short string length at row %d", row)
+			return keyScratch, fmt.Errorf("short string length at row %d", row)
 		}
 		length := binary.LittleEndian.Uint32(payload[offset:])
 		offset += 4
 		if uint64(length) > uint64(len(payload)-offset) {
-			return fmt.Errorf("short string data at row %d", row)
+			return keyScratch, fmt.Errorf("short string data at row %d", row)
 		}
-		counts[string(payload[offset:offset+int(length)])]++
+		keyScratch = addStringCount(counts, payload[offset:offset+int(length)], 1, keyScratch, cacheKeys)
 		offset += int(length)
 	}
 	if offset != len(payload) {
-		return fmt.Errorf("trailing string bytes: %d", len(payload)-offset)
+		return keyScratch, fmt.Errorf("trailing string bytes: %d", len(payload)-offset)
 	}
-	return nil
+	return keyScratch, nil
 }
 
 func scanDictionaryStringEqualPayload(payload []byte, stats ColumnStats, value string, scratch []uint32) ([]uint32, error) {
@@ -840,9 +872,14 @@ func countDictionaryStringEqualPayload(payload []byte, stats ColumnStats, value 
 }
 
 func groupDictionaryStringCountsPayload(payload []byte, stats ColumnStats, counts map[string]int) error {
+	_, err := groupDictionaryStringCountsPayloadWithKeyCache(payload, stats, counts, nil, false)
+	return err
+}
+
+func groupDictionaryStringCountsPayloadWithKeyCache(payload []byte, stats ColumnStats, counts map[string]int, keyScratch []string, cacheKeys bool) ([]string, error) {
 	dictOffset, ids, idEncoding, dictCount, err := parseStringDictionaryPayload(payload, stats)
 	if err != nil {
-		return err
+		return keyScratch, err
 	}
 	var smallDictCounts [64]int
 	dictCounts := smallDictCounts[:]
@@ -852,7 +889,7 @@ func groupDictionaryStringCountsPayload(payload []byte, stats ColumnStats, count
 	dictCounts = dictCounts[:dictCount]
 	if stringDictionaryIDEncodingIsPacked(idEncoding) {
 		if err := groupPackedDictionaryStringCountsPayload(ids, stats, stringDictionaryPackedBitWidth(idEncoding), dictCount, dictCounts); err != nil {
-			return err
+			return keyScratch, err
 		}
 	} else {
 		switch idEncoding {
@@ -860,7 +897,7 @@ func groupDictionaryStringCountsPayload(payload []byte, stats ColumnStats, count
 			for row := 0; row < stats.Count; row++ {
 				id := ids[row]
 				if int(id) >= dictCount {
-					return fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+					return keyScratch, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
 				}
 				dictCounts[id]++
 			}
@@ -868,7 +905,7 @@ func groupDictionaryStringCountsPayload(payload []byte, stats ColumnStats, count
 			for row := 0; row < stats.Count; row++ {
 				id := binary.LittleEndian.Uint16(ids[row*2:])
 				if int(id) >= dictCount {
-					return fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+					return keyScratch, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
 				}
 				dictCounts[id]++
 			}
@@ -876,41 +913,54 @@ func groupDictionaryStringCountsPayload(payload []byte, stats ColumnStats, count
 			for row := 0; row < stats.Count; row++ {
 				id := binary.LittleEndian.Uint32(ids[row*4:])
 				if uint64(id) >= uint64(dictCount) {
-					return fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
+					return keyScratch, fmt.Errorf("string dictionary id %d out of range at row %d", id, row)
 				}
 				dictCounts[id]++
 			}
 		}
 	}
-	return addStringDictionaryCounts(payload, dictOffset, dictCounts, counts)
+	return addStringDictionaryCounts(payload, dictOffset, dictCounts, counts, keyScratch, cacheKeys)
 }
 
-func addStringDictionaryCounts(payload []byte, offset int, dictCounts []int, counts map[string]int) error {
+func addStringDictionaryCounts(payload []byte, offset int, dictCounts []int, counts map[string]int, keyScratch []string, cacheKeys bool) ([]string, error) {
 	for id, count := range dictCounts {
 		if len(payload)-offset < 4 {
-			return fmt.Errorf("short string dictionary length at value %d", id)
+			return keyScratch, fmt.Errorf("short string dictionary length at value %d", id)
 		}
 		length := binary.LittleEndian.Uint32(payload[offset:])
 		offset += 4
 		if uint64(length) > uint64(len(payload)-offset) {
-			return fmt.Errorf("short string dictionary data at value %d", id)
+			return keyScratch, fmt.Errorf("short string dictionary data at value %d", id)
 		}
 		if count != 0 {
-			addStringCount(counts, payload[offset:offset+int(length)], count)
+			keyScratch = addStringCount(counts, payload[offset:offset+int(length)], count, keyScratch, cacheKeys)
 		}
 		offset += int(length)
 	}
-	return nil
+	return keyScratch, nil
 }
 
-func addStringCount(counts map[string]int, value []byte, count int) {
+func addStringCount(counts map[string]int, value []byte, count int, keyScratch []string, cacheKeys bool) []string {
 	for key := range counts {
 		if bytesEqualString(value, key) {
 			counts[key] += count
-			return
+			return keyScratch
 		}
 	}
-	counts[string(value)] = count
+	if cacheKeys {
+		for _, key := range keyScratch {
+			if bytesEqualString(value, key) {
+				counts[key] += count
+				return keyScratch
+			}
+		}
+	}
+	key := string(value)
+	counts[key] = count
+	if cacheKeys {
+		keyScratch = append(keyScratch, key)
+	}
+	return keyScratch
 }
 
 func scanPackedDictionaryStringEqualPayload(ids []byte, stats ColumnStats, targetID uint32, bitWidth int, dictCount int, scratch []uint32) ([]uint32, error) {
