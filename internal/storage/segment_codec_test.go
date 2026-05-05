@@ -120,6 +120,78 @@ func TestDecodeStringRejectsBadPayload(t *testing.T) {
 	}
 }
 
+func TestEncodeInt64UsesDictionaryWhenSmaller(t *testing.T) {
+	values := []int64{7, 42, 7, 7, 42, 7}
+
+	encoded := encodeInt64(values)
+	if encoded[0] != int64CodecDictionary {
+		t.Fatalf("int64 codec = %d, want dictionary", encoded[0])
+	}
+	if len(encoded) >= plainInt64PayloadLen(values) {
+		t.Fatalf("encoded length = %d, want less than plain length %d", len(encoded), plainInt64PayloadLen(values))
+	}
+
+	decoded, err := decodeInt64(encoded, len(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireVectorEqual(t, vector.NewInt64(values), vector.FromInt64(decoded))
+}
+
+func TestEncodeInt64UsesPlainWhenDictionaryIsLarger(t *testing.T) {
+	values := []int64{1, 2, 3, 4}
+
+	encoded := encodeInt64(values)
+	if encoded[0] != int64CodecPlain {
+		t.Fatalf("int64 codec = %d, want plain", encoded[0])
+	}
+
+	decoded, err := decodeInt64(encoded, len(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireVectorEqual(t, vector.NewInt64(values), vector.FromInt64(decoded))
+}
+
+func TestDecodeInt64RejectsBadPayload(t *testing.T) {
+	validOneValueDictionary := []byte{int64CodecDictionary}
+	validOneValueDictionary = binary.LittleEndian.AppendUint32(validOneValueDictionary, 1)
+	validOneValueDictionary = append(validOneValueDictionary, 1)
+	validOneValueDictionary = binary.LittleEndian.AppendUint64(validOneValueDictionary, 7)
+
+	shortDictionaryValues := []byte{int64CodecDictionary}
+	shortDictionaryValues = binary.LittleEndian.AppendUint32(shortDictionaryValues, 1)
+	shortDictionaryValues = append(shortDictionaryValues, 1, 1, 2, 3)
+
+	tests := []struct {
+		name    string
+		encoded []byte
+		count   int
+		wantErr string
+	}{
+		{name: "missing codec", encoded: nil, wantErr: "missing int64 codec"},
+		{name: "unknown codec", encoded: []byte{255}, wantErr: "unsupported int64 codec"},
+		{name: "short plain", encoded: []byte{int64CodecPlain, 0, 0, 0}, count: 1, wantErr: "invalid int64 encoded length"},
+		{name: "short dictionary header", encoded: []byte{int64CodecDictionary, 0, 0, 0}, wantErr: "short int64 dictionary header"},
+		{name: "bad dictionary id width", encoded: []byte{int64CodecDictionary, 0, 0, 0, 0, 3}, wantErr: "unsupported int64 dictionary id width"},
+		{name: "short dictionary values", encoded: shortDictionaryValues, count: 1, wantErr: "short int64 dictionary values"},
+		{name: "short dictionary ids", encoded: append(slices.Clone(validOneValueDictionary), 0), count: 2, wantErr: "short int64 dictionary ids"},
+		{name: "dictionary id out of range", encoded: append(slices.Clone(validOneValueDictionary), 1), count: 1, wantErr: "out of range"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := decodeInt64(tt.encoded, tt.count)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %q, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func BenchmarkEncodeInt64(b *testing.B) {
 	b.ReportAllocs()
 
@@ -197,4 +269,8 @@ func plainStringPayloadLen(values []string) int {
 		size += 4 + len(value)
 	}
 	return size
+}
+
+func plainInt64PayloadLen(values []int64) int {
+	return 1 + len(values)*8
 }

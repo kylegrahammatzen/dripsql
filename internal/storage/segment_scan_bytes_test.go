@@ -61,6 +61,47 @@ func TestCountSegmentInt64EqualBytes(t *testing.T) {
 	}
 }
 
+func TestCountSegmentInt64EqualBytesDictionary(t *testing.T) {
+	data := writeSegmentBytes(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 7, 42, 7})},
+	)
+	stats, payload, found, err := findColumnPayloadBytes(data, "tenant_id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("missing tenant_id column")
+	}
+	if payload[0] != int64CodecDictionary {
+		t.Fatalf("int64 codec = %d, want dictionary", payload[0])
+	}
+	if stats.EncodedLen >= plainInt64PayloadLen([]int64{7, 42, 7, 7, 42, 7}) {
+		t.Fatalf("encoded len = %d, want below plain", stats.EncodedLen)
+	}
+
+	count, ok, err := CountSegmentInt64EqualBytes(data, "tenant_id", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing tenant_id column")
+	}
+	if count != 4 {
+		t.Fatalf("count = %d, want 4", count)
+	}
+
+	selected, ok, err := SelectSegmentInt64EqualBytes(data, "tenant_id", 42, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing tenant_id column")
+	}
+	if !slices.Equal(selected, []uint32{1, 4}) {
+		t.Fatalf("selection = %v, want [1 4]", selected)
+	}
+}
+
 func TestCountSegmentInt64EqualAt(t *testing.T) {
 	data := writeSegmentBytes(t,
 		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "cancel"})},
@@ -98,7 +139,7 @@ func TestSegmentColumnPayloadRanges(t *testing.T) {
 		t.Fatalf("ranges = %d, want 2", len(ranges))
 	}
 	tenantRange := mustColumnPayloadRange(t, ranges, "tenant_id")
-	if tenantRange.Offset <= 0 || tenantRange.Bytes != 32 || tenantRange.Offset+tenantRange.Bytes >= int64(len(data)) {
+	if tenantRange.Offset <= 0 || tenantRange.Bytes != 33 || tenantRange.Offset+tenantRange.Bytes >= int64(len(data)) {
 		t.Fatalf("tenant range = %+v, segment bytes = %d", tenantRange, len(data))
 	}
 	tenantStats, _, found, err := findColumnPayloadBytes(data, "tenant_id")

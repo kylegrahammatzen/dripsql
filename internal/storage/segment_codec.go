@@ -8,6 +8,9 @@ import (
 )
 
 const (
+	int64CodecPlain                 byte = 1
+	int64CodecDictionary            byte = 2
+	maxLinearInt64DictionaryValues       = 16
 	stringCodecPlain                byte = 1
 	stringCodecDictionary           byte = 2
 	maxLinearStringDictionaryValues      = 16
@@ -58,12 +61,12 @@ func prepareColumn(col vector.Column) (preparedColumn, error) {
 		stats.MinInt64 = min
 		stats.MaxInt64 = max
 
-		encodedLen, err := checkedMulInt("int64 encoded length", len(values.Values), 8)
+		encoded, err := encodeInt64Vector(values)
 		if err != nil {
-			return preparedColumn{}, err
+			return preparedColumn{}, fmt.Errorf("encode column %q: %w", col.Name, err)
 		}
-		stats.EncodedLen = encodedLen
-		return preparedColumn{col: col, stats: stats}, nil
+		stats.EncodedLen = len(encoded)
+		return preparedColumn{col: col, stats: stats, encoded: encoded}, nil
 
 	case vector.String:
 		encoded, err := encodeStringVector(values)
@@ -82,14 +85,7 @@ func (s *segmentWriter) writePreparedColumn(col preparedColumn) error {
 	if err := s.writeColumnHeader(col.stats, uint64(col.stats.EncodedLen)); err != nil {
 		return err
 	}
-	switch values := col.col.Vector.(type) {
-	case vector.Int64:
-		return s.writeInt64Payload(values.Values)
-	case vector.String:
-		return writeFull(s.w, col.encoded)
-	default:
-		return fmt.Errorf("segment encoding is not implemented for %s vectors", col.col.Vector.Kind())
-	}
+	return writeFull(s.w, col.encoded)
 }
 
 func encodedColumnLen(stats ColumnStats) (uint64, error) {
@@ -101,11 +97,155 @@ func encodedColumnLen(stats ColumnStats) (uint64, error) {
 }
 
 func encodeInt64(values []int64) []byte {
-	out := make([]byte, 0, len(values)*8)
-	for _, value := range values {
+	encoded, err := encodeInt64Vector(vector.Int64{Values: values})
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
+
+func encodeInt64Vector(values vector.Int64) ([]byte, error) {
+	plainLen, dictValues, dictIDs, dictRowIDs, err := analyzeInt64Encoding(values)
+	if err != nil {
+		return nil, err
+	}
+	idWidth := int64DictionaryIDWidth(len(dictValues))
+	dictLen, err := int64DictionaryEncodedLen(len(dictValues), values.Len(), idWidth)
+	if err != nil {
+		return nil, err
+	}
+	if len(dictValues) > 0 && dictLen < plainLen {
+		return encodeInt64Dictionary(values, dictValues, dictIDs, dictRowIDs, idWidth, dictLen)
+	}
+	return encodeInt64Plain(values, plainLen), nil
+}
+
+func analyzeInt64Encoding(values vector.Int64) (plainLen int, dictValues []int64, dictIDs map[int64]uint32, dictRowIDs []byte, err error) {
+	dataLen, err := checkedMulInt("int64 encoded length", values.Len(), 8)
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	plainLen, err = checkedAddInt("int64 encoded length", 1, dataLen)
+	if err != nil {
+		return 0, nil, nil, nil, err
+	}
+	if values.Len() > 0 {
+		dictRowIDs = make([]byte, 0, values.Len())
+	}
+
+	for _, value := range values.Values {
+		id, ok := int64DictionaryID(value, dictValues, dictIDs)
+		if ok {
+			if dictRowIDs != nil {
+				dictRowIDs = append(dictRowIDs, byte(id))
+			}
+			continue
+		}
+		if dictIDs == nil && len(dictValues) >= maxLinearInt64DictionaryValues {
+			dictIDs = make(map[int64]uint32, min(values.Len(), 1024))
+			for id, dictValue := range dictValues {
+				dictIDs[dictValue] = uint32(id)
+			}
+		}
+		if uint64(len(dictValues)) >= uint64(^uint32(0)) {
+			return 0, nil, nil, nil, fmt.Errorf("int64 dictionary value count overflows uint32")
+		}
+
+		id = uint32(len(dictValues))
+		if dictIDs != nil {
+			dictIDs[value] = id
+		}
+		dictValues = append(dictValues, value)
+		if dictRowIDs != nil {
+			if id <= uint32(^uint8(0)) {
+				dictRowIDs = append(dictRowIDs, byte(id))
+			} else {
+				dictRowIDs = nil
+			}
+		}
+	}
+	return plainLen, dictValues, dictIDs, dictRowIDs, nil
+}
+
+func encodeInt64Plain(values vector.Int64, size int) []byte {
+	out := make([]byte, 0, size)
+	out = append(out, int64CodecPlain)
+	for _, value := range values.Values {
 		out = binary.LittleEndian.AppendUint64(out, uint64(value))
 	}
 	return out
+}
+
+func encodeInt64Dictionary(values vector.Int64, dictValues []int64, dictIDs map[int64]uint32, dictRowIDs []byte, idWidth int, size int) ([]byte, error) {
+	out := make([]byte, 0, size)
+	out = append(out, int64CodecDictionary)
+	out = binary.LittleEndian.AppendUint32(out, uint32(len(dictValues)))
+	out = append(out, byte(idWidth))
+
+	for _, value := range dictValues {
+		out = binary.LittleEndian.AppendUint64(out, uint64(value))
+	}
+	if idWidth == 1 && len(dictRowIDs) == values.Len() {
+		out = append(out, dictRowIDs...)
+		return out, nil
+	}
+	for _, value := range values.Values {
+		id, ok := int64DictionaryID(value, dictValues, dictIDs)
+		if !ok {
+			return nil, fmt.Errorf("missing int64 dictionary id")
+		}
+		switch idWidth {
+		case 1:
+			out = append(out, byte(id))
+		case 2:
+			out = binary.LittleEndian.AppendUint16(out, uint16(id))
+		case 4:
+			out = binary.LittleEndian.AppendUint32(out, id)
+		default:
+			return nil, fmt.Errorf("unsupported int64 dictionary id width %d", idWidth)
+		}
+	}
+	return out, nil
+}
+
+func int64DictionaryID(value int64, dictValues []int64, dictIDs map[int64]uint32) (uint32, bool) {
+	if dictIDs != nil {
+		id, ok := dictIDs[value]
+		return id, ok
+	}
+	for id, dictValue := range dictValues {
+		if dictValue == value {
+			return uint32(id), true
+		}
+	}
+	return 0, false
+}
+
+func int64DictionaryIDWidth(dictCount int) int {
+	if dictCount <= 1<<8 {
+		return 1
+	}
+	if dictCount <= 1<<16 {
+		return 2
+	}
+	return 4
+}
+
+func int64DictionaryEncodedLen(dictCount int, count int, idWidth int) (int, error) {
+	size := 1 + 4 + 1
+	dictLen, err := checkedMulInt("int64 dictionary values length", dictCount, 8)
+	if err != nil {
+		return 0, err
+	}
+	size, err = checkedAddInt("int64 dictionary encoded length", size, dictLen)
+	if err != nil {
+		return 0, err
+	}
+	idsLen, err := checkedMulInt("int64 dictionary ids length", count, idWidth)
+	if err != nil {
+		return 0, err
+	}
+	return checkedAddInt("int64 dictionary encoded length", size, idsLen)
 }
 
 func encodeString(values []string) ([]byte, error) {
@@ -249,22 +389,6 @@ func stringDictionaryIDWidth(dictCount int) int {
 	return 4
 }
 
-func (s *segmentWriter) writeInt64Payload(values []int64) error {
-	var buf [32 * 1024]byte
-	for len(values) > 0 {
-		count := min(len(values), len(buf)/8)
-		chunk := buf[:count*8]
-		for i, value := range values[:count] {
-			binary.LittleEndian.PutUint64(chunk[i*8:], uint64(value))
-		}
-		if err := writeFull(s.w, chunk); err != nil {
-			return err
-		}
-		values = values[count:]
-	}
-	return nil
-}
-
 func stringDictionaryEncodedLen(dictDataLen int, count int, idWidth int) (int, error) {
 	size := 1 + 4 + 1
 	size, err := checkedAddInt("string dictionary encoded length", size, dictDataLen)
@@ -312,26 +436,14 @@ func (s *segmentReader) readColumnPayload(stats ColumnStats) (vector.Column, err
 }
 
 func (s *segmentReader) readInt64Payload(stats ColumnStats) ([]int64, error) {
-	if err := validateInt64Payload(stats, stats.EncodedLen); err != nil {
+	if stats.Count < 0 {
+		return nil, fmt.Errorf("negative int64 count %d", stats.Count)
+	}
+	encoded := make([]byte, stats.EncodedLen)
+	if err := readFull(s.r, encoded); err != nil {
 		return nil, err
 	}
-
-	// Decode directly from the stream to avoid allocating a full encoded payload for int64 columns.
-	values := make([]int64, stats.Count)
-	var buf [32 * 1024]byte
-	row := 0
-	remaining := stats.EncodedLen
-	for remaining > 0 {
-		chunk := min(remaining, len(buf))
-		if err := readFull(s.r, buf[:chunk]); err != nil {
-			return nil, err
-		}
-		rows := chunk / 8
-		decodeInt64Into(values[row:row+rows], buf[:chunk])
-		row += rows
-		remaining -= chunk
-	}
-	return values, nil
+	return decodeInt64(encoded, stats.Count)
 }
 
 func decodeValues(kind vector.Kind, encoded []byte, count int) (vector.Vector, error) {
@@ -354,12 +466,65 @@ func decodeValues(kind vector.Kind, encoded []byte, count int) (vector.Vector, e
 }
 
 func decodeInt64(encoded []byte, count int) ([]int64, error) {
-	if err := validateInt64Payload(ColumnStats{Count: count}, len(encoded)); err != nil {
+	if count < 0 {
+		return nil, fmt.Errorf("negative int64 count %d", count)
+	}
+	if len(encoded) == 0 {
+		return nil, fmt.Errorf("missing int64 codec")
+	}
+
+	switch encoded[0] {
+	case int64CodecPlain:
+		return decodePlainInt64(encoded, count)
+	case int64CodecDictionary:
+		return decodeDictionaryInt64(encoded, count)
+	default:
+		return nil, fmt.Errorf("unsupported int64 codec %d", encoded[0])
+	}
+}
+
+func decodePlainInt64(encoded []byte, count int) ([]int64, error) {
+	if err := validatePlainInt64Payload(ColumnStats{Count: count}, len(encoded)); err != nil {
 		return nil, err
 	}
 
 	values := make([]int64, count)
-	decodeInt64Into(values, encoded)
+	decodeInt64Into(values, encoded[1:])
+	return values, nil
+}
+
+func decodeDictionaryInt64(encoded []byte, count int) ([]int64, error) {
+	dict, ids, idWidth, dictCount, err := parseInt64DictionaryPayload(encoded, ColumnStats{Count: count})
+	if err != nil {
+		return nil, err
+	}
+	values := make([]int64, count)
+	switch idWidth {
+	case 1:
+		for row := 0; row < count; row++ {
+			id := ids[row]
+			if int(id) >= dictCount {
+				return nil, fmt.Errorf("int64 dictionary id %d out of range at row %d", id, row)
+			}
+			values[row] = int64(binary.LittleEndian.Uint64(dict[int(id)*8:]))
+		}
+	case 2:
+		for row := 0; row < count; row++ {
+			id := binary.LittleEndian.Uint16(ids[row*2:])
+			if int(id) >= dictCount {
+				return nil, fmt.Errorf("int64 dictionary id %d out of range at row %d", id, row)
+			}
+			values[row] = int64(binary.LittleEndian.Uint64(dict[int(id)*8:]))
+		}
+	case 4:
+		for row := 0; row < count; row++ {
+			id := binary.LittleEndian.Uint32(ids[row*4:])
+			if uint64(id) >= uint64(dictCount) {
+				return nil, fmt.Errorf("int64 dictionary id %d out of range at row %d", id, row)
+			}
+			values[row] = int64(binary.LittleEndian.Uint64(dict[int(id)*8:]))
+		}
+	}
 	return values, nil
 }
 
@@ -367,6 +532,51 @@ func decodeInt64Into(values []int64, encoded []byte) {
 	for i := range values {
 		values[i] = int64(binary.LittleEndian.Uint64(encoded[i*8:]))
 	}
+}
+
+func parseInt64DictionaryPayload(payload []byte, stats ColumnStats) (dict []byte, ids []byte, idWidth int, dictCount int, err error) {
+	if len(payload) < 1+4+1 {
+		return nil, nil, 0, 0, fmt.Errorf("short int64 dictionary header")
+	}
+	offset := 1
+	dictCount = int(binary.LittleEndian.Uint32(payload[offset:]))
+	offset += 4
+	idWidth = int(payload[offset])
+	offset++
+	if idWidth != 1 && idWidth != 2 && idWidth != 4 {
+		return nil, nil, 0, 0, fmt.Errorf("unsupported int64 dictionary id width %d", idWidth)
+	}
+	if idWidth == 1 && dictCount > 1<<8 {
+		return nil, nil, 0, 0, fmt.Errorf("int64 dictionary value count %d exceeds id width %d", dictCount, idWidth)
+	}
+	if idWidth == 2 && dictCount > 1<<16 {
+		return nil, nil, 0, 0, fmt.Errorf("int64 dictionary value count %d exceeds id width %d", dictCount, idWidth)
+	}
+	if dictCount > stats.Count {
+		return nil, nil, 0, 0, fmt.Errorf("int64 dictionary value count %d exceeds row count %d", dictCount, stats.Count)
+	}
+
+	dictLen, err := checkedMulInt("int64 dictionary values length", dictCount, 8)
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+	if len(payload)-offset < dictLen {
+		return nil, nil, 0, 0, fmt.Errorf("short int64 dictionary values")
+	}
+	dict = payload[offset : offset+dictLen]
+	offset += dictLen
+
+	idsLen, err := checkedMulInt("int64 dictionary ids length", stats.Count, idWidth)
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+	if len(payload)-offset < idsLen {
+		return nil, nil, 0, 0, fmt.Errorf("short int64 dictionary ids")
+	}
+	if len(payload)-offset > idsLen {
+		return nil, nil, 0, 0, fmt.Errorf("trailing int64 bytes: %d", len(payload)-offset-idsLen)
+	}
+	return dict, payload[offset : offset+idsLen], idWidth, dictCount, nil
 }
 
 func decodeString(encoded []byte, count int) (vector.String, error) {
@@ -528,8 +738,15 @@ func checkedAddInt(name string, a, b int) (int, error) {
 	return a + b, nil
 }
 
-func validateInt64Payload(stats ColumnStats, encodedLen int) error {
+func validatePlainInt64Payload(stats ColumnStats, encodedLen int) error {
+	if stats.Count < 0 {
+		return fmt.Errorf("negative int64 count %d", stats.Count)
+	}
 	wantLen, err := checkedMulInt("int64 encoded length", stats.Count, 8)
+	if err != nil {
+		return err
+	}
+	wantLen, err = checkedAddInt("int64 encoded length", 1, wantLen)
 	if err != nil {
 		return err
 	}

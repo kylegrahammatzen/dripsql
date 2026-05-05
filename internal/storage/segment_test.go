@@ -62,8 +62,8 @@ func TestSegmentPersistsInt64Stats(t *testing.T) {
 		wantMax    int64
 		encodedLen int
 	}{
-		{name: "positive", column: "tenant_id", values: []int64{7, 42, 7}, wantMin: 7, wantMax: 42, encodedLen: 24},
-		{name: "negative", column: "value", values: []int64{-99, -7, -42}, wantMin: -99, wantMax: -7, encodedLen: 24},
+		{name: "positive", column: "tenant_id", values: []int64{7, 42, 7}, wantMin: 7, wantMax: 42, encodedLen: 25},
+		{name: "negative", column: "value", values: []int64{-99, -7, -42}, wantMin: -99, wantMax: -7, encodedLen: 25},
 	}
 
 	for _, tt := range tests {

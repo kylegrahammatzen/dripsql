@@ -10,7 +10,7 @@ import (
 
 const (
 	segmentMagic               = "DRIPSEG1"
-	segmentVersion      uint16 = 2
+	segmentVersion      uint16 = 3
 	maxEncodedColumnLen uint64 = 1 << 30
 )
 

@@ -15,6 +15,38 @@ func TestSelectSegmentInt64Equal(t *testing.T) {
 	})
 }
 
+func TestSelectSegmentInt64EqualDictionary(t *testing.T) {
+	data := writeSegmentBytes(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 7, 42, 7})},
+	)
+	scratch := make([]uint32, 0, 8)
+
+	selected, ok, err := SelectSegmentInt64Equal(bytes.NewReader(data), "tenant_id", 7, scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing tenant_id column")
+	}
+	if !slices.Equal(selected, []uint32{0, 2, 3, 5}) {
+		t.Fatalf("selection = %v, want [0 2 3 5]", selected)
+	}
+	if cap(selected) != cap(scratch) {
+		t.Fatalf("scratch cap = %d, want %d", cap(selected), cap(scratch))
+	}
+
+	selected, ok, err = SelectSegmentInt64Equal(bytes.NewReader(data), "tenant_id", 99, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing tenant_id column")
+	}
+	if len(selected) != 0 {
+		t.Fatalf("selection len = %d, want 0", len(selected))
+	}
+}
+
 func selectSegmentData(t testing.TB) []byte {
 	t.Helper()
 
