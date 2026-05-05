@@ -111,6 +111,10 @@ func (s *Scanner) CountStringEqual(column string, value string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
+		if storage.CanSkipStringEqual(stats, value) {
+			s.markSkipped(segment)
+			continue
+		}
 
 		file, err := s.dataFile()
 		if err != nil {

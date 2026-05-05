@@ -405,7 +405,11 @@ func encodeStringVectorWithEncoding(values vector.String) ([]byte, ColumnEncodin
 		return nil, ColumnEncoding{}, err
 	}
 	if len(dictValues) == 0 {
-		return encodeStringPlain(values, plainLen), stringPlainEncoding(plainLen), nil
+		encoding, err := stringPlainEncodingWithBloom(values, plainLen)
+		if err != nil {
+			return nil, ColumnEncoding{}, err
+		}
+		return encodeStringPlain(values, plainLen), encoding, nil
 	}
 	idEncoding, dictLen, err := chooseStringDictionaryIDEncoding(dictDataLen, len(dictValues), values.Len())
 	if err != nil {
@@ -418,7 +422,11 @@ func encodeStringVectorWithEncoding(values vector.String) ([]byte, ColumnEncodin
 		}
 		return encoded, stringDictionaryEncoding(plainLen, len(dictValues), idEncoding), nil
 	}
-	return encodeStringPlain(values, plainLen), stringPlainEncoding(plainLen), nil
+	encoding, err := stringPlainEncodingWithBloom(values, plainLen)
+	if err != nil {
+		return nil, ColumnEncoding{}, err
+	}
+	return encodeStringPlain(values, plainLen), encoding, nil
 }
 
 func analyzeStringEncoding(values vector.String) (plainLen int, dictValues []string, dictIDs map[string]uint32, dictDataLen int, dictRowIDs []byte, err error) {
@@ -689,6 +697,16 @@ func int64DictionaryEncoding(plainLen int, dictCount int, idEncoding int) Column
 
 func stringPlainEncoding(plainLen int) ColumnEncoding {
 	return ColumnEncoding{Codec: codecPlain, PlainBytes: plainLen, FilterPath: filterPathBytes, GroupPath: groupPathBytes}
+}
+
+func stringPlainEncodingWithBloom(values vector.String, plainLen int) (ColumnEncoding, error) {
+	encoding := stringPlainEncoding(plainLen)
+	bloom, err := buildStringBloom(values)
+	if err != nil {
+		return ColumnEncoding{}, err
+	}
+	encoding.StringBloom = bloom
+	return encoding, nil
 }
 
 func stringDictionaryEncoding(plainLen int, dictCount int, idEncoding int) ColumnEncoding {

@@ -36,6 +36,7 @@ type ColumnEncoding struct {
 	DictionaryPackedBitWidth int
 	FilterPath               string
 	GroupPath                string
+	StringBloom              *StringBloomFilter `json:",omitempty"`
 }
 
 // SegmentStats describes a written segment.

@@ -56,6 +56,9 @@ func printStorage(rows int64, tableBytes int64, stats []table.ColumnStorageStats
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "Table size:\t%s\n", formatMiB(tableBytes))
 	fmt.Fprintf(w, "Column payload:\t%s\n", formatMiB(encodedBytes))
+	if bloomBytes := storageBloomBytes(stats); bloomBytes > 0 {
+		fmt.Fprintf(w, "Value indexes:\t%s\n", formatMiB(bloomBytes))
+	}
 	fmt.Fprintf(w, "Storage overhead:\t%s\n", formatBytes(overheadBytes))
 	fmt.Fprintf(w, "Plain estimate:\t%s\n", formatMiB(plainBytes))
 	fmt.Fprintf(w, "Column compression:\t%s\n", formatRatio(ratio(plainBytes, encodedBytes)))
@@ -72,6 +75,14 @@ func storagePayloadBytes(stats []table.ColumnStorageStats) (plainBytes int64, en
 		encodedBytes += col.EncodedBytes
 	}
 	return plainBytes, encodedBytes
+}
+
+func storageBloomBytes(stats []table.ColumnStorageStats) int64 {
+	var bloomBytes int64
+	for _, col := range stats {
+		bloomBytes += col.BloomBytes
+	}
+	return bloomBytes
 }
 
 func ratio(numerator int64, denominator int64) float64 {
@@ -204,6 +215,9 @@ func formatColumnFeatures(stats table.ColumnStorageStats) string {
 		if stats.GroupPath == "dict-counts" {
 			features = append(features, "fast group")
 		}
+	}
+	if stats.BloomSegments > 0 {
+		features = append(features, "value skip")
 	}
 	if len(features) == 0 {
 		return "-"

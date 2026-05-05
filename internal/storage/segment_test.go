@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -184,6 +185,39 @@ func TestSegmentReportsColumnEncoding(t *testing.T) {
 		if event.Encoding.FilterPath != filterPathDictionaryID || event.Encoding.GroupPath != groupPathDictionaryCounts {
 			t.Fatalf("%s event paths = %q/%q, want %q/%q", source.label, event.Encoding.FilterPath, event.Encoding.GroupPath, filterPathDictionaryID, groupPathDictionaryCounts)
 		}
+	}
+}
+
+func TestSegmentReportsStringBloomFilter(t *testing.T) {
+	values := make([]string, minStringBloomRows)
+	for row := range values {
+		values[row] = "url-" + strconv.Itoa(row)
+	}
+	batch := mustBatch(t,
+		vector.Column{Name: "url", Vector: vector.NewString(values)},
+	)
+
+	writeStats, _, _ := roundTrip(t, batch)
+	url := columnStats(t, writeStats, "url")
+	if url.Encoding.Codec != codecPlain {
+		t.Fatalf("url codec = %q, want plain", url.Encoding.Codec)
+	}
+	if url.Encoding.StringBloom == nil || len(url.Encoding.StringBloom.Data) == 0 {
+		t.Fatalf("url bloom = %+v, want populated filter", url.Encoding.StringBloom)
+	}
+	if CanSkipStringEqual(url, values[123]) {
+		t.Fatal("bloom skipped an existing value")
+	}
+
+	skippedAbsent := false
+	for i := 0; i < 100; i++ {
+		if CanSkipStringEqual(url, "missing-"+strconv.Itoa(i)) {
+			skippedAbsent = true
+			break
+		}
+	}
+	if !skippedAbsent {
+		t.Fatal("bloom did not skip any absent test values")
 	}
 }
 

@@ -30,6 +30,8 @@ type ColumnStorageStats struct {
 	MinMaxSegments       int
 	MinInt64             int64
 	MaxInt64             int64
+	BloomSegments        int
+	BloomBytes           int64
 	FilterPath           string
 	GroupPath            string
 }
@@ -88,6 +90,10 @@ func (s *ColumnStorageStats) addSegment(stats storage.ColumnStats) {
 	s.Segments++
 	s.EncodedBytes += int64(stats.EncodedLen)
 	s.PlainBytes += int64(encoding.PlainBytes)
+	if encoding.StringBloom != nil {
+		s.BloomSegments++
+		s.BloomBytes += int64(len(encoding.StringBloom.Data))
+	}
 
 	switch encoding.Codec {
 	case "plain":

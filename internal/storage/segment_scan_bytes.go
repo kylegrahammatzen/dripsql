@@ -263,6 +263,9 @@ func CountColumnStringEqualAt(r io.ReaderAt, payloadOffset int64, payloadBytes i
 	if stats.Kind != vector.KindString {
 		return 0, scratch, 0, fmt.Errorf("column %q is %s, want string", stats.Name, stats.Kind)
 	}
+	if CanSkipStringEqual(stats, value) {
+		return 0, scratch, 0, nil
+	}
 	payload, scratch, bytesRead, err := readPayloadRangeAt(r, payloadOffset, payloadBytes, stats, scratch)
 	if err != nil {
 		return 0, scratch, bytesRead, err

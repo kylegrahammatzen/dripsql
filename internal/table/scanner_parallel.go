@@ -67,6 +67,10 @@ func (s *Scanner) CountStringEqualParallel(column string, value string, workers 
 		if err != nil {
 			return 0, err
 		}
+		if storage.CanSkipStringEqual(stats, value) {
+			s.markSkipped(segment)
+			continue
+		}
 		jobs = append(jobs, countScanJob{segment: segment, stats: stats})
 	}
 

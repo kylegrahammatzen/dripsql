@@ -4,8 +4,11 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestCountRejectsMissingOrWrongType(t *testing.T) {
@@ -169,6 +172,48 @@ func TestScannerStatsTrackSelectedColumnBytes(t *testing.T) {
 	if stats.BytesSkipped != stats.BytesTotal-stats.BytesScanned {
 		t.Fatalf("bytes skipped = %d, want total-scanned %d", stats.BytesSkipped, stats.BytesTotal-stats.BytesScanned)
 	}
+}
+
+func TestScannerStringBloomPrunesSegments(t *testing.T) {
+	tbl, err := Create(t.TempDir(), []Column{{Name: "url", Kind: vector.KindString}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make([]string, 5000)
+	for row := range values {
+		values[row] = "url-" + strconv.Itoa(row)
+	}
+	if err := tbl.Append(mustBatch(t, vector.Column{Name: "url", Vector: vector.FromString(values)})); err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := tbl.NewScanner()
+	t.Cleanup(func() { _ = scanner.Close() })
+	count, err := scanner.CountStringEqual("url", values[123])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("existing count = %d, want 1", count)
+	}
+	if stats := scanner.Stats(); stats.SegmentsScanned != 1 || stats.SegmentsSkipped != 0 {
+		t.Fatalf("existing stats = %+v, want one scanned segment", stats)
+	}
+
+	for i := 0; i < 100; i++ {
+		count, err = scanner.CountStringEqual("url", "missing-"+strconv.Itoa(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("missing count = %d, want 0", count)
+		}
+		stats := scanner.Stats()
+		if stats.SegmentsSkipped == 1 && stats.SegmentsScanned == 0 && stats.RowsSkipped == int64(len(values)) {
+			return
+		}
+	}
+	t.Fatal("bloom did not skip any absent test values")
 }
 
 func TestGroupStringCounts(t *testing.T) {
