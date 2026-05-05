@@ -38,6 +38,9 @@ func Open(dir string) (*Table, error) {
 }
 
 func (t *Table) validateBatch(batch vector.Batch) error {
+	if batch.HasSelection() {
+		return fmt.Errorf("table append does not support selected batches")
+	}
 	schema := t.manifest.Schema
 	if len(batch.Columns) != len(schema) {
 		return fmt.Errorf("batch column count %d does not match table column count %d", len(batch.Columns), len(schema))

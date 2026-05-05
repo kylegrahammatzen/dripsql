@@ -25,7 +25,6 @@ type benchResult struct {
 func main() {
 	var (
 		rows         int64
-		segmentRows  int
 		dir          string
 		keep         bool
 		tenant       int64
@@ -36,7 +35,6 @@ func main() {
 	)
 
 	flag.Int64Var(&rows, "rows", 1_000_000, "synthetic rows to load; set 100000000 for the 100M benchmark")
-	flag.IntVar(&segmentRows, "segment-rows", 100_000, "rows per immutable segment")
 	flag.StringVar(&dir, "dir", "", "table directory; defaults to a temporary directory")
 	flag.BoolVar(&keep, "keep", false, "keep the generated table directory")
 	flag.Int64Var(&tenant, "tenant", 7, "tenant_id value to count")
@@ -49,8 +47,6 @@ func main() {
 	switch {
 	case rows < 0:
 		log.Fatalf("rows must be non-negative: %d", rows)
-	case segmentRows <= 0:
-		log.Fatalf("segment-rows must be positive: %d", segmentRows)
 	case runs <= 0:
 		log.Fatalf("runs must be positive: %d", runs)
 	case workers <= 0:
@@ -73,9 +69,11 @@ func main() {
 	}
 
 	var (
-		tbl         *table.Table
-		loadElapsed time.Duration
-		err         error
+		tbl               *table.Table
+		loadElapsed       time.Duration
+		segmentRows       int
+		segmentRowsSource string
+		err               error
 	)
 
 	if openExisting {
@@ -85,7 +83,12 @@ func main() {
 		}
 
 		rows = int64(tbl.Rows())
+		segmentRows = table.AverageSegmentRows(rows, tbl.Segments())
+		segmentRowsSource = "avg"
 	} else {
+		segmentRows = table.RecommendedSegmentRows(rows)
+		segmentRowsSource = "auto"
+
 		tbl, err = table.Create(dir, []table.Column{
 			{Name: "tenant_id", Kind: vector.KindInt64},
 			{Name: "event_type", Kind: vector.KindString},
@@ -178,15 +181,14 @@ func main() {
 		mode = "open"
 	}
 
-	printSummary(dir, mode, rows, segmentRows, workers, tbl.Bytes(), tbl.Segments(), loadElapsed, openExisting)
+	printSummary(dir, mode, rows, segmentRows, segmentRowsSource, workers, tbl.Bytes(), tbl.Segments(), loadElapsed, openExisting)
 	printQueries(results, rows)
 	printGroups(groups)
-	printScanStats(results)
 }
 
 func loadSyntheticEvents(tbl *table.Table, rows int64, segmentRows int) error {
 	choices := []string{"signup", "checkout", "page_view", "cancel"}
-	appender, err := tbl.NewAppender()
+	appender, err := tbl.NewAppenderForRows(rows)
 	if err != nil {
 		return err
 	}
@@ -234,6 +236,7 @@ func printSummary(
 	mode string,
 	rows int64,
 	segmentRows int,
+	segmentRowsSource string,
 	workers int,
 	tableBytes int64,
 	segments int,
@@ -255,21 +258,30 @@ func printSummary(
 	fmt.Fprintf(w, "Mode:\t%s\n", mode)
 	fmt.Fprintf(w, "Rows:\t%s\n", commas(rows))
 	fmt.Fprintf(w, "Segments:\t%s\n", commas(segments))
-	fmt.Fprintf(w, "Segment rows:\t%s\n", commas(segmentRows))
+	fmt.Fprintf(w, "Segment rows:\t%s\n", formatSegmentRows(segmentRows, segmentRowsSource))
 	fmt.Fprintf(w, "Count workers:\t%s\n", commas(workers))
 	fmt.Fprintf(w, "Table size:\t%.2f MiB\n", float64(tableBytes)/mib)
 	fmt.Fprintf(w, "Bytes / row:\t%.2f\n", bytesPerRow)
+	if segments > 0 {
+		fmt.Fprintf(w, "Avg segment:\t%.2f KiB\n", float64(tableBytes)/float64(segments)/1024)
+	}
+	if segments >= 10_000 {
+		fmt.Fprintln(w, "Note:\tlarge segment count; rebuilding with current automatic row groups reduces per-segment scan overhead")
+	}
 
 	if !openExisting {
 		rowsPerSec := 0.0
+		mibPerSec := 0.0
 		if loadElapsed > 0 {
 			rowsPerSec = float64(rows) / loadElapsed.Seconds()
+			mibPerSec = float64(tableBytes) / mib / loadElapsed.Seconds()
 		}
 
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Load")
 		fmt.Fprintf(w, "Elapsed:\t%s\n", loadElapsed)
 		fmt.Fprintf(w, "Throughput:\t%s rows/sec\n", commas(int64(rowsPerSec)))
+		fmt.Fprintf(w, "Write:\t%.2f MiB/sec\n", mibPerSec)
 	}
 
 	w.Flush()
@@ -283,7 +295,7 @@ func printQueries(results []benchResult, rows int64) {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 
-	fmt.Fprintln(w, "Query\tResult\tFirst\tBest\tAvg\tRows/sec\tScan")
+	fmt.Fprintln(w, "Query\tResult\tFirst\tBest\tAvg\tRows/sec\tMiB/sec\tScan\tSegments\tRows skipped")
 
 	for _, result := range results {
 		rowsScanned := result.Stats.RowsScanned
@@ -292,20 +304,26 @@ func printQueries(results []benchResult, rows int64) {
 		}
 
 		rowsPerSec := 0.0
+		mibPerSec := 0.0
 		if result.Avg > 0 {
 			rowsPerSec = float64(rowsScanned) / result.Avg.Seconds()
+			mibPerSec = float64(result.Stats.BytesScanned) / mib / result.Avg.Seconds()
 		}
 
 		fmt.Fprintf(
 			w,
-			"%s\t%s\t%s\t%s\t%s\t%s\t%.2f MiB\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%.2f\t%.2f MiB\t%d/%d\t%s\n",
 			result.Name,
 			commas(result.Count),
 			formatDuration(result.First),
 			formatDuration(result.Best),
 			formatDuration(result.Avg),
 			commas(int64(rowsPerSec)),
+			mibPerSec,
 			float64(result.Stats.BytesScanned)/mib,
+			result.Stats.SegmentsScanned,
+			result.Stats.SegmentsTotal,
+			commas(result.Stats.RowsSkipped),
 		)
 	}
 
@@ -317,6 +335,13 @@ func formatDuration(duration time.Duration) string {
 		return "<1us"
 	}
 	return duration.String()
+}
+
+func formatSegmentRows(segmentRows int, source string) string {
+	if source == "" {
+		return commas(segmentRows)
+	}
+	return fmt.Sprintf("%s (%s)", commas(segmentRows), source)
 }
 
 func printGroups(groups map[string]int) {
@@ -334,29 +359,6 @@ func printGroups(groups map[string]int) {
 
 	for _, key := range keys {
 		fmt.Fprintf(w, "%s:\t%s\n", key, commas(groups[key]))
-	}
-
-	w.Flush()
-}
-
-func printScanStats(results []benchResult) {
-	fmt.Println()
-	fmt.Println("Scan Stats")
-
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-
-	fmt.Fprintln(w, "Query\tSegments\tRows scanned\tRows skipped")
-
-	for _, result := range results {
-		fmt.Fprintf(
-			w,
-			"%s\t%d/%d\t%s\t%s\n",
-			result.Name,
-			result.Stats.SegmentsScanned,
-			result.Stats.SegmentsTotal,
-			commas(result.Stats.RowsScanned),
-			commas(result.Stats.RowsSkipped),
-		)
 	}
 
 	w.Flush()
