@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"maps"
 	"slices"
 	"testing"
@@ -60,6 +61,30 @@ func TestCountSegmentInt64EqualBytes(t *testing.T) {
 	}
 }
 
+func TestCountSegmentInt64EqualAt(t *testing.T) {
+	data := writeSegmentBytes(t,
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "cancel"})},
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 11})},
+	)
+
+	count, ok, scratch, bytesRead, err := CountSegmentInt64EqualAt(bytes.NewReader(data), 0, int64(len(data)), "tenant_id", 7, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing tenant_id column")
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+	if len(scratch) == 0 {
+		t.Fatal("expected scratch to retain column payload")
+	}
+	if bytesRead <= 0 || bytesRead >= int64(len(data)) {
+		t.Fatalf("bytes read = %d, want between 1 and full segment %d", bytesRead, len(data))
+	}
+}
+
 func TestCountSegmentStringEqualBytes(t *testing.T) {
 	data := writeSegmentBytes(t,
 		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "cancel", "checkout"})},
@@ -102,6 +127,30 @@ func TestCountSegmentStringEqualBytes(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("expected tenant_id column to exist")
+	}
+}
+
+func TestCountSegmentStringEqualAt(t *testing.T) {
+	data := writeSegmentBytes(t,
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "cancel", "checkout"})},
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 11, 42})},
+	)
+
+	count, ok, scratch, bytesRead, err := CountSegmentStringEqualAt(bytes.NewReader(data), 0, int64(len(data)), "event_type", "checkout", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing event_type column")
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+	if len(scratch) == 0 {
+		t.Fatal("expected scratch to retain column payload")
+	}
+	if bytesRead <= 0 || bytesRead >= int64(len(data)) {
+		t.Fatalf("bytes read = %d, want between 1 and full segment %d", bytesRead, len(data))
 	}
 }
 
@@ -166,6 +215,32 @@ func TestGroupSegmentStringCountsBytes(t *testing.T) {
 	_, err = GroupSegmentStringCountsBytes(data, "tenant_id", counts)
 	if err == nil {
 		t.Fatal("expected wrong type error")
+	}
+}
+
+func TestGroupSegmentStringCountsAt(t *testing.T) {
+	data := writeSegmentBytes(t,
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "cancel", "checkout"})},
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 11, 42})},
+	)
+	counts := map[string]int{"existing": 3}
+
+	ok, scratch, bytesRead, err := GroupSegmentStringCountsAt(bytes.NewReader(data), 0, int64(len(data)), "event_type", counts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("missing event_type column")
+	}
+	want := map[string]int{"existing": 3, "signup": 2, "checkout": 2, "cancel": 1}
+	if !maps.Equal(counts, want) {
+		t.Fatalf("counts = %v, want %v", counts, want)
+	}
+	if len(scratch) == 0 {
+		t.Fatal("expected scratch to retain column payload")
+	}
+	if bytesRead <= 0 || bytesRead >= int64(len(data)) {
+		t.Fatalf("bytes read = %d, want between 1 and full segment %d", bytesRead, len(data))
 	}
 }
 

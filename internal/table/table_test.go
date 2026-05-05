@@ -96,6 +96,90 @@ func TestAppendRejectsSchemaMismatch(t *testing.T) {
 	}
 }
 
+func TestAppenderPersistsMultipleSegmentsOnClose(t *testing.T) {
+	dir := t.TempDir()
+	tbl := createEventsTable(t, dir)
+	appender, err := tbl.NewAppender()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := appender.Append(mustBatch(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7})},
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "checkout"})},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err := appender.Append(mustBatch(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{11, 7})},
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"cancel", "checkout"})},
+	)); err != nil {
+		t.Fatal(err)
+	}
+
+	uncommitted, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uncommitted.Rows() != 0 || uncommitted.Segments() != 0 {
+		t.Fatalf("uncommitted rows/segments = %d/%d, want 0/0", uncommitted.Rows(), uncommitted.Segments())
+	}
+
+	if err := appender.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Rows() != 5 || reopened.Segments() != 2 {
+		t.Fatalf("reopened rows/segments = %d/%d, want 5/2", reopened.Rows(), reopened.Segments())
+	}
+	if reopened.manifest.Segments[0].Offset != 0 {
+		t.Fatalf("first offset = %d, want 0", reopened.manifest.Segments[0].Offset)
+	}
+	if reopened.manifest.Segments[1].Offset != reopened.manifest.Segments[0].Bytes {
+		t.Fatalf("second offset = %d, want %d", reopened.manifest.Segments[1].Offset, reopened.manifest.Segments[0].Bytes)
+	}
+}
+
+func TestAppenderCloseRollsBackManifestFailure(t *testing.T) {
+	dir := t.TempDir()
+	tbl := createEventsTable(t, dir)
+	appender, err := tbl.NewAppender()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appender.Append(mustBatch(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7})},
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup"})},
+	)); err != nil {
+		t.Fatal(err)
+	}
+
+	badDir := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(badDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tbl.dir = badDir
+	err = appender.Close()
+	tbl.dir = dir
+	if err == nil {
+		t.Fatal("expected manifest write error")
+	}
+	if tbl.Rows() != 0 || tbl.Segments() != 0 {
+		t.Fatalf("table rows/segments = %d/%d, want 0/0", tbl.Rows(), tbl.Segments())
+	}
+	info, err := os.Stat(filepath.Join(dir, dataFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("data file size = %d, want 0", info.Size())
+	}
+}
+
 func TestCountRejectsMissingOrWrongType(t *testing.T) {
 	tbl := createEventsTable(t, t.TempDir())
 	appendBatch(t, tbl, []int64{7}, []string{"signup"})
@@ -174,7 +258,7 @@ func TestScannerReusesBufferAcrossCounts(t *testing.T) {
 	}
 	stats := scanner.Stats()
 	if stats.RowsTotal != 3 || stats.RowsScanned != 3 || stats.BytesScanned <= 0 {
-		t.Fatalf("stats = %+v, want full 3-row scan", stats)
+		t.Fatalf("stats = %+v, want 3-row scan", stats)
 	}
 	if cap(scanner.buf) == 0 {
 		t.Fatal("expected scanner buffer to be retained")
@@ -188,8 +272,8 @@ func TestScannerReusesBufferAcrossCounts(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("event count = %d, want 2", count)
 	}
-	if cap(scanner.buf) != bufCap {
-		t.Fatalf("scanner buffer cap = %d, want %d", cap(scanner.buf), bufCap)
+	if cap(scanner.buf) < bufCap {
+		t.Fatalf("scanner buffer cap = %d, want at least %d", cap(scanner.buf), bufCap)
 	}
 
 	scanner.Reset()
@@ -224,6 +308,32 @@ func TestScannerStatsTrackInt64Pruning(t *testing.T) {
 	}
 	if stats.BytesTotal != tbl.Bytes() || stats.BytesScanned <= 0 || stats.BytesSkipped <= 0 {
 		t.Fatalf("byte stats = %+v, table bytes = %d", stats, tbl.Bytes())
+	}
+}
+
+func TestScannerStatsTrackSelectedColumnBytes(t *testing.T) {
+	tbl := createEventsTable(t, t.TempDir())
+	tenants := make([]int64, 1000)
+	events := make([]string, 1000)
+	choices := []string{"signup", "checkout", "page_view", "cancel"}
+	for row := range tenants {
+		tenants[row] = int64(row)
+		events[row] = choices[row%len(choices)]
+	}
+	appendBatch(t, tbl, tenants, events)
+
+	scanner := tbl.NewScanner()
+	t.Cleanup(func() { _ = scanner.Close() })
+	count, err := scanner.CountStringEqual("event_type", "checkout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 250 {
+		t.Fatalf("count = %d, want 250", count)
+	}
+	stats := scanner.Stats()
+	if stats.BytesScanned <= 0 || stats.BytesScanned >= stats.BytesTotal {
+		t.Fatalf("bytes scanned = %d, want selected-column scan below total %d", stats.BytesScanned, stats.BytesTotal)
 	}
 }
 

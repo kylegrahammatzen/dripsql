@@ -176,6 +176,10 @@ func main() {
 
 func loadSyntheticEvents(tbl *table.Table, rows int64, segmentRows int) error {
 	choices := []string{"signup", "checkout", "page_view", "cancel"}
+	appender, err := tbl.NewAppender()
+	if err != nil {
+		return err
+	}
 
 	for start := int64(0); start < rows; start += int64(segmentRows) {
 		count := segmentRows
@@ -198,15 +202,21 @@ func loadSyntheticEvents(tbl *table.Table, rows int64, segmentRows int) error {
 			vector.Column{Name: "event_type", Vector: vector.FromString(events)},
 		)
 		if err != nil {
+			if closeErr := appender.Close(); closeErr != nil {
+				return fmt.Errorf("create batch: %w; close appender: %v", err, closeErr)
+			}
 			return err
 		}
 
-		if err := tbl.Append(batch); err != nil {
+		if err := appender.Append(batch); err != nil {
+			if closeErr := appender.Close(); closeErr != nil {
+				return fmt.Errorf("append batch: %w; close appender: %v", err, closeErr)
+			}
 			return err
 		}
 	}
 
-	return nil
+	return appender.Close()
 }
 
 func printSummary(

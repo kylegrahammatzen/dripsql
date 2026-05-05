@@ -52,12 +52,31 @@ type Table struct {
 	manifest manifest
 }
 
+// Appender batches segment writes and persists the manifest once on Close.
+// It is not safe for concurrent use.
+type Appender struct {
+	table         *Table
+	file          *os.File
+	dataPath      string
+	offset        int64
+	initialOffset int64
+	initialNext   uint64
+	initialLen    int
+	dirty         bool
+	closed        bool
+}
+
 // Scanner reuses scratch buffers across table scans. It is not safe for concurrent use.
 type Scanner struct {
 	table *Table
 	file  *os.File
 	buf   []byte
 	stats ScanStats
+}
+
+// seekReaderAt avoids Windows os.File.ReadAt allocations because Scanner owns the file offset.
+type seekReaderAt struct {
+	file *os.File
 }
 
 // ScanStats describes the amount of table data considered and read by the last scan.
@@ -165,6 +184,72 @@ func (t *Table) NewScanner() *Scanner {
 
 // Append writes batch as one immutable table segment and records it in the manifest.
 func (t *Table) Append(batch vector.Batch) error {
+	appender, err := t.NewAppender()
+	if err != nil {
+		return err
+	}
+	if err := appender.Append(batch); err != nil {
+		_ = appender.Close()
+		return err
+	}
+	return appender.Close()
+}
+
+// NewAppender opens a bulk append session. Call Close to persist the manifest.
+func (t *Table) NewAppender() (*Appender, error) {
+	dataPath := filepath.Join(t.dir, dataFile)
+	file, err := os.OpenFile(dataPath, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	offset := t.dataEnd()
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if info.Size() < offset {
+		_ = file.Close()
+		return nil, fmt.Errorf("table data file is %d bytes, manifest requires at least %d", info.Size(), offset)
+	}
+	if info.Size() > offset {
+		if err := file.Truncate(offset); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return &Appender{
+		table:         t,
+		file:          file,
+		dataPath:      dataPath,
+		offset:        offset,
+		initialOffset: offset,
+		initialNext:   t.manifest.NextSegmentID,
+		initialLen:    len(t.manifest.Segments),
+	}, nil
+}
+
+func (t *Table) dataEnd() int64 {
+	var offset int64
+	for _, segment := range t.manifest.Segments {
+		end := segment.Offset + segment.Bytes
+		if end > offset {
+			offset = end
+		}
+	}
+	return offset
+}
+
+// Append writes batch as one immutable segment in this append session.
+func (a *Appender) Append(batch vector.Batch) error {
+	if a == nil || a.table == nil || a.file == nil || a.closed {
+		return fmt.Errorf("table appender is not open")
+	}
+	t := a.table
 	if err := t.validateBatch(batch); err != nil {
 		return err
 	}
@@ -176,41 +261,72 @@ func (t *Table) Append(batch vector.Batch) error {
 	if err != nil {
 		return err
 	}
-	data, err := os.OpenFile(filepath.Join(t.dir, dataFile), os.O_RDWR|os.O_CREATE, 0o644)
-	if err != nil {
-		return err
-	}
-	offset, err := data.Seek(0, io.SeekEnd)
-	if err != nil {
-		_ = data.Close()
-		return err
-	}
-	if n, err := data.Write(buf.Bytes()); err != nil {
-		_ = data.Truncate(offset)
-		_ = data.Close()
+	if n, err := a.file.Write(buf.Bytes()); err != nil {
+		_ = a.file.Truncate(a.offset)
+		_, _ = a.file.Seek(a.offset, io.SeekStart)
 		return err
 	} else if n != buf.Len() {
-		_ = data.Truncate(offset)
-		_ = data.Close()
+		_ = a.file.Truncate(a.offset)
+		_, _ = a.file.Seek(a.offset, io.SeekStart)
 		return io.ErrShortWrite
 	}
-	if err := data.Close(); err != nil {
-		_ = os.Truncate(filepath.Join(t.dir, dataFile), offset)
-		return err
-	}
 
-	entry := Segment{ID: id, Offset: offset, Rows: stats.Rows, Bytes: int64(buf.Len()), Stats: stats}
-	oldNext := t.manifest.NextSegmentID
-	oldLen := len(t.manifest.Segments)
+	entry := Segment{ID: id, Offset: a.offset, Rows: stats.Rows, Bytes: int64(buf.Len()), Stats: stats}
 	t.manifest.NextSegmentID++
 	t.manifest.Segments = append(t.manifest.Segments, entry)
+	a.offset += int64(buf.Len())
+	a.dirty = true
+	return nil
+}
+
+// Close persists the manifest and closes the append session.
+func (a *Appender) Close() error {
+	if a == nil || a.closed {
+		return nil
+	}
+	a.closed = true
+	t := a.table
+	file := a.file
+	a.file = nil
+	if file == nil {
+		return nil
+	}
+	if t == nil {
+		return file.Close()
+	}
+
+	if err := file.Close(); err != nil {
+		if rollbackErr := a.rollback(); rollbackErr != nil {
+			return fmt.Errorf("close data file: %w; rollback data file: %v", err, rollbackErr)
+		}
+		return err
+	}
+	if !a.dirty {
+		return nil
+	}
+
 	if err := t.writeManifest(); err != nil {
-		t.manifest.NextSegmentID = oldNext
-		t.manifest.Segments = t.manifest.Segments[:oldLen]
-		_ = os.Truncate(filepath.Join(t.dir, dataFile), offset)
+		if rollbackErr := a.rollback(); rollbackErr != nil {
+			return fmt.Errorf("write manifest: %w; rollback data file: %v", err, rollbackErr)
+		}
 		return err
 	}
 	return nil
+}
+
+func (a *Appender) rollback() error {
+	if a == nil || a.table == nil {
+		return nil
+	}
+	t := a.table
+	if a.initialLen <= len(t.manifest.Segments) {
+		t.manifest.NextSegmentID = a.initialNext
+		t.manifest.Segments = t.manifest.Segments[:a.initialLen]
+	}
+	if a.dataPath == "" {
+		return nil
+	}
+	return os.Truncate(a.dataPath, a.initialOffset)
 }
 
 // CountInt64Equal counts rows across all table segments where column equals value.
@@ -245,18 +361,19 @@ func (s *Scanner) CountInt64Equal(column string, value int64) (int, error) {
 			continue
 		}
 
-		s.markScanned(segment)
-		data, err := s.readSegment(segment)
+		file, err := s.dataFile()
 		if err != nil {
 			return 0, err
 		}
-		segmentCount, ok, err := storage.CountSegmentInt64EqualBytes(data, column, value)
+		segmentCount, ok, buf, bytesRead, err := storage.CountSegmentInt64EqualAt(seekReaderAt{file: file}, segment.Offset, segment.Bytes, column, value, s.buf)
+		s.buf = buf
 		if err != nil {
 			return 0, err
 		}
 		if !ok {
 			return 0, fmt.Errorf("segment %d missing column %q", segment.ID, column)
 		}
+		s.markScanned(segment, bytesRead)
 		count, err = checkedAddCount(count, segmentCount)
 		if err != nil {
 			return 0, err
@@ -293,18 +410,19 @@ func (s *Scanner) CountStringEqual(column string, value string) (int, error) {
 			return 0, fmt.Errorf("segment %d column %q is %s, want string", segment.ID, column, stats.Kind)
 		}
 
-		s.markScanned(segment)
-		data, err := s.readSegment(segment)
+		file, err := s.dataFile()
 		if err != nil {
 			return 0, err
 		}
-		segmentCount, ok, err := storage.CountSegmentStringEqualBytes(data, column, value)
+		segmentCount, ok, buf, bytesRead, err := storage.CountSegmentStringEqualAt(seekReaderAt{file: file}, segment.Offset, segment.Bytes, column, value, s.buf)
+		s.buf = buf
 		if err != nil {
 			return 0, err
 		}
 		if !ok {
 			return 0, fmt.Errorf("segment %d missing column %q", segment.ID, column)
 		}
+		s.markScanned(segment, bytesRead)
 		count, err = checkedAddCount(count, segmentCount)
 		if err != nil {
 			return 0, err
@@ -347,18 +465,21 @@ func (s *Scanner) GroupStringCountsInto(column string, counts map[string]int) (m
 			return nil, fmt.Errorf("segment %d column %q is %s, want string", segment.ID, column, stats.Kind)
 		}
 
-		s.markScanned(segment)
-		data, err := s.readSegment(segment)
+		file, err := s.dataFile()
 		if err != nil {
 			return nil, err
 		}
-		ok, err = storage.GroupSegmentStringCountsBytes(data, column, counts)
+		var buf []byte
+		var bytesRead int64
+		ok, buf, bytesRead, err = storage.GroupSegmentStringCountsAt(seekReaderAt{file: file}, segment.Offset, segment.Bytes, column, counts, s.buf)
+		s.buf = buf
 		if err != nil {
 			return nil, err
 		}
 		if !ok {
 			return nil, fmt.Errorf("segment %d missing column %q", segment.ID, column)
 		}
+		s.markScanned(segment, bytesRead)
 	}
 	return counts, nil
 }
@@ -438,6 +559,13 @@ func (s *Scanner) dataFile() (*os.File, error) {
 	return file, nil
 }
 
+func (r seekReaderAt) ReadAt(buf []byte, offset int64) (int, error) {
+	if _, err := r.file.Seek(offset, io.SeekStart); err != nil {
+		return 0, err
+	}
+	return io.ReadFull(r.file, buf)
+}
+
 func (s *Scanner) beginScan() {
 	s.stats = ScanStats{SegmentsTotal: len(s.table.manifest.Segments)}
 	for _, segment := range s.table.manifest.Segments {
@@ -446,10 +574,10 @@ func (s *Scanner) beginScan() {
 	}
 }
 
-func (s *Scanner) markScanned(segment Segment) {
+func (s *Scanner) markScanned(segment Segment, bytesRead int64) {
 	s.stats.SegmentsScanned++
 	s.stats.RowsScanned += int64(segment.Rows)
-	s.stats.BytesScanned += segment.Bytes
+	s.stats.BytesScanned += bytesRead
 }
 
 func (s *Scanner) markSkipped(segment Segment) {

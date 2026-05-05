@@ -103,6 +103,80 @@ func GroupSegmentStringCountsBytes(data []byte, column string, counts map[string
 	return true, nil
 }
 
+// CountSegmentInt64EqualAt reads only the requested int64 column from one encoded segment and counts matches.
+func CountSegmentInt64EqualAt(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, value int64, scratch []byte) (count int, found bool, outScratch []byte, bytesRead int64, err error) {
+	loc, scratch, found, bytesRead, err := locateColumnPayloadAt(r, segmentOffset, segmentBytes, column, scratch)
+	if err != nil || !found {
+		return 0, found, scratch, bytesRead, err
+	}
+	if loc.stats.Kind != vector.KindInt64 {
+		return 0, true, scratch, bytesRead, fmt.Errorf("column %q is %s, want int64", column, loc.stats.Kind)
+	}
+	if canSkipInt64Equal(loc.stats, value) {
+		return 0, true, scratch, bytesRead, nil
+	}
+
+	payload, scratch, payloadBytesRead, err := readColumnPayloadAt(r, loc, scratch)
+	bytesRead += payloadBytesRead
+	if err != nil {
+		return 0, true, scratch, bytesRead, err
+	}
+	count, err = countInt64EqualPayload(payload, loc.stats, value)
+	if err != nil {
+		return 0, true, scratch, bytesRead, err
+	}
+	return count, true, scratch, bytesRead, nil
+}
+
+// CountSegmentStringEqualAt reads only the requested string column from one encoded segment and counts matches.
+func CountSegmentStringEqualAt(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, value string, scratch []byte) (count int, found bool, outScratch []byte, bytesRead int64, err error) {
+	loc, scratch, found, bytesRead, err := locateColumnPayloadAt(r, segmentOffset, segmentBytes, column, scratch)
+	if err != nil || !found {
+		return 0, found, scratch, bytesRead, err
+	}
+	if loc.stats.Kind != vector.KindString {
+		return 0, true, scratch, bytesRead, fmt.Errorf("column %q is %s, want string", column, loc.stats.Kind)
+	}
+
+	payload, scratch, payloadBytesRead, err := readColumnPayloadAt(r, loc, scratch)
+	bytesRead += payloadBytesRead
+	if err != nil {
+		return 0, true, scratch, bytesRead, err
+	}
+	count, err = countStringEqualPayload(payload, loc.stats, value)
+	if err != nil {
+		return 0, true, scratch, bytesRead, err
+	}
+	return count, true, scratch, bytesRead, nil
+}
+
+// GroupSegmentStringCountsAt reads only the requested string column from one encoded segment and groups values.
+func GroupSegmentStringCountsAt(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, counts map[string]int, scratch []byte) (found bool, outScratch []byte, bytesRead int64, err error) {
+	loc, scratch, found, bytesRead, err := locateColumnPayloadAt(r, segmentOffset, segmentBytes, column, scratch)
+	if err != nil || !found {
+		return found, scratch, bytesRead, err
+	}
+	if loc.stats.Kind != vector.KindString {
+		return true, scratch, bytesRead, fmt.Errorf("column %q is %s, want string", column, loc.stats.Kind)
+	}
+
+	payload, scratch, payloadBytesRead, err := readColumnPayloadAt(r, loc, scratch)
+	bytesRead += payloadBytesRead
+	if err != nil {
+		return true, scratch, bytesRead, err
+	}
+	if err := groupStringCountsPayload(payload, loc.stats, counts); err != nil {
+		return true, scratch, bytesRead, err
+	}
+	return true, scratch, bytesRead, nil
+}
+
+type segmentColumnLocation struct {
+	stats         ColumnStats
+	payloadOffset int64
+	payloadLen    int
+}
+
 func findColumnPayloadBytes(data []byte, column string) (ColumnStats, []byte, bool, error) {
 	_, cols, segmentLen, err := readSegmentHeader(data)
 	if err != nil {
@@ -125,7 +199,121 @@ func findColumnPayloadBytes(data []byte, column string) (ColumnStats, []byte, bo
 	return stats, payload, true, nil
 }
 
+func locateColumnPayloadAt(r io.ReaderAt, segmentOffset int64, segmentBytes int64, column string, scratch []byte) (segmentColumnLocation, []byte, bool, int64, error) {
+	if segmentOffset < 0 {
+		return segmentColumnLocation{}, scratch, false, 0, fmt.Errorf("negative segment offset %d", segmentOffset)
+	}
+	if segmentBytes < int64(segmentHeaderLen+footerTrailerLen) {
+		return segmentColumnLocation{}, scratch, false, 0, io.ErrUnexpectedEOF
+	}
+	segmentLen, err := checkedInt("segment length", uint64(segmentBytes))
+	if err != nil {
+		return segmentColumnLocation{}, scratch, false, 0, err
+	}
+
+	var bytesRead int64
+	scratch = ensureScratch(scratch, segmentHeaderLen)
+	header := scratch[:segmentHeaderLen]
+	if err := readFullAt(r, header, segmentOffset); err != nil {
+		return segmentColumnLocation{}, scratch, false, bytesRead, err
+	}
+	bytesRead += int64(segmentHeaderLen)
+	_, cols, encodedSegmentLen, err := readSegmentHeaderPrefix(header)
+	if err != nil {
+		return segmentColumnLocation{}, scratch, false, bytesRead, err
+	}
+	if encodedSegmentLen != segmentLen {
+		return segmentColumnLocation{}, scratch, false, bytesRead, fmt.Errorf("segment length %d does not match manifest length %d", encodedSegmentLen, segmentLen)
+	}
+
+	scratch = ensureScratch(scratch, footerTrailerLen)
+	trailer := scratch[:footerTrailerLen]
+	trailerOffset := segmentOffset + int64(segmentLen-footerTrailerLen)
+	if err := readFullAt(r, trailer, trailerOffset); err != nil {
+		return segmentColumnLocation{}, scratch, false, bytesRead, err
+	}
+	bytesRead += int64(footerTrailerLen)
+	footerStart, footerLen, err := footerPayloadRangeBytes(segmentLen, trailer)
+	if err != nil {
+		return segmentColumnLocation{}, scratch, false, bytesRead, err
+	}
+
+	scratch = ensureScratch(scratch, footerLen)
+	footer := scratch[:footerLen]
+	if err := readFullAt(r, footer, segmentOffset+int64(footerStart)); err != nil {
+		return segmentColumnLocation{}, scratch, false, bytesRead, err
+	}
+	bytesRead += int64(footerLen)
+	columnOffset, found, err := findColumnOffsetInFooter(footer, cols, segmentLen, column)
+	if err != nil || !found {
+		return segmentColumnLocation{}, scratch, found, bytesRead, err
+	}
+
+	scratch = ensureScratch(scratch, 2)
+	nameLenBuf := scratch[:2]
+	if err := readFullAt(r, nameLenBuf, segmentOffset+int64(columnOffset)); err != nil {
+		return segmentColumnLocation{}, scratch, true, bytesRead, err
+	}
+	bytesRead += 2
+	nameLen := int(binary.LittleEndian.Uint16(nameLenBuf))
+	nameAndFixedLen, err := checkedAddInt("column header length", nameLen, columnFixedHeaderLen)
+	if err != nil {
+		return segmentColumnLocation{}, scratch, true, bytesRead, err
+	}
+	columnHeaderLen, err := checkedAddInt("column header length", len(nameLenBuf), nameAndFixedLen)
+	if err != nil {
+		return segmentColumnLocation{}, scratch, true, bytesRead, err
+	}
+	if columnOffset+columnHeaderLen > footerStart {
+		return segmentColumnLocation{}, scratch, true, bytesRead, io.ErrUnexpectedEOF
+	}
+
+	scratch = ensureScratch(scratch, nameAndFixedLen)
+	nameAndFixed := scratch[:nameAndFixedLen]
+	if err := readFullAt(r, nameAndFixed, segmentOffset+int64(columnOffset+len(nameLenBuf))); err != nil {
+		return segmentColumnLocation{}, scratch, true, bytesRead, err
+	}
+	bytesRead += int64(nameAndFixedLen)
+	name := nameAndFixed[:nameLen]
+	if !bytesEqualString(name, column) {
+		return segmentColumnLocation{}, scratch, true, bytesRead, fmt.Errorf("segment footer offset for %q points to column %q", column, string(name))
+	}
+	stats, err := decodeColumnFixedHeader(column, nameAndFixed[nameLen:])
+	if err != nil {
+		return segmentColumnLocation{}, scratch, true, bytesRead, err
+	}
+	payloadOffset := columnOffset + columnHeaderLen
+	if stats.EncodedLen > footerStart-payloadOffset {
+		return segmentColumnLocation{}, scratch, true, bytesRead, io.ErrUnexpectedEOF
+	}
+	return segmentColumnLocation{
+		stats:         stats,
+		payloadOffset: segmentOffset + int64(payloadOffset),
+		payloadLen:    stats.EncodedLen,
+	}, scratch, true, bytesRead, nil
+}
+
+func readColumnPayloadAt(r io.ReaderAt, loc segmentColumnLocation, scratch []byte) ([]byte, []byte, int64, error) {
+	scratch = ensureScratch(scratch, loc.payloadLen)
+	payload := scratch[:loc.payloadLen]
+	if err := readFullAt(r, payload, loc.payloadOffset); err != nil {
+		return nil, scratch, 0, err
+	}
+	return payload, scratch, int64(loc.payloadLen), nil
+}
+
 func readSegmentHeader(data []byte) (offset int, cols int, segmentLen int, err error) {
+	offset, cols, segmentLen, err = readSegmentHeaderPrefix(data)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if segmentLen > len(data) {
+		return 0, 0, 0, io.ErrUnexpectedEOF
+	}
+	return offset, cols, segmentLen, nil
+}
+
+func readSegmentHeaderPrefix(data []byte) (offset int, cols int, segmentLen int, err error) {
 	if len(data) < segmentHeaderLen {
 		return 0, 0, 0, io.ErrUnexpectedEOF
 	}
@@ -156,7 +344,7 @@ func readSegmentHeader(data []byte) (offset int, cols int, segmentLen int, err e
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	if segmentLen < segmentHeaderLen+footerTrailerLen || segmentLen > len(data) {
+	if segmentLen < segmentHeaderLen+footerTrailerLen {
 		return 0, 0, 0, io.ErrUnexpectedEOF
 	}
 	return offset, cols, segmentLen, nil
@@ -167,6 +355,10 @@ func findColumnOffsetBytes(data []byte, cols int, segmentLen int, column string)
 	if err != nil {
 		return 0, false, err
 	}
+	return findColumnOffsetInFooter(footer, cols, segmentLen, column)
+}
+
+func findColumnOffsetInFooter(footer []byte, cols int, segmentLen int, column string) (int, bool, error) {
 	offset := 0
 	countBytes, err := readBytes(footer, &offset, 4)
 	if err != nil {
@@ -207,18 +399,59 @@ func footerPayloadBytes(data []byte) ([]byte, error) {
 		return nil, io.ErrUnexpectedEOF
 	}
 	trailer := data[len(data)-footerTrailerLen:]
-	if !bytesEqualString(trailer[8:], segmentFooterMagic) {
-		return nil, fmt.Errorf("invalid segment footer magic %q", string(trailer[8:]))
-	}
-	footerLen, err := checkedInt("segment footer length", binary.LittleEndian.Uint64(trailer[:]))
+	footerStart, _, err := footerPayloadRangeBytes(len(data), trailer)
 	if err != nil {
 		return nil, err
 	}
-	footerStart := len(data) - footerTrailerLen - footerLen
-	if footerStart < segmentHeaderLen {
-		return nil, io.ErrUnexpectedEOF
-	}
 	return data[footerStart : len(data)-footerTrailerLen], nil
+}
+
+func footerPayloadRangeBytes(segmentLen int, trailer []byte) (footerStart int, footerLen int, err error) {
+	if len(trailer) != footerTrailerLen {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
+	if !bytesEqualString(trailer[8:], segmentFooterMagic) {
+		return 0, 0, fmt.Errorf("invalid segment footer magic %q", string(trailer[8:]))
+	}
+	footerLen, err = checkedInt("segment footer length", binary.LittleEndian.Uint64(trailer[:]))
+	if err != nil {
+		return 0, 0, err
+	}
+	footerStart = segmentLen - footerTrailerLen - footerLen
+	if footerStart < segmentHeaderLen {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
+	return footerStart, footerLen, nil
+}
+
+func ensureScratch(scratch []byte, size int) []byte {
+	if cap(scratch) < size {
+		return make([]byte, size)
+	}
+	return scratch[:size]
+}
+
+func readFullAt(r io.ReaderAt, buf []byte, offset int64) error {
+	if offset < 0 {
+		return fmt.Errorf("negative read offset %d", offset)
+	}
+	if len(buf) == 0 {
+		return nil
+	}
+	n, err := r.ReadAt(buf, offset)
+	if err != nil {
+		if err == io.EOF && n == len(buf) {
+			return nil
+		}
+		if n < len(buf) {
+			return io.ErrUnexpectedEOF
+		}
+		return err
+	}
+	if n != len(buf) {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 func readColumnBytes(data []byte, offset *int) ([]byte, ColumnStats, []byte, error) {
