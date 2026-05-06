@@ -43,6 +43,7 @@ func runBenchmarks(tbl *table.Table, opts benchOptions) ([]benchResult, []groupR
 	runner := benchmarkRunner{scanner: scanner, runs: opts.runs, results: make([]benchResult, 0, 10)}
 	groups := make([]groupResult, 0, 2)
 	schema := tbl.Schema()
+	profile := opts.dataProfile()
 	targetRow := int64(0)
 	if opts.rows > 0 {
 		targetRow = min(opts.rows-1, int64(12_345))
@@ -70,13 +71,13 @@ func runBenchmarks(tbl *table.Table, opts benchOptions) ([]benchResult, []groupR
 		}
 	}
 	if hasColumn(schema, "user_id", vector.KindInt64) {
-		userID := syntheticUserID(targetRow)
+		userID := syntheticUserID(targetRow, profile)
 		if err := runner.run(fmt.Sprintf("user_id = %d", userID), func() (int, error) { return countInt64("user_id", userID) }); err != nil {
 			return nil, nil, err
 		}
 	}
 	if hasColumn(schema, "created_at", vector.KindInt64) {
-		createdAt := syntheticCreatedAt(targetRow)
+		createdAt := syntheticCreatedAt(targetRow, profile)
 		if err := runner.run(fmt.Sprintf("created_at = %d", createdAt), func() (int, error) { return countInt64("created_at", createdAt) }); err != nil {
 			return nil, nil, err
 		}
@@ -105,13 +106,13 @@ func runBenchmarks(tbl *table.Table, opts benchOptions) ([]benchResult, []groupR
 		groups = append(groups, groupResult{Name: "country", Counts: countryGroups})
 	}
 	if hasColumn(schema, "url", vector.KindString) {
-		url := syntheticURLValue(targetRow)
+		url := syntheticURLValue(targetRow, profile)
 		if err := runner.run(fmt.Sprintf("url = %q", url), func() (int, error) { return countString("url", url) }); err != nil {
 			return nil, nil, err
 		}
 	}
 	if hasColumn(schema, "email", vector.KindString) {
-		email := syntheticEmailValue(targetRow)
+		email := syntheticEmailValue(targetRow, profile)
 		if err := runner.run(fmt.Sprintf("email = %q", email), func() (int, error) { return countString("email", email) }); err != nil {
 			return nil, nil, err
 		}

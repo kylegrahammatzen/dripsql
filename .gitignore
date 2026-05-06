@@ -8,3 +8,7 @@ dripsqlbench-*/
 *.test
 *.prof
 *.out
+
+# Local planning notes
+todo.md
+goals.md

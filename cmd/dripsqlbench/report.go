@@ -11,23 +11,34 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/table"
 )
 
-func printSummary(dir string, mode string, rows int64, segmentRows int, segmentRowsSource string, workers int, segments int) {
+func printBenchmarkRun(index int, total int, rows int64) {
+	if index > 1 {
+		fmt.Println()
+	}
+	fmt.Printf("Benchmark %d/%d: %s rows\n", index, total, commas(rows))
+}
+
+func printSummary(dir string, mode string, rows int64, segmentRows int, segmentRowsSource string, workers int, data string, seed uint64, segments int) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "DripSQL Benchmark")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Directory:\t%s\n", dir)
 	fmt.Fprintf(w, "Mode:\t%s\n", mode)
+	fmt.Fprintf(w, "Data:\t%s\n", formatData(data, seed))
 	fmt.Fprintf(w, "Rows:\t%s\n", commas(rows))
 	fmt.Fprintf(w, "Segments:\t%s\n", commas(segments))
 	fmt.Fprintf(w, "Segment rows:\t%s\n", formatSegmentRows(segmentRows, segmentRowsSource))
-	fmt.Fprintf(w, "Count workers:\t%s\n", commas(workers))
+	if mode == "load" {
+		fmt.Fprintln(w, "Load workers:\t1 (serial)")
+	}
+	fmt.Fprintf(w, "Query workers:\t%s\n", commas(workers))
 	if segments >= 10_000 {
 		fmt.Fprintln(w, "Note:\tlarge segment count; rebuilding with current automatic row groups reduces per-segment scan overhead")
 	}
 	w.Flush()
 }
 
-func printLoadBenchmark(rows int64, tableBytes int64, loadElapsed time.Duration) {
+func printLoadBenchmark(rows int64, tableBytes int64, loadElapsed time.Duration, stats loadStats) {
 	const mib = 1024 * 1024
 	rowsPerSec := 0.0
 	mibPerSec := 0.0
@@ -41,6 +52,11 @@ func printLoadBenchmark(rows int64, tableBytes int64, loadElapsed time.Duration)
 	fmt.Fprintf(w, "Elapsed:\t%s\n", loadElapsed)
 	fmt.Fprintf(w, "Throughput:\t%s rows/sec\n", commas(int64(rowsPerSec)))
 	fmt.Fprintf(w, "Write:\t%.2f MiB/sec\n", mibPerSec)
+	if stats.Segments > 0 {
+		fmt.Fprintf(w, "Generate:\t%s (%s/segment avg, %s max)\n", stats.Generate, avgDuration(stats.Generate, stats.Segments), stats.MaxGenerate)
+		fmt.Fprintf(w, "Append/encode/write:\t%s (%s/segment avg, %s max)\n", stats.Append, avgDuration(stats.Append, stats.Segments), stats.MaxAppend)
+		fmt.Fprintf(w, "Close/manifest:\t%s\n", stats.Close)
+	}
 	w.Flush()
 }
 
@@ -54,13 +70,13 @@ func printStorage(rows int64, tableBytes int64, stats []table.ColumnStorageStats
 	fmt.Println()
 	fmt.Println("Storage")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "Table size:\t%s\n", formatMiB(tableBytes))
-	fmt.Fprintf(w, "Column payload:\t%s\n", formatMiB(encodedBytes))
+	fmt.Fprintf(w, "Table size:\t%s\n", formatBytes(tableBytes))
+	fmt.Fprintf(w, "Column payload:\t%s\n", formatBytes(encodedBytes))
 	if bloomBytes := storageBloomBytes(stats); bloomBytes > 0 {
-		fmt.Fprintf(w, "Value indexes:\t%s\n", formatMiB(bloomBytes))
+		fmt.Fprintf(w, "Value indexes:\t%s\n", formatBytes(bloomBytes))
 	}
 	fmt.Fprintf(w, "Storage overhead:\t%s\n", formatBytes(overheadBytes))
-	fmt.Fprintf(w, "Plain estimate:\t%s\n", formatMiB(plainBytes))
+	fmt.Fprintf(w, "Plain estimate:\t%s\n", formatBytes(plainBytes))
 	fmt.Fprintf(w, "Column compression:\t%s\n", formatRatio(ratio(plainBytes, encodedBytes)))
 	fmt.Fprintf(w, "Table compression:\t%s\n", formatRatio(ratio(plainBytes, tableBytes)))
 	if rows > 0 {
@@ -99,22 +115,21 @@ func printColumns(stats []table.ColumnStorageStats) {
 	fmt.Fprintln(w, "Column\tType\tCodec\tPlain\tEncoded\tRatio\tDict\tMin/max\tFeatures")
 	for _, col := range stats {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			col.Name, col.Kind, formatCodec(col.Codec), formatMiB(col.PlainBytes), formatMiB(col.EncodedBytes),
+			col.Name, col.Kind, formatCodec(col.Codec), formatBytes(col.PlainBytes), formatBytes(col.EncodedBytes),
 			formatRatio(col.CompressionRatio()), formatDictionaryValues(col), formatMinMax(col), formatColumnFeatures(col))
 	}
 	w.Flush()
 }
 
 func printQueries(results []benchResult) {
-	const mib = 1024 * 1024
 	fmt.Println()
 	fmt.Println("Queries")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "Query\tResult\tSamples\tFirst\tBest\tAvg\tMiB/sec\tScan\tSegments\tRows skipped")
 	for _, result := range results {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%.2f\t%.2f MiB\t%d/%d\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%.2f\t%s\t%d/%d\t%s\n",
 			result.Name, commas(result.Count), commas(result.Samples), formatDuration(result.First), formatDuration(result.Best),
-			formatDuration(result.Avg), queryMiBPerSec(result), float64(result.Stats.BytesScanned)/mib,
+			formatDuration(result.Avg), queryMiBPerSec(result), formatBytes(result.Stats.BytesScanned),
 			result.Stats.SegmentsScanned, result.Stats.SegmentsTotal, commas(result.Stats.RowsSkipped))
 	}
 	w.Flush()
@@ -156,6 +171,13 @@ func formatDuration(duration time.Duration) string {
 	return duration.String()
 }
 
+func avgDuration(total time.Duration, count int) time.Duration {
+	if count <= 0 {
+		return 0
+	}
+	return total / time.Duration(count)
+}
+
 func formatSegmentRows(segmentRows int, source string) string {
 	if source == "" {
 		return commas(segmentRows)
@@ -163,15 +185,22 @@ func formatSegmentRows(segmentRows int, source string) string {
 	return fmt.Sprintf("%s (%s)", commas(segmentRows), source)
 }
 
-func formatMiB(bytes int64) string {
-	return fmt.Sprintf("%.2f MiB", float64(bytes)/(1024*1024))
-}
-
 func formatBytes(bytes int64) string {
-	if bytes < 1024*1024 {
-		return fmt.Sprintf("%.2f KiB", float64(bytes)/1024)
+	const (
+		kib = 1024
+		mib = 1024 * kib
+		gib = 1024 * mib
+	)
+	if bytes < kib {
+		return fmt.Sprintf("%d B", bytes)
 	}
-	return formatMiB(bytes)
+	if bytes < mib {
+		return fmt.Sprintf("%.2f KiB", float64(bytes)/kib)
+	}
+	if bytes < gib {
+		return fmt.Sprintf("%.2f MiB", float64(bytes)/mib)
+	}
+	return fmt.Sprintf("%.2f GiB", float64(bytes)/gib)
 }
 
 func formatRatio(ratio float64) string {
@@ -186,6 +215,13 @@ func formatCodec(codec string) string {
 		return "dict"
 	}
 	return codec
+}
+
+func formatData(data string, seed uint64) string {
+	if data == string(dataModeStructured) {
+		return data
+	}
+	return fmt.Sprintf("%s (seed %d)", data, seed)
 }
 
 func formatDictionaryValues(stats table.ColumnStorageStats) string {
@@ -215,6 +251,9 @@ func formatColumnFeatures(stats table.ColumnStorageStats) string {
 		if stats.GroupPath == "dict-counts" {
 			features = append(features, "fast group")
 		}
+	}
+	if stats.FilterPath == "sequence" {
+		features = append(features, "fast equality")
 	}
 	if stats.BloomSegments > 0 {
 		features = append(features, "value skip")
