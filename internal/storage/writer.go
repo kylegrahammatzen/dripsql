@@ -18,6 +18,15 @@ type preparedColumn struct {
 	filters       []byte
 }
 
+type columnEncoding struct {
+	payload              []byte
+	codec                Codec
+	plainBytes           int
+	dictionaryBytes      int
+	dictionaryValues     int
+	dictionaryIDEncoding int
+}
+
 // WriteSegment writes an immutable segment containing int64 and string columns.
 func WriteSegment(w io.Writer, batch vector.Batch) (SegmentStats, error) {
 	rowCount := batch.Count
@@ -148,21 +157,29 @@ func prepareColumn(col vector.Column) (preparedColumn, error) {
 		meta.HasMinMax = ok
 		meta.MinInt64 = minValue
 		meta.MaxInt64 = maxValue
-		payload, codec, dictionaryBytes, err := encodeInt64(values)
+		encoding, err := encodeInt64(values)
 		if err != nil {
 			return preparedColumn{}, fmt.Errorf("encode column %q: %w", col.Name, err)
 		}
-		meta.Codec = codec
-		meta.Dictionary.Bytes = int64(dictionaryBytes)
-		return preparedColumn{meta: meta, payload: payload, relativePages: int64PlainPages(values, codec)}, nil
+		applyEncodingStats(&meta, encoding)
+		if meta.Codec == CodecPlain {
+			bloom, err := BuildInt64Bloom(values)
+			if err != nil {
+				return preparedColumn{}, err
+			}
+			meta.Int64Bloom = bloom
+			if bloom != nil {
+				meta.FilterPath = "segment-bloom"
+			}
+		}
+		return preparedColumn{meta: meta, payload: encoding.payload, relativePages: int64PlainPages(values, meta.Codec)}, nil
 	case vector.String:
-		payload, codec, dictionaryBytes, err := encodeString(values)
+		encoding, err := encodeString(values)
 		if err != nil {
 			return preparedColumn{}, fmt.Errorf("encode column %q: %w", col.Name, err)
 		}
-		meta.Codec = codec
-		meta.Dictionary.Bytes = int64(dictionaryBytes)
-		pages, err := stringPages(values, payload, codec)
+		applyEncodingStats(&meta, encoding)
+		pages, err := stringPages(values, encoding.payload, meta.Codec)
 		if err != nil {
 			return preparedColumn{}, fmt.Errorf("build pages for column %q: %w", col.Name, err)
 		}
@@ -173,9 +190,47 @@ func prepareColumn(col vector.Column) (preparedColumn, error) {
 				return preparedColumn{}, fmt.Errorf("encode page bloom for column %q: %w", col.Name, err)
 			}
 		}
-		return preparedColumn{meta: meta, payload: payload, relativePages: pages, filters: filters}, nil
+		if meta.Codec == CodecPlain || meta.Codec == CodecStringPrefix {
+			bloom, err := BuildStringBloom(values)
+			if err != nil {
+				return preparedColumn{}, err
+			}
+			meta.StringBloom = bloom
+			if len(filters) > 0 {
+				meta.FilterPath = "page-bloom"
+			} else if bloom != nil {
+				meta.FilterPath = "segment-bloom"
+			}
+		}
+		return preparedColumn{meta: meta, payload: encoding.payload, relativePages: pages, filters: filters}, nil
 	default:
 		return preparedColumn{}, fmt.Errorf("storage encoding is not implemented for %s vectors", col.Vector.Kind())
+	}
+}
+
+func applyEncodingStats(meta *Column, encoding columnEncoding) {
+	meta.Codec = encoding.codec
+	meta.PlainBytes = encoding.plainBytes
+	meta.Dictionary.Bytes = int64(encoding.dictionaryBytes)
+	if encoding.codec == CodecDictionary {
+		meta.DictionaryValues = encoding.dictionaryValues
+		if encoding.dictionaryIDEncoding&dictionaryPackedIDFlag != 0 {
+			meta.DictionaryPacked = true
+			meta.DictionaryPackedBitWidth = encoding.dictionaryIDEncoding &^ dictionaryPackedIDFlag
+		} else {
+			meta.DictionaryIDWidth = encoding.dictionaryIDEncoding
+		}
+		meta.FilterPath = "dictionary"
+		if meta.Kind == vector.KindString {
+			meta.GroupPath = "dict-counts"
+		}
+		return
+	}
+	if encoding.codec == CodecInt64Sequence {
+		meta.FilterPath = "sequence"
+	}
+	if meta.Kind == vector.KindString && (encoding.codec == CodecPlain || encoding.codec == CodecStringPrefix || encoding.codec == CodecStringTemplate) {
+		meta.GroupPath = "bytes"
 	}
 }
 

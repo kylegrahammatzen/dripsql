@@ -13,30 +13,33 @@ const (
 	int64DictionaryHeaderLen = 4 + 1
 )
 
-func encodeInt64(values vector.Int64) ([]byte, Codec, int, error) {
+func encodeInt64(values vector.Int64) (columnEncoding, error) {
 	rows := values.Len()
 	plainLen, err := int64PlainPayloadLen(rows)
 	if err != nil {
-		return nil, 0, 0, err
+		return columnEncoding{}, err
 	}
 	if rows > 0 {
 		payload, ok, err := encodeInt64SequenceIfSmaller(values, plainLen)
 		if err != nil {
-			return nil, 0, 0, err
+			return columnEncoding{}, err
 		}
 		if ok {
-			return payload, CodecInt64Sequence, 0, nil
+			return columnEncoding{payload: payload, codec: CodecInt64Sequence, plainBytes: plainLen}, nil
 		}
-		payload, metadataLen, ok, err := encodeInt64DictionaryIfSmaller(values, plainLen)
+		payload, metadataLen, dictCount, idEncoding, ok, err := encodeInt64DictionaryIfSmaller(values, plainLen)
 		if err != nil {
-			return nil, 0, 0, err
+			return columnEncoding{}, err
 		}
 		if ok {
-			return payload, CodecDictionary, metadataLen, nil
+			return columnEncoding{payload: payload, codec: CodecDictionary, plainBytes: plainLen, dictionaryBytes: metadataLen, dictionaryValues: dictCount, dictionaryIDEncoding: idEncoding}, nil
 		}
 	}
 	payload, err := encodeInt64Plain(values)
-	return payload, CodecPlain, 0, err
+	if err != nil {
+		return columnEncoding{}, err
+	}
+	return columnEncoding{payload: payload, codec: CodecPlain, plainBytes: plainLen}, nil
 }
 
 func encodeInt64SequenceIfSmaller(values vector.Int64, plainLen int) ([]byte, bool, error) {
@@ -91,30 +94,30 @@ func encodeInt64Plain(values vector.Int64) ([]byte, error) {
 	return out, nil
 }
 
-func encodeInt64DictionaryIfSmaller(values vector.Int64, plainLen int) ([]byte, int, bool, error) {
+func encodeInt64DictionaryIfSmaller(values vector.Int64, plainLen int) ([]byte, int, int, int, bool, error) {
 	dictValues, rowIDs, dictCounts, ok := analyzeInt64Dictionary(values)
 	if !ok {
-		return nil, 0, false, nil
+		return nil, 0, 0, 0, false, nil
 	}
 	rows := values.Len()
 	dictCount := len(dictValues)
 	idEncoding := dictionaryIDEncoding(dictCount, rows)
 	metadataLen, err := int64DictionaryMetadataLen(dictCount)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, 0, 0, false, err
 	}
 	dictLen, err := int64DictionaryPayloadLen(dictCount, rows, idEncoding)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, 0, 0, false, err
 	}
 	if dictLen >= plainLen {
-		return nil, 0, false, nil
+		return nil, 0, 0, 0, false, nil
 	}
 	payload, err := encodeInt64Dictionary(rowIDs, dictValues, dictCounts, idEncoding, dictLen)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, 0, 0, false, err
 	}
-	return payload, metadataLen, true, nil
+	return payload, metadataLen, dictCount, idEncoding, true, nil
 }
 
 func analyzeInt64Dictionary(values vector.Int64) (dictValues []int64, rowIDs []uint32, dictCounts []uint64, ok bool) {

@@ -329,25 +329,8 @@ func (s *Scanner) beginScan() {
 	}
 }
 
-func (s *Scanner) markScanned(segment Segment, bytesRead int64) {
-	markStatsScanned(&s.stats, segment, bytesRead)
-}
-
 func (s *Scanner) markStorageScanned(segment Segment, scanStats storage.ScanStats) {
 	markStatsStorageScanned(&s.stats, segment, scanStats)
-}
-
-func markStatsScanned(stats *ScanStats, segment Segment, bytesRead int64) {
-	if bytesRead < 0 {
-		bytesRead = 0
-	}
-	if bytesRead > segment.Bytes {
-		bytesRead = segment.Bytes
-	}
-	stats.SegmentsScanned++
-	stats.RowsScanned += int64(segment.Rows)
-	stats.BytesScanned += bytesRead
-	stats.BytesSkipped += segment.Bytes - bytesRead
 }
 
 func markStatsStorageScanned(stats *ScanStats, segment Segment, scanStats storage.ScanStats) {

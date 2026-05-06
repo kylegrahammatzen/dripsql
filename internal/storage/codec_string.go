@@ -17,44 +17,47 @@ const (
 	stringTemplateHeaderLen   = 4 + 4 + 4 + 1 + 1 + 1 + 1 + 8 + 8
 )
 
-func encodeString(values vector.String) ([]byte, Codec, int, error) {
+func encodeString(values vector.String) (columnEncoding, error) {
 	strings, offsetBytes, dataLen, err := collectStringValues(values)
 	if err != nil {
-		return nil, 0, 0, err
+		return columnEncoding{}, err
 	}
 	plainLen, err := checkedAddInt("string total payload length", offsetBytes, dataLen)
 	if err != nil {
-		return nil, 0, 0, err
+		return columnEncoding{}, err
 	}
 	if values.Len() > 0 {
-		payload, metadataLen, ok, err := encodeStringDictionaryIfSmaller(values, plainLen)
+		payload, metadataLen, dictCount, idEncoding, ok, err := encodeStringDictionaryIfSmaller(values, plainLen)
 		if err != nil {
-			return nil, 0, 0, err
+			return columnEncoding{}, err
 		}
 		if ok {
-			return payload, CodecDictionary, metadataLen, nil
+			return columnEncoding{payload: payload, codec: CodecDictionary, plainBytes: plainLen, dictionaryBytes: metadataLen, dictionaryValues: dictCount, dictionaryIDEncoding: idEncoding}, nil
 		}
 	}
 	if values.Len() > 0 {
 		payload, ok, err := encodeStringTemplateIfSmaller(strings, plainLen)
 		if err != nil {
-			return nil, 0, 0, err
+			return columnEncoding{}, err
 		}
 		if ok {
-			return payload, CodecStringTemplate, 0, nil
+			return columnEncoding{payload: payload, codec: CodecStringTemplate, plainBytes: plainLen}, nil
 		}
 	}
 	if values.Len() > 0 {
 		payload, ok, err := encodeStringPrefixIfSmaller(strings, plainLen)
 		if err != nil {
-			return nil, 0, 0, err
+			return columnEncoding{}, err
 		}
 		if ok {
-			return payload, CodecStringPrefix, 0, nil
+			return columnEncoding{payload: payload, codec: CodecStringPrefix, plainBytes: plainLen}, nil
 		}
 	}
 	payload, err := encodeStringPlainValues(strings, offsetBytes, dataLen)
-	return payload, CodecPlain, 0, err
+	if err != nil {
+		return columnEncoding{}, err
+	}
+	return columnEncoding{payload: payload, codec: CodecPlain, plainBytes: plainLen}, nil
 }
 
 func encodeStringPlain(values vector.String) ([]byte, error) {
@@ -82,32 +85,32 @@ func encodeStringPlainValues(strings []string, offsetBytes int, dataLen int) ([]
 	return out, nil
 }
 
-func encodeStringDictionaryIfSmaller(values vector.String, plainLen int) ([]byte, int, bool, error) {
+func encodeStringDictionaryIfSmaller(values vector.String, plainLen int) ([]byte, int, int, int, bool, error) {
 	dictValues, dictIDs, dictDataLen, dictCounts, ok, err := analyzeStringDictionary(values)
 	if err != nil || !ok {
-		return nil, 0, false, err
+		return nil, 0, 0, 0, false, err
 	}
 	idEncoding := dictionaryIDEncoding(len(dictValues), values.Len())
 	dictSectionLen, err := stringDictionarySectionLen(len(dictValues), dictDataLen)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, 0, 0, false, err
 	}
 	metadataLen, err := stringDictionaryMetadataLen(dictSectionLen, len(dictValues))
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, 0, 0, false, err
 	}
 	dictLen, err := stringDictionaryPayloadLen(dictSectionLen, len(dictValues), values.Len(), idEncoding)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, 0, 0, false, err
 	}
 	if dictLen >= plainLen {
-		return nil, 0, false, nil
+		return nil, 0, 0, 0, false, nil
 	}
 	payload, err := encodeStringDictionary(values, dictValues, dictIDs, dictDataLen, dictCounts, idEncoding, dictLen)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, 0, 0, false, err
 	}
-	return payload, metadataLen, true, nil
+	return payload, metadataLen, len(dictValues), idEncoding, true, nil
 }
 
 func encodeStringPrefixIfSmaller(values []string, plainLen int) ([]byte, bool, error) {
@@ -373,14 +376,18 @@ func encodeStringTemplate(prefix string, middle string, suffix string, firstRadi
 	if len(firstValues) != len(secondValues) {
 		return nil, fmt.Errorf("string template has %d first values, want %d", len(firstValues), len(secondValues))
 	}
-	firstPayload, firstCodec, _, err := encodeInt64(vector.FromInt64(firstValues))
+	firstEncoding, err := encodeInt64(vector.FromInt64(firstValues))
 	if err != nil {
 		return nil, err
 	}
-	secondPayload, secondCodec, _, err := encodeInt64(vector.FromInt64(secondValues))
+	secondEncoding, err := encodeInt64(vector.FromInt64(secondValues))
 	if err != nil {
 		return nil, err
 	}
+	firstPayload := firstEncoding.payload
+	secondPayload := secondEncoding.payload
+	firstCodec := firstEncoding.codec
+	secondCodec := secondEncoding.codec
 	if firstCodec == CodecStringTemplate || secondCodec == CodecStringTemplate || firstCodec == CodecStringPrefix || secondCodec == CodecStringPrefix {
 		return nil, fmt.Errorf("string template nested non-int64 codec")
 	}
