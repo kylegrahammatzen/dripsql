@@ -12,13 +12,15 @@ import (
 
 // Scanner reuses scratch buffers across table scans. It is not safe for concurrent use.
 type Scanner struct {
-	table         *Table
-	file          *os.File
-	buf           []byte
-	stringKeys    []string
-	parallelFiles []*os.File
-	parallelBufs  [][]byte
-	stats         ScanStats
+	table          *Table
+	file           *os.File
+	buf            []byte
+	stringKeys     []string
+	storageReaders []storage.Reader
+	storageOK      []bool
+	parallelFiles  []*os.File
+	parallelBufs   [][]byte
+	stats          ScanStats
 }
 
 // seekReaderAt avoids Windows os.File.ReadAt allocations because Scanner owns the file offset.
@@ -58,12 +60,12 @@ func (s *Scanner) CountInt64Equal(column string, value int64) (int, error) {
 	s.beginScan()
 
 	count := 0
-	for _, segment := range t.manifest.Segments {
+	for segmentIndex, segment := range t.manifest.Segments {
 		stats, err := segmentColumnStats(segment, column, vector.KindInt64)
 		if err != nil {
 			return 0, err
 		}
-		if stats.HasMinMax && (value < stats.MinInt64 || value > stats.MaxInt64) {
+		if storage.CanSkipInt64Equal(stats, value) {
 			s.markSkipped(segment)
 			continue
 		}
@@ -72,13 +74,11 @@ func (s *Scanner) CountInt64Equal(column string, value int64) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		var segmentCount int
-		var bytesRead int64
-		segmentCount, s.buf, bytesRead, err = scanSegmentInt64Equal(seekReaderAt{file: file}, segment, stats, value, s.buf)
+		segmentCount, scanStats, err := s.scanStorageInt64Equal(file, segmentIndex, segment, column, value)
 		if err != nil {
 			return 0, err
 		}
-		s.markScanned(segment, bytesRead)
+		s.markStorageScanned(segment, scanStats)
 		count, err = checkedAddCount(count, segmentCount)
 		if err != nil {
 			return 0, err
@@ -106,7 +106,7 @@ func (s *Scanner) CountStringEqual(column string, value string) (int, error) {
 	s.beginScan()
 
 	count := 0
-	for _, segment := range t.manifest.Segments {
+	for segmentIndex, segment := range t.manifest.Segments {
 		stats, err := segmentColumnStats(segment, column, vector.KindString)
 		if err != nil {
 			return 0, err
@@ -120,13 +120,11 @@ func (s *Scanner) CountStringEqual(column string, value string) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		var segmentCount int
-		var bytesRead int64
-		segmentCount, s.buf, bytesRead, err = scanSegmentStringEqual(seekReaderAt{file: file}, segment, stats, value, s.buf)
+		segmentCount, scanStats, err := s.scanStorageStringEqual(file, segmentIndex, segment, column, value)
 		if err != nil {
 			return 0, err
 		}
-		s.markScanned(segment, bytesRead)
+		s.markStorageScanned(segment, scanStats)
 		count, err = checkedAddCount(count, segmentCount)
 		if err != nil {
 			return 0, err
@@ -160,9 +158,8 @@ func (s *Scanner) GroupStringCountsInto(column string, counts map[string]int) (m
 		return nil, err
 	}
 	s.beginScan()
-	for _, segment := range t.manifest.Segments {
-		stats, err := segmentColumnStats(segment, column, vector.KindString)
-		if err != nil {
+	for segmentIndex, segment := range t.manifest.Segments {
+		if _, err := segmentColumnStats(segment, column, vector.KindString); err != nil {
 			return nil, err
 		}
 
@@ -170,71 +167,86 @@ func (s *Scanner) GroupStringCountsInto(column string, counts map[string]int) (m
 		if err != nil {
 			return nil, err
 		}
-		var bytesRead int64
-		reader := seekReaderAt{file: file}
-		if columnRange, ok := segmentColumnRange(segment, column); ok {
-			s.buf, s.stringKeys, bytesRead, err = storage.GroupColumnStringCountsAtCached(reader, segment.Offset+columnRange.Offset, columnRange.Bytes, stats, counts, s.buf, s.stringKeys)
-		} else {
-			var found bool
-			found, s.buf, s.stringKeys, bytesRead, err = storage.GroupSegmentStringCountsAtCached(reader, segment.Offset, segment.Bytes, column, counts, s.buf, s.stringKeys)
-			if err == nil && !found {
-				return nil, fmt.Errorf("segment %d missing column %q", segment.ID, column)
-			}
-		}
+		scanStats, err := s.scanStorageStringGroups(file, segmentIndex, segment, column, counts)
 		if err != nil {
 			return nil, err
 		}
-		s.markScanned(segment, bytesRead)
+		s.markStorageScanned(segment, scanStats)
 	}
 	return counts, nil
 }
 
-func segmentColumnRange(segment Segment, column string) (ColumnRange, bool) {
-	for _, columnRange := range segment.Columns {
-		if columnRange.Name == column {
-			return columnRange, true
-		}
-	}
-	return ColumnRange{}, false
-}
-
-func segmentColumnStats(segment Segment, column string, kind vector.Kind) (storage.ColumnStats, error) {
+func segmentColumnStats(segment Segment, column string, kind vector.Kind) (storage.Column, error) {
 	stats, ok := segment.Stats.Column(column)
 	if !ok {
-		return storage.ColumnStats{}, errMissingSegmentColumn(segment, column)
+		return storage.Column{}, errMissingSegmentColumn(segment, column)
 	}
 	if stats.Kind != kind {
-		return storage.ColumnStats{}, errWrongSegmentColumnKind(segment, column, stats.Kind, kind.String())
+		return storage.Column{}, errWrongSegmentColumnKind(segment, column, stats.Kind, kind.String())
 	}
 	return stats, nil
 }
 
-func scanSegmentInt64Equal(reader io.ReaderAt, segment Segment, stats storage.ColumnStats, value int64, scratch []byte) (int, []byte, int64, error) {
-	if columnRange, ok := segmentColumnRange(segment, stats.Name); ok {
-		return storage.CountColumnInt64EqualAt(reader, segment.Offset+columnRange.Offset, columnRange.Bytes, stats, value, scratch)
-	}
-	count, found, scratch, bytesRead, err := storage.CountSegmentInt64EqualAt(reader, segment.Offset, segment.Bytes, stats.Name, value, scratch)
+func (s *Scanner) scanStorageInt64Equal(file *os.File, segmentIndex int, segment Segment, column string, value int64) (int, storage.ScanStats, error) {
+	reader, err := s.openStorageSegment(file, segmentIndex, segment)
 	if err != nil {
-		return 0, scratch, bytesRead, err
+		return 0, storage.ScanStats{}, err
 	}
-	if !found {
-		return 0, scratch, bytesRead, fmt.Errorf("segment %d missing column %q", segment.ID, stats.Name)
+	count, scratch, stats, err := storage.CountInt64Equal(reader, column, value, s.buf)
+	s.buf = scratch
+	if err != nil {
+		return 0, storage.ScanStats{}, fmt.Errorf("scan storage segment %d: %w", segment.ID, err)
 	}
-	return count, scratch, bytesRead, nil
+	return count, stats, nil
 }
 
-func scanSegmentStringEqual(reader io.ReaderAt, segment Segment, stats storage.ColumnStats, value string, scratch []byte) (int, []byte, int64, error) {
-	if columnRange, ok := segmentColumnRange(segment, stats.Name); ok {
-		return storage.CountColumnStringEqualAt(reader, segment.Offset+columnRange.Offset, columnRange.Bytes, stats, value, scratch)
-	}
-	count, found, scratch, bytesRead, err := storage.CountSegmentStringEqualAt(reader, segment.Offset, segment.Bytes, stats.Name, value, scratch)
+func (s *Scanner) scanStorageStringEqual(file *os.File, segmentIndex int, segment Segment, column string, value string) (int, storage.ScanStats, error) {
+	reader, err := s.openStorageSegment(file, segmentIndex, segment)
 	if err != nil {
-		return 0, scratch, bytesRead, err
+		return 0, storage.ScanStats{}, err
 	}
-	if !found {
-		return 0, scratch, bytesRead, fmt.Errorf("segment %d missing column %q", segment.ID, stats.Name)
+	count, scratch, stats, err := storage.CountStringEqual(reader, column, value, s.buf)
+	s.buf = scratch
+	if err != nil {
+		return 0, storage.ScanStats{}, fmt.Errorf("scan storage segment %d: %w", segment.ID, err)
 	}
-	return count, scratch, bytesRead, nil
+	return count, stats, nil
+}
+
+func (s *Scanner) scanStorageStringGroups(file *os.File, segmentIndex int, segment Segment, column string, counts map[string]int) (storage.ScanStats, error) {
+	reader, err := s.openStorageSegment(file, segmentIndex, segment)
+	if err != nil {
+		return storage.ScanStats{}, err
+	}
+	_, scratch, stringKeys, stats, err := storage.GroupStringCounts(reader, column, counts, s.buf, s.stringKeys)
+	s.buf = scratch
+	s.stringKeys = stringKeys
+	if err != nil {
+		return storage.ScanStats{}, fmt.Errorf("group storage segment %d: %w", segment.ID, err)
+	}
+	return stats, nil
+}
+
+func (s *Scanner) openStorageSegment(file *os.File, segmentIndex int, segment Segment) (storage.Reader, error) {
+	if segmentIndex >= 0 {
+		for len(s.storageReaders) <= segmentIndex {
+			s.storageReaders = append(s.storageReaders, storage.Reader{})
+			s.storageOK = append(s.storageOK, false)
+		}
+		if s.storageOK[segmentIndex] {
+			return s.storageReaders[segmentIndex], nil
+		}
+	}
+	reader, scratch, err := storage.OpenSegment(seekReaderAt{file: file}, segment.Offset, segment.Bytes, s.buf)
+	s.buf = scratch
+	if err != nil {
+		return storage.Reader{}, fmt.Errorf("open storage segment %d: %w", segment.ID, err)
+	}
+	if segmentIndex >= 0 {
+		s.storageReaders[segmentIndex] = reader
+		s.storageOK[segmentIndex] = true
+	}
+	return reader, nil
 }
 
 // Reset releases scanner scratch buffers.
@@ -246,6 +258,8 @@ func (s *Scanner) Reset() {
 	s.file = nil
 	s.buf = nil
 	s.stringKeys = nil
+	s.storageReaders = nil
+	s.storageOK = nil
 	s.parallelBufs = nil
 	s.stats = ScanStats{}
 }
@@ -259,6 +273,8 @@ func (s *Scanner) Close() error {
 	s.file = nil
 	s.buf = nil
 	s.stringKeys = nil
+	s.storageReaders = nil
+	s.storageOK = nil
 	s.parallelBufs = nil
 	s.stats = ScanStats{}
 	parallelErr := s.closeParallelFiles()
@@ -317,6 +333,10 @@ func (s *Scanner) markScanned(segment Segment, bytesRead int64) {
 	markStatsScanned(&s.stats, segment, bytesRead)
 }
 
+func (s *Scanner) markStorageScanned(segment Segment, scanStats storage.ScanStats) {
+	markStatsStorageScanned(&s.stats, segment, scanStats)
+}
+
 func markStatsScanned(stats *ScanStats, segment Segment, bytesRead int64) {
 	if bytesRead < 0 {
 		bytesRead = 0
@@ -328,6 +348,41 @@ func markStatsScanned(stats *ScanStats, segment Segment, bytesRead int64) {
 	stats.RowsScanned += int64(segment.Rows)
 	stats.BytesScanned += bytesRead
 	stats.BytesSkipped += segment.Bytes - bytesRead
+}
+
+func markStatsStorageScanned(stats *ScanStats, segment Segment, scanStats storage.ScanStats) {
+	bytesScanned := scanStats.BytesScanned
+	if bytesScanned < 0 {
+		bytesScanned = 0
+	}
+	if bytesScanned > segment.Bytes {
+		bytesScanned = segment.Bytes
+	}
+
+	rowsTotal := int64(segment.Rows)
+	rowsScanned := int64(scanStats.RowsScanned)
+	rowsSkipped := int64(scanStats.RowsSkipped)
+	if rowsScanned < 0 {
+		rowsScanned = 0
+	}
+	if rowsSkipped < 0 {
+		rowsSkipped = 0
+	}
+	if rowsSkipped > rowsTotal {
+		rowsSkipped = rowsTotal
+	}
+	if rowsScanned > rowsTotal-rowsSkipped {
+		rowsScanned = rowsTotal - rowsSkipped
+	}
+	if rowsScanned == 0 && rowsSkipped == 0 {
+		rowsScanned = rowsTotal
+	}
+
+	stats.SegmentsScanned++
+	stats.RowsScanned += rowsScanned
+	stats.RowsSkipped += rowsSkipped
+	stats.BytesScanned += bytesScanned
+	stats.BytesSkipped += segment.Bytes - bytesScanned
 }
 
 func (s *Scanner) markSkipped(segment Segment) {

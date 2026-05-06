@@ -13,7 +13,7 @@ import (
 
 type countScanJob struct {
 	segment Segment
-	stats   storage.ColumnStats
+	stats   storage.Column
 }
 
 type countScanResult struct {
@@ -32,22 +32,24 @@ func (s *Scanner) CountInt64EqualParallel(column string, value int64, workers in
 	if err := t.requireColumnKind(column, vector.KindInt64); err != nil {
 		return 0, err
 	}
-	s.beginScan()
-
-	jobs := make([]countScanJob, 0, len(t.manifest.Segments))
-	for _, segment := range t.manifest.Segments {
-		stats, err := segmentColumnStats(segment, column, vector.KindInt64)
-		if err != nil {
-			return 0, err
-		}
-		if stats.HasMinMax && (value < stats.MinInt64 || value > stats.MaxInt64) {
-			s.markSkipped(segment)
-			continue
-		}
-		jobs = append(jobs, countScanJob{segment: segment, stats: stats})
+	shouldAttempt, err := s.shouldAttemptStorageParallel(column, vector.KindInt64, workers)
+	if err != nil {
+		return 0, err
 	}
-
-	return s.countInt64JobsParallel(jobs, value, workers)
+	if !shouldAttempt {
+		return s.CountInt64Equal(column, value)
+	}
+	s.beginScan()
+	jobs, err := s.countScanJobs(column, vector.KindInt64, func(stats storage.Column) bool {
+		return storage.CanSkipInt64Equal(stats, value)
+	})
+	if err != nil {
+		return 0, err
+	}
+	if !shouldUseStorageParallel(jobs, workers) {
+		return s.CountInt64Equal(column, value)
+	}
+	return s.countStorageInt64JobsParallel(jobs, column, value, workers)
 }
 
 // CountStringEqualParallel counts rows across table segments using up to workers file readers.
@@ -59,25 +61,72 @@ func (s *Scanner) CountStringEqualParallel(column string, value string, workers 
 	if err := t.requireColumnKind(column, vector.KindString); err != nil {
 		return 0, err
 	}
+	shouldAttempt, err := s.shouldAttemptStorageParallel(column, vector.KindString, workers)
+	if err != nil {
+		return 0, err
+	}
+	if !shouldAttempt {
+		return s.CountStringEqual(column, value)
+	}
 	s.beginScan()
+	jobs, err := s.countScanJobs(column, vector.KindString, func(stats storage.Column) bool {
+		return storage.CanSkipStringEqual(stats, value)
+	})
+	if err != nil {
+		return 0, err
+	}
+	if !shouldUseStorageParallel(jobs, workers) {
+		return s.CountStringEqual(column, value)
+	}
+	return s.countStorageStringJobsParallel(jobs, column, value, workers)
+}
 
-	jobs := make([]countScanJob, 0, len(t.manifest.Segments))
-	for _, segment := range t.manifest.Segments {
-		stats, err := segmentColumnStats(segment, column, vector.KindString)
+func (s *Scanner) countScanJobs(column string, kind vector.Kind, canSkip func(storage.Column) bool) ([]countScanJob, error) {
+	jobs := make([]countScanJob, 0, len(s.table.manifest.Segments))
+	for _, segment := range s.table.manifest.Segments {
+		stats, err := segmentColumnStats(segment, column, kind)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
-		if storage.CanSkipStringEqual(stats, value) {
+		if canSkip(stats) {
 			s.markSkipped(segment)
 			continue
 		}
 		jobs = append(jobs, countScanJob{segment: segment, stats: stats})
 	}
-
-	return s.countStringJobsParallel(jobs, value, workers)
+	return jobs, nil
 }
 
-func (s *Scanner) countInt64JobsParallel(jobs []countScanJob, value int64, workers int) (int, error) {
+func (s *Scanner) shouldAttemptStorageParallel(column string, kind vector.Kind, workers int) (bool, error) {
+	if parallelWorkerCount(workers, len(s.table.manifest.Segments)) < 2 || len(s.table.manifest.Segments) < 4 {
+		return false, nil
+	}
+	for _, segment := range s.table.manifest.Segments {
+		stats, err := segmentColumnStats(segment, column, kind)
+		if err != nil {
+			return false, err
+		}
+		if stats.Codec != storage.CodecPlain {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func shouldUseStorageParallel(jobs []countScanJob, workers int) bool {
+	workerCount := parallelWorkerCount(workers, len(jobs))
+	if workerCount < 2 || len(jobs) < 4 {
+		return false
+	}
+	for _, job := range jobs {
+		if job.stats.Codec != storage.CodecPlain {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Scanner) countStorageInt64JobsParallel(jobs []countScanJob, column string, value int64, workers int) (int, error) {
 	if len(jobs) == 0 {
 		return 0, nil
 	}
@@ -97,14 +146,14 @@ func (s *Scanner) countInt64JobsParallel(jobs []countScanJob, value int64, worke
 		wg.Add(1)
 		go func(worker int) {
 			defer wg.Done()
-			results[worker] = s.countInt64Worker(s.parallelFiles[worker], s.parallelBufs[worker], jobCh, value)
+			results[worker] = s.countStorageInt64Worker(s.parallelFiles[worker], s.parallelBufs[worker], jobCh, column, value)
 		}(worker)
 	}
 	wg.Wait()
 	return s.mergeCountResults(results)
 }
 
-func (s *Scanner) countStringJobsParallel(jobs []countScanJob, value string, workers int) (int, error) {
+func (s *Scanner) countStorageStringJobsParallel(jobs []countScanJob, column string, value string, workers int) (int, error) {
 	if len(jobs) == 0 {
 		return 0, nil
 	}
@@ -124,24 +173,29 @@ func (s *Scanner) countStringJobsParallel(jobs []countScanJob, value string, wor
 		wg.Add(1)
 		go func(worker int) {
 			defer wg.Done()
-			results[worker] = s.countStringWorker(s.parallelFiles[worker], s.parallelBufs[worker], jobCh, value)
+			results[worker] = s.countStorageStringWorker(s.parallelFiles[worker], s.parallelBufs[worker], jobCh, column, value)
 		}(worker)
 	}
 	wg.Wait()
 	return s.mergeCountResults(results)
 }
 
-func (s *Scanner) countInt64Worker(file *os.File, buf []byte, jobs <-chan countScanJob, value int64) countScanResult {
-	reader := seekReaderAt{file: file}
+func (s *Scanner) countStorageInt64Worker(file *os.File, buf []byte, jobs <-chan countScanJob, column string, value int64) countScanResult {
+	readerAt := seekReaderAt{file: file}
 	var result countScanResult
 	for job := range jobs {
-		var count int
-		var bytesRead int64
-		var err error
-		count, buf, bytesRead, err = scanSegmentInt64Equal(reader, job.segment, job.stats, value, buf)
+		reader, scratch, err := storage.OpenSegment(readerAt, job.segment.Offset, job.segment.Bytes, buf)
+		buf = scratch
 		if err != nil {
 			result.buf = buf
-			result.err = err
+			result.err = fmt.Errorf("open storage segment %d: %w", job.segment.ID, err)
+			return result
+		}
+		count, scratch, scanStats, err := storage.CountInt64Equal(reader, column, value, buf)
+		buf = scratch
+		if err != nil {
+			result.buf = buf
+			result.err = fmt.Errorf("scan storage segment %d: %w", job.segment.ID, err)
 			return result
 		}
 		result.count, err = checkedAddCount(result.count, count)
@@ -150,23 +204,28 @@ func (s *Scanner) countInt64Worker(file *os.File, buf []byte, jobs <-chan countS
 			result.err = err
 			return result
 		}
-		markStatsScanned(&result.stats, job.segment, bytesRead)
+		markStatsStorageScanned(&result.stats, job.segment, scanStats)
 	}
 	result.buf = buf
 	return result
 }
 
-func (s *Scanner) countStringWorker(file *os.File, buf []byte, jobs <-chan countScanJob, value string) countScanResult {
-	reader := seekReaderAt{file: file}
+func (s *Scanner) countStorageStringWorker(file *os.File, buf []byte, jobs <-chan countScanJob, column string, value string) countScanResult {
+	readerAt := seekReaderAt{file: file}
 	var result countScanResult
 	for job := range jobs {
-		var count int
-		var bytesRead int64
-		var err error
-		count, buf, bytesRead, err = scanSegmentStringEqual(reader, job.segment, job.stats, value, buf)
+		reader, scratch, err := storage.OpenSegment(readerAt, job.segment.Offset, job.segment.Bytes, buf)
+		buf = scratch
 		if err != nil {
 			result.buf = buf
-			result.err = err
+			result.err = fmt.Errorf("open storage segment %d: %w", job.segment.ID, err)
+			return result
+		}
+		count, scratch, scanStats, err := storage.CountStringEqual(reader, column, value, buf)
+		buf = scratch
+		if err != nil {
+			result.buf = buf
+			result.err = fmt.Errorf("scan storage segment %d: %w", job.segment.ID, err)
 			return result
 		}
 		result.count, err = checkedAddCount(result.count, count)
@@ -175,7 +234,7 @@ func (s *Scanner) countStringWorker(file *os.File, buf []byte, jobs <-chan count
 			result.err = err
 			return result
 		}
-		markStatsScanned(&result.stats, job.segment, bytesRead)
+		markStatsStorageScanned(&result.stats, job.segment, scanStats)
 	}
 	result.buf = buf
 	return result
@@ -197,7 +256,9 @@ func (s *Scanner) mergeCountResults(results []countScanResult) (int, error) {
 			firstErr = err
 		}
 		s.stats.SegmentsScanned += result.stats.SegmentsScanned
+		s.stats.SegmentsSkipped += result.stats.SegmentsSkipped
 		s.stats.RowsScanned += result.stats.RowsScanned
+		s.stats.RowsSkipped += result.stats.RowsSkipped
 		s.stats.BytesScanned += result.stats.BytesScanned
 		s.stats.BytesSkipped += result.stats.BytesSkipped
 	}

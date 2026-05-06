@@ -170,3 +170,49 @@ func TestAppenderCloseRollsBackManifestFailure(t *testing.T) {
 		t.Fatalf("data file size = %d, want 0", info.Size())
 	}
 }
+
+func TestAppenderTruncatesUncommittedTrailingData(t *testing.T) {
+	dir := t.TempDir()
+	tbl := createEventsTable(t, dir)
+	appendBatch(t, tbl, []int64{7, 42, 7}, []string{"signup", "checkout", "checkout"})
+	committedBytes := tbl.Bytes()
+
+	file, err := os.OpenFile(filepath.Join(dir, dataFile), os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("uncommitted trailing bytes")); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appender, err := reopened.NewAppender()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appender.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Stat(filepath.Join(dir, dataFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != committedBytes {
+		t.Fatalf("data file size = %d, want committed size %d", info.Size(), committedBytes)
+	}
+	count, err := reopened.CountStringEqual("event_type", "checkout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("checkout count = %d, want 2", count)
+	}
+}

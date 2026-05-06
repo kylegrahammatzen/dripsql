@@ -95,7 +95,7 @@ func (t *Table) writeManifest() error {
 }
 
 func validateManifest(m manifest) error {
-	if m.Version != manifestVersion {
+	if m.Version < minSupportedManifestVersion || m.Version > manifestVersion {
 		return fmt.Errorf("unsupported table manifest version %d", m.Version)
 	}
 	if _, err := decodeSchema(m.Schema); err != nil {
@@ -116,35 +116,6 @@ func validateManifest(m manifest) error {
 		}
 		if segment.Bytes < 0 {
 			return fmt.Errorf("segment %d has negative byte length %d", segment.ID, segment.Bytes)
-		}
-		if err := validateColumnRanges(segment); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validateColumnRanges(segment Segment) error {
-	if len(segment.Columns) == 0 {
-		return nil
-	}
-	for i, columnRange := range segment.Columns {
-		if columnRange.Name == "" {
-			return fmt.Errorf("segment %d column range name is required", segment.ID)
-		}
-		for _, previous := range segment.Columns[:i] {
-			if previous.Name == columnRange.Name {
-				return fmt.Errorf("segment %d has duplicate column range %q", segment.ID, columnRange.Name)
-			}
-		}
-		if columnRange.Offset < 0 {
-			return fmt.Errorf("segment %d column %q has negative offset %d", segment.ID, columnRange.Name, columnRange.Offset)
-		}
-		if columnRange.Bytes < 0 {
-			return fmt.Errorf("segment %d column %q has negative byte length %d", segment.ID, columnRange.Name, columnRange.Bytes)
-		}
-		if columnRange.Offset > segment.Bytes || columnRange.Bytes > segment.Bytes-columnRange.Offset {
-			return fmt.Errorf("segment %d column %q range offset %d length %d exceeds segment byte length %d", segment.ID, columnRange.Name, columnRange.Offset, columnRange.Bytes, segment.Bytes)
 		}
 	}
 	return nil

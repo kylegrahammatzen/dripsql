@@ -101,7 +101,11 @@ func TestFilterInt64EqualAfterSegmentRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	readBatch, _, err := storage.ReadSegment(bytes.NewReader(buf.Bytes()))
+	reader, err := storage.OpenSegmentBytes(buf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	readBatch, _, err := reader.ReadBatch(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

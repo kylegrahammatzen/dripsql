@@ -145,11 +145,7 @@ func (a *Appender) appendSegment(batch vector.Batch) error {
 	id := t.manifest.NextSegmentID
 
 	var buf bytes.Buffer
-	stats, err := storage.WriteSegment(&buf, batch)
-	if err != nil {
-		return err
-	}
-	columnRanges, err := storage.SegmentColumnPayloadRanges(buf.Bytes())
+	stats, err := writeTableSegment(&buf, batch)
 	if err != nil {
 		return err
 	}
@@ -163,12 +159,24 @@ func (a *Appender) appendSegment(batch vector.Batch) error {
 		return io.ErrShortWrite
 	}
 
-	entry := Segment{ID: id, Offset: a.offset, Rows: stats.Rows, Bytes: int64(buf.Len()), Stats: stats, Columns: columnRanges}
+	entry := Segment{ID: id, Offset: a.offset, Rows: stats.Rows, Bytes: int64(buf.Len()), Stats: stats}
 	t.manifest.NextSegmentID++
 	t.manifest.Segments = append(t.manifest.Segments, entry)
 	a.offset += int64(buf.Len())
 	a.dirty = true
 	return nil
+}
+
+func writeTableSegment(w io.Writer, batch vector.Batch) (storage.SegmentStats, error) {
+	stats, err := storage.WriteSegment(w, batch)
+	if err != nil {
+		return storage.SegmentStats{}, err
+	}
+	converted, err := decorateStorageStats(batch, stats)
+	if err != nil {
+		return storage.SegmentStats{}, err
+	}
+	return converted, nil
 }
 
 func (a *Appender) rollbackAppend(offset int64, nextSegmentID uint64, segmentLen int, dirty bool) error {

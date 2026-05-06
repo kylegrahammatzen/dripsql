@@ -2,688 +2,538 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
+	"io"
 	"slices"
-	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-func TestSegmentRoundTrip(t *testing.T) {
-	tests := []struct {
-		name  string
-		batch vector.Batch
-	}{
-		{
-			name: "int64 and string",
-			batch: mustBatch(t,
-				vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7})},
-				vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup"})},
-			),
-		},
-		{
-			name: "empty columns",
-			batch: mustBatch(t,
-				vector.Column{Name: "tenant_id", Vector: vector.NewInt64(nil)},
-				vector.Column{Name: "event_type", Vector: vector.NewString(nil)},
-			),
-		},
-		{
-			name: "edge values",
-			batch: mustBatch(t,
-				vector.Column{Name: "value", Vector: vector.NewInt64([]int64{-10, 0, 99})},
-				vector.Column{Name: "label", Vector: vector.NewString([]string{"", "signup", ""})},
-			),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			writeStats, got, readStats := roundTrip(t, tt.batch)
-
-			if writeStats.Rows != tt.batch.Count {
-				t.Fatalf("writeStats.Rows = %d, want %d", writeStats.Rows, tt.batch.Count)
-			}
-			if readStats.Rows != tt.batch.Count {
-				t.Fatalf("readStats.Rows = %d, want %d", readStats.Rows, tt.batch.Count)
-			}
-
-			requireBatchEqual(t, tt.batch, got)
-		})
-	}
-}
-
-func TestSegmentPersistsInt64Stats(t *testing.T) {
-	tests := []struct {
-		name       string
-		column     string
-		values     []int64
-		wantMin    int64
-		wantMax    int64
-		encodedLen int
-	}{
-		{name: "positive", column: "tenant_id", values: []int64{7, 42, 7}, wantMin: 7, wantMax: 42, encodedLen: 23},
-		{name: "negative", column: "value", values: []int64{-99, -7, -42}, wantMin: -99, wantMax: -7, encodedLen: 25},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			batch := mustBatch(t,
-				vector.Column{Name: tt.column, Vector: vector.NewInt64(tt.values)},
-			)
-
-			writeStats, _, readStats := roundTrip(t, batch)
-			statsToCheck := []struct {
-				label string
-				stats ColumnStats
-			}{
-				{label: "written", stats: columnStats(t, writeStats, tt.column)},
-				{label: "read", stats: columnStats(t, readStats, tt.column)},
-			}
-
-			for _, got := range statsToCheck {
-				if !got.stats.HasMinMax {
-					t.Fatalf("expected %s min/max stats", got.label)
-				}
-				if got.stats.MinInt64 != tt.wantMin || got.stats.MaxInt64 != tt.wantMax {
-					t.Fatalf("%s min/max = %d/%d, want %d/%d", got.label, got.stats.MinInt64, got.stats.MaxInt64, tt.wantMin, tt.wantMax)
-				}
-				if got.stats.EncodedLen != tt.encodedLen {
-					t.Fatalf("%s EncodedLen = %d, want %d", got.label, got.stats.EncodedLen, tt.encodedLen)
-				}
-			}
-		})
-	}
-}
-
-func TestReadSegmentStats(t *testing.T) {
+func TestWriteOpenSegmentBytesRoundTrip(t *testing.T) {
 	batch := mustBatch(t,
-		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7})},
-		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup"})},
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{42, -7, 42, 99})},
+		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "", "checkout", "signup"})},
 	)
 
 	var buf bytes.Buffer
-	writeStats, err := WriteSegment(&buf, batch)
+	stats, err := WriteSegment(&buf, batch)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("WriteSegment() error = %v", err)
+	}
+	if stats.Rows != batch.Count || len(stats.Columns) != 2 {
+		t.Fatalf("stats = %+v, want %d rows and 2 columns", stats, batch.Count)
 	}
 
-	readStats, err := ReadSegmentStats(bytes.NewReader(buf.Bytes()))
+	reader, err := OpenSegmentBytes(buf.Bytes())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("OpenSegmentBytes() error = %v", err)
+	}
+	if reader.Directory().Rows != batch.Count {
+		t.Fatalf("directory rows = %d, want %d", reader.Directory().Rows, batch.Count)
 	}
 
-	if readStats.Rows != writeStats.Rows {
-		t.Fatalf("rows = %d, want %d", readStats.Rows, writeStats.Rows)
+	got, _, err := reader.ReadBatch(nil)
+	if err != nil {
+		t.Fatalf("ReadBatch() error = %v", err)
 	}
-	if len(readStats.Columns) != len(writeStats.Columns) {
-		t.Fatalf("column count = %d, want %d", len(readStats.Columns), len(writeStats.Columns))
+	tenantCol := mustColumn(t, got, "tenant_id")
+	gotTenant, ok := tenantCol.Vector.(vector.Int64)
+	if !ok {
+		t.Fatalf("tenant_id type = %T, want vector.Int64", tenantCol.Vector)
 	}
-
-	tenantStats := columnStats(t, readStats, "tenant_id")
-	if tenantStats.Kind != vector.KindInt64 || !tenantStats.HasMinMax {
-		t.Fatalf("tenant stats = %+v, want int64 min/max", tenantStats)
+	if !slices.Equal(gotTenant.Values, []int64{42, -7, 42, 99}) {
+		t.Fatalf("tenant_id = %v", gotTenant.Values)
 	}
-	if tenantStats.MinInt64 != 7 || tenantStats.MaxInt64 != 42 {
-		t.Fatalf("tenant min/max = %d/%d, want 7/42", tenantStats.MinInt64, tenantStats.MaxInt64)
+	eventCol := mustColumn(t, got, "event_type")
+	gotEvent, ok := eventCol.Vector.(vector.String)
+	if !ok {
+		t.Fatalf("event_type type = %T, want vector.String", eventCol.Vector)
 	}
-
-	eventStats := columnStats(t, readStats, "event_type")
-	if eventStats.Kind != vector.KindString {
-		t.Fatalf("event kind = %s, want string", eventStats.Kind)
-	}
-	if eventStats.HasMinMax {
-		t.Fatal("did not expect string min/max stats")
-	}
-
-	if _, ok := readStats.Column("missing"); ok {
-		t.Fatal("did not expect missing column stats")
-	}
+	assertStrings(t, gotEvent, []string{"signup", "", "checkout", "signup"})
 }
 
-func TestSegmentReportsColumnEncoding(t *testing.T) {
-	batch := mustBatch(t,
-		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7, 7, 42, 7, 42, 7})},
-		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup", "signup", "checkout", "signup", "checkout", "signup"})},
-	)
-
-	writeStats, _, readStats := roundTrip(t, batch)
-	statsToCheck := []struct {
-		label string
-		stats SegmentStats
+func TestInt64SequenceCodecRoundTrip(t *testing.T) {
+	tests := []struct {
+		name   string
+		values []int64
 	}{
-		{label: "written", stats: writeStats},
-		{label: "read", stats: readStats},
+		{name: "ascending", values: []int64{10, 13, 16, 19, 22}},
+		{name: "descending", values: []int64{10, 7, 4, 1, -2}},
+		{name: "constant", values: []int64{42, 42, 42, 42, 42}},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			batch := mustBatch(t, vector.Column{Name: "id", Vector: vector.NewInt64(tt.values)})
+			var buf bytes.Buffer
+			stats, err := WriteSegment(&buf, batch)
+			if err != nil {
+				t.Fatalf("WriteSegment() error = %v", err)
+			}
+			assertColumnCodec(t, stats, "id", CodecInt64Sequence)
+			idStats, _ := stats.Column("id")
+			if idStats.Payload.Bytes != int64SequencePayloadLen {
+				t.Fatalf("sequence payload bytes = %d, want %d", idStats.Payload.Bytes, int64SequencePayloadLen)
+			}
 
-	for _, source := range statsToCheck {
-		tenant := columnStats(t, source.stats, "tenant_id")
-		if tenant.Encoding.Codec != codecDictionary {
-			t.Fatalf("%s tenant codec = %q, want dictionary", source.label, tenant.Encoding.Codec)
-		}
-		if tenant.Encoding.PlainBytes != 65 {
-			t.Fatalf("%s tenant plain bytes = %d, want 65", source.label, tenant.Encoding.PlainBytes)
-		}
-		if tenant.Encoding.DictionaryValues != 2 || !tenant.Encoding.DictionaryPacked || tenant.Encoding.DictionaryPackedBitWidth != 1 {
-			t.Fatalf("%s tenant encoding = %+v, want 2-value packed 1-bit dictionary", source.label, tenant.Encoding)
-		}
-		if tenant.Encoding.FilterPath != filterPathDictionaryID {
-			t.Fatalf("%s tenant filter path = %q, want %q", source.label, tenant.Encoding.FilterPath, filterPathDictionaryID)
-		}
-
-		event := columnStats(t, source.stats, "event_type")
-		if event.Encoding.Codec != codecDictionary {
-			t.Fatalf("%s event codec = %q, want dictionary", source.label, event.Encoding.Codec)
-		}
-		if event.Encoding.PlainBytes != 87 {
-			t.Fatalf("%s event plain bytes = %d, want 87", source.label, event.Encoding.PlainBytes)
-		}
-		if event.Encoding.DictionaryValues != 2 || !event.Encoding.DictionaryPacked || event.Encoding.DictionaryPackedBitWidth != 1 {
-			t.Fatalf("%s event encoding = %+v, want 2-value packed 1-bit dictionary", source.label, event.Encoding)
-		}
-		if event.Encoding.FilterPath != filterPathDictionaryID || event.Encoding.GroupPath != groupPathDictionaryCounts {
-			t.Fatalf("%s event paths = %q/%q, want %q/%q", source.label, event.Encoding.FilterPath, event.Encoding.GroupPath, filterPathDictionaryID, groupPathDictionaryCounts)
-		}
+			reader, err := OpenSegmentBytes(buf.Bytes())
+			if err != nil {
+				t.Fatalf("OpenSegmentBytes() error = %v", err)
+			}
+			got, _, err := reader.ReadColumn("id", nil)
+			if err != nil {
+				t.Fatalf("ReadColumn() error = %v", err)
+			}
+			gotValues := got.Vector.(vector.Int64).Values
+			if !slices.Equal(gotValues, tt.values) {
+				t.Fatalf("decoded values = %v, want %v", gotValues, tt.values)
+			}
+		})
 	}
 }
 
-func TestSegmentReportsStringBloomFilter(t *testing.T) {
-	values := make([]string, minStringBloomRows)
-	for row := range values {
-		values[row] = "url-" + strconv.Itoa(row)
+func TestWriteSegmentWithCompactStringVector(t *testing.T) {
+	strings, err := vector.NewStringData([]byte("alphabetagamma"), []uint64{
+		vector.StringRange(0, 5),
+		vector.StringRange(5, 4),
+		vector.StringRange(9, 5),
+	})
+	if err != nil {
+		t.Fatalf("NewStringData() error = %v", err)
 	}
-	batch := mustBatch(t,
-		vector.Column{Name: "url", Vector: vector.NewString(values)},
-	)
-
-	writeStats, _, _ := roundTrip(t, batch)
-	url := columnStats(t, writeStats, "url")
-	if url.Encoding.Codec != codecPlain {
-		t.Fatalf("url codec = %q, want plain", url.Encoding.Codec)
-	}
-	if url.Encoding.StringBloom == nil || len(url.Encoding.StringBloom.Data) == 0 {
-		t.Fatalf("url bloom = %+v, want populated filter", url.Encoding.StringBloom)
-	}
-	if CanSkipStringEqual(url, values[123]) {
-		t.Fatal("bloom skipped an existing value")
-	}
-
-	skippedAbsent := false
-	for i := 0; i < 100; i++ {
-		if CanSkipStringEqual(url, "missing-"+strconv.Itoa(i)) {
-			skippedAbsent = true
-			break
-		}
-	}
-	if !skippedAbsent {
-		t.Fatal("bloom did not skip any absent test values")
-	}
-}
-
-func TestReadSegmentColumns(t *testing.T) {
-	batch := mustBatch(t,
-		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout", "signup"})},
-		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42, 7})},
-	)
+	batch := mustBatch(t, vector.Column{Name: "word", Vector: strings})
 
 	var buf bytes.Buffer
 	if _, err := WriteSegment(&buf, batch); err != nil {
-		t.Fatal(err)
+		t.Fatalf("WriteSegment() error = %v", err)
 	}
-
-	got, stats, err := ReadSegmentColumns(bytes.NewReader(buf.Bytes()), "tenant_id")
+	reader, err := OpenSegmentBytes(buf.Bytes())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("OpenSegmentBytes() error = %v", err)
 	}
-	if got.Count != 3 {
-		t.Fatalf("count = %d, want 3", got.Count)
+	col, _, err := reader.ReadColumn("word", nil)
+	if err != nil {
+		t.Fatalf("ReadColumn() error = %v", err)
 	}
-	if len(got.Columns) != 1 {
-		t.Fatalf("column count = %d, want 1", len(got.Columns))
-	}
-	if _, ok := got.Column("event_type"); ok {
-		t.Fatal("did not expect unrequested event_type column")
-	}
-
-	tenantCol, ok := got.Column("tenant_id")
+	got, ok := col.Vector.(vector.String)
 	if !ok {
-		t.Fatal("missing tenant_id column")
+		t.Fatalf("word type = %T, want vector.String", col.Vector)
 	}
-	requireVectorEqual(t, vector.NewInt64([]int64{7, 42, 7}), tenantCol.Vector)
-
-	if stats.Rows != 3 {
-		t.Fatalf("stats rows = %d, want 3", stats.Rows)
-	}
-	if len(stats.Columns) != 1 {
-		t.Fatalf("stats column count = %d, want 1", len(stats.Columns))
-	}
-	if stats.Columns[0].Name != "tenant_id" {
-		t.Fatalf("stats column = %q, want tenant_id", stats.Columns[0].Name)
-	}
-
-	_, _, err = ReadSegmentColumns(bytes.NewReader(buf.Bytes()), "missing")
-	if err == nil {
-		t.Fatal("expected missing column error")
-	}
-
-	_, _, err = ReadSegmentColumns(bytes.NewReader(buf.Bytes()), "missing_a", "missing_b")
-	if err == nil {
-		t.Fatal("expected missing columns error")
-	}
-	if !strings.Contains(err.Error(), `"missing_a"`) {
-		t.Fatalf("error = %q, want missing_a first", err)
-	}
-
-	_, _, err = ReadSegmentColumns(bytes.NewReader(buf.Bytes()), "tenant_id", "tenant_id")
-	if err == nil {
-		t.Fatal("expected duplicate requested column error")
-	}
+	assertStrings(t, got, []string{"alpha", "beta", "gamma"})
 }
 
-func TestReadSegmentColumnsConsumesFullSegment(t *testing.T) {
-	first := writeSegmentBytes(t,
-		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{7, 42})},
-		vector.Column{Name: "event_type", Vector: vector.NewString([]string{"signup", "checkout"})},
+func TestReaderAtSelectedColumnReadsOnlyPayload(t *testing.T) {
+	batch := mustBatch(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{1, 2, 3})},
+		vector.Column{Name: "path", Vector: vector.NewString([]string{"/a", "/b", "/c"})},
 	)
-	second := writeSegmentBytes(t,
-		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{11, 12})},
-	)
-
-	reader := bytes.NewReader(append(first, second...))
-	got, _, err := ReadSegmentColumns(reader, "tenant_id")
-	if err != nil {
-		t.Fatal(err)
+	var buf bytes.Buffer
+	if _, err := WriteSegment(&buf, batch); err != nil {
+		t.Fatalf("WriteSegment() error = %v", err)
 	}
-	if got.Count != 2 {
-		t.Fatalf("count = %d, want 2", got.Count)
-	}
+	t.Run("reader_at", func(t *testing.T) {
+		source := &recordingReaderAt{data: buf.Bytes()}
+		reader, scratch, err := OpenSegment(source, 0, int64(buf.Len()), nil)
+		if err != nil {
+			t.Fatalf("OpenSegment() error = %v", err)
+		}
+		tenantMeta := mustReaderColumn(t, reader, "tenant_id")
+		pathMeta := mustReaderColumn(t, reader, "path")
+		baseReads := len(source.calls)
 
-	next, _, err := ReadSegment(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nextCol, ok := next.Column("tenant_id")
-	if !ok {
-		t.Fatal("missing second tenant_id column")
-	}
-	requireVectorEqual(t, vector.NewInt64([]int64{11, 12}), nextCol.Vector)
-}
-
-func FuzzSegmentRoundTrip(f *testing.F) {
-	f.Add([]byte{1, 2, 3}, "signup")
-	f.Add([]byte{}, "")
-	f.Add([]byte{255, 0, 128}, "checkout")
-
-	f.Fuzz(func(t *testing.T, raw []byte, label string) {
-		ints := make([]int64, len(raw))
-		strings := make([]string, len(raw))
-
-		for i, value := range raw {
-			ints[i] = int64(int8(value))
-			strings[i] = label
+		tenantCol, nextScratch, err := reader.ReadColumn("tenant_id", scratch)
+		if err != nil {
+			t.Fatalf("ReadColumn(tenant_id) error = %v", err)
+		}
+		scratch = nextScratch
+		gotTenant, ok := tenantCol.Vector.(vector.Int64)
+		if !ok {
+			t.Fatalf("tenant_id type = %T, want vector.Int64", tenantCol.Vector)
+		}
+		if !slices.Equal(gotTenant.Values, []int64{1, 2, 3}) {
+			t.Fatalf("tenant_id = %v", gotTenant.Values)
 		}
 
-		batch := mustBatch(t,
-			vector.Column{Name: "value", Vector: vector.NewInt64(ints)},
-			vector.Column{Name: "label", Vector: vector.NewString(strings)},
-		)
+		pathCol, nextScratch, err := reader.ReadColumn("path", scratch)
+		if err != nil {
+			t.Fatalf("ReadColumn(path) error = %v", err)
+		}
+		_ = nextScratch
+		assertStrings(t, pathCol.Vector.(vector.String), []string{"/a", "/b", "/c"})
 
-		_, got, _ := roundTrip(t, batch)
-		requireBatchEqual(t, batch, got)
+		if got, want := len(source.calls), baseReads+2; got != want {
+			t.Fatalf("payload reads = %d, want %d", got-baseReads, 2)
+		}
+		assertReadAtCall(t, source.calls[baseReads], tenantMeta.Payload)
+		assertReadAtCall(t, source.calls[baseReads+1], pathMeta.Payload)
+	})
+
+	t.Run("byte_viewer", func(t *testing.T) {
+		source := &recordingByteViewer{data: buf.Bytes()}
+		reader, scratch, err := OpenSegment(source, 0, int64(buf.Len()), nil)
+		if err != nil {
+			t.Fatalf("OpenSegment() error = %v", err)
+		}
+		tenantMeta := mustReaderColumn(t, reader, "tenant_id")
+		pathMeta := mustReaderColumn(t, reader, "path")
+		baseReadAt := len(source.readAtCalls)
+		baseViews := len(source.viewCalls)
+
+		tenantCol, nextScratch, err := reader.ReadColumn("tenant_id", scratch)
+		if err != nil {
+			t.Fatalf("ReadColumn(tenant_id) error = %v", err)
+		}
+		scratch = nextScratch
+		gotTenant, ok := tenantCol.Vector.(vector.Int64)
+		if !ok {
+			t.Fatalf("tenant_id type = %T, want vector.Int64", tenantCol.Vector)
+		}
+		if !slices.Equal(gotTenant.Values, []int64{1, 2, 3}) {
+			t.Fatalf("tenant_id = %v", gotTenant.Values)
+		}
+
+		pathCol, nextScratch, err := reader.ReadColumn("path", scratch)
+		if err != nil {
+			t.Fatalf("ReadColumn(path) error = %v", err)
+		}
+		_ = nextScratch
+		assertStrings(t, pathCol.Vector.(vector.String), []string{"/a", "/b", "/c"})
+
+		if got := len(source.readAtCalls) - baseReadAt; got != 0 {
+			t.Fatalf("ReadAt payload calls = %d, want 0", got)
+		}
+		if got, want := len(source.viewCalls), baseViews+2; got != want {
+			t.Fatalf("View payload calls = %d, want %d", got-baseViews, 2)
+		}
+		assertReadAtCall(t, source.viewCalls[baseViews], tenantMeta.Payload)
+		assertReadAtCall(t, source.viewCalls[baseViews+1], pathMeta.Payload)
 	})
 }
 
-func BenchmarkWriteSegmentInt64(b *testing.B) {
-	b.ReportAllocs()
-
-	values := make([]int64, 100_000)
-	for i := range values {
-		values[i] = int64(i % 1024)
-	}
-
-	batch := mustBatch(b,
-		vector.Column{Name: "tenant_id", Vector: vector.NewInt64(values)},
+func TestByteViewerFallsBackToReaderAt(t *testing.T) {
+	batch := mustBatch(t,
+		vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{1, 2, 3})},
+		vector.Column{Name: "path", Vector: vector.NewString([]string{"/a", "/b", "/c"})},
 	)
-
-	for b.Loop() {
-		var buf bytes.Buffer
-		buf.Grow(900_000)
-		if _, err := WriteSegment(&buf, batch); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-// Measures the write path when the caller owns and reuses the output buffer.
-func BenchmarkWriteSegmentInt64ReuseBuffer(b *testing.B) {
-	b.ReportAllocs()
-
-	values := make([]int64, 100_000)
-	for i := range values {
-		values[i] = int64(i % 1024)
-	}
-
-	batch := mustBatch(b,
-		vector.Column{Name: "tenant_id", Vector: vector.NewInt64(values)},
-	)
-
-	var buf bytes.Buffer
-	buf.Grow(900_000)
-
-	for b.Loop() {
-		buf.Reset()
-		if _, err := WriteSegment(&buf, batch); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkReadSegmentInt64(b *testing.B) {
-	b.ReportAllocs()
-
-	values := make([]int64, 100_000)
-	for i := range values {
-		values[i] = int64(i % 1024)
-	}
-
-	batch := mustBatch(b,
-		vector.Column{Name: "tenant_id", Vector: vector.NewInt64(values)},
-	)
-
 	var buf bytes.Buffer
 	if _, err := WriteSegment(&buf, batch); err != nil {
-		b.Fatal(err)
+		t.Fatalf("WriteSegment() error = %v", err)
 	}
-
-	data := buf.Bytes()
-	b.ResetTimer()
-
-	for b.Loop() {
-		if _, _, err := ReadSegment(bytes.NewReader(data)); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkReadSegmentStatsInt64(b *testing.B) {
-	b.ReportAllocs()
-
-	values := make([]int64, 100_000)
-	for i := range values {
-		values[i] = int64(i % 1024)
-	}
-
-	batch := mustBatch(b,
-		vector.Column{Name: "tenant_id", Vector: vector.NewInt64(values)},
-	)
-
-	var buf bytes.Buffer
-	if _, err := WriteSegment(&buf, batch); err != nil {
-		b.Fatal(err)
-	}
-
-	data := buf.Bytes()
-	b.ResetTimer()
-
-	for b.Loop() {
-		if _, err := ReadSegmentStats(bytes.NewReader(data)); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkReadSegmentInt64WithString(b *testing.B) {
-	b.ReportAllocs()
-
-	data := benchmarkInt64StringSegment(b)
-	b.ResetTimer()
-
-	for b.Loop() {
-		if _, _, err := ReadSegment(bytes.NewReader(data)); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkReadSegmentString(b *testing.B) {
-	b.ReportAllocs()
-
-	choices := []string{"signup", "checkout", "page_view", "cancel"}
-	values := make([]string, 100_000)
-	for i := range values {
-		values[i] = choices[i%len(choices)]
-	}
-
-	batch := mustBatch(b,
-		vector.Column{Name: "event_type", Vector: vector.NewString(values)},
-	)
-
-	var buf bytes.Buffer
-	if _, err := WriteSegment(&buf, batch); err != nil {
-		b.Fatal(err)
-	}
-	data := buf.Bytes()
-	b.ResetTimer()
-
-	for b.Loop() {
-		if _, _, err := ReadSegment(bytes.NewReader(data)); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkReadSegmentColumnsInt64WithString(b *testing.B) {
-	b.ReportAllocs()
-
-	data := benchmarkInt64StringSegment(b)
-	b.ResetTimer()
-
-	for b.Loop() {
-		batch, _, err := ReadSegmentColumns(bytes.NewReader(data), "tenant_id")
-		if err != nil {
-			b.Fatal(err)
-		}
-		if batch.Count != 100_000 {
-			b.Fatalf("count = %d, want 100000", batch.Count)
-		}
-	}
-}
-
-func BenchmarkReadSegmentColumnsInt64AfterString(b *testing.B) {
-	b.ReportAllocs()
-
-	data := benchmarkStringInt64Segment(b)
-	b.ResetTimer()
-
-	for b.Loop() {
-		batch, _, err := ReadSegmentColumns(bytes.NewReader(data), "tenant_id")
-		if err != nil {
-			b.Fatal(err)
-		}
-		if batch.Count != 100_000 {
-			b.Fatalf("count = %d, want 100000", batch.Count)
-		}
-	}
-}
-
-func BenchmarkWriteSegmentString(b *testing.B) {
-	b.ReportAllocs()
-
-	choices := []string{"signup", "checkout", "page_view", "cancel"}
-	values := make([]string, 100_000)
-	for i := range values {
-		values[i] = choices[i%len(choices)]
-	}
-
-	batch := mustBatch(b,
-		vector.Column{Name: "event_type", Vector: vector.NewString(values)},
-	)
-
-	for b.Loop() {
-		var buf bytes.Buffer
-		buf.Grow(2_000_000)
-		if _, err := WriteSegment(&buf, batch); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func roundTrip(t testing.TB, batch vector.Batch) (SegmentStats, vector.Batch, SegmentStats) {
-	t.Helper()
-
-	var buf bytes.Buffer
-
-	writeStats, err := WriteSegment(&buf, batch)
+	source := &fallbackByteViewer{data: buf.Bytes()}
+	reader, scratch, err := OpenSegment(source, 0, int64(buf.Len()), nil)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("OpenSegment() error = %v", err)
 	}
+	pathMeta := mustReaderColumn(t, reader, "path")
+	baseReads := len(source.readAtCalls)
+	baseViews := len(source.viewCalls)
 
-	got, readStats, err := ReadSegment(bytes.NewReader(buf.Bytes()))
+	pathCol, _, err := reader.ReadColumn("path", scratch)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("ReadColumn(path) error = %v", err)
 	}
-
-	return writeStats, got, readStats
+	assertStrings(t, pathCol.Vector.(vector.String), []string{"/a", "/b", "/c"})
+	if got := len(source.viewCalls) - baseViews; got != 1 {
+		t.Fatalf("View payload calls = %d, want 1", got)
+	}
+	if got := len(source.readAtCalls) - baseReads; got != 1 {
+		t.Fatalf("ReadAt payload calls = %d, want 1", got)
+	}
+	assertReadAtCall(t, source.viewCalls[baseViews], pathMeta.Payload)
+	assertReadAtCall(t, source.readAtCalls[baseReads], pathMeta.Payload)
 }
 
-func writeSegmentBytes(t testing.TB, columns ...vector.Column) []byte {
-	t.Helper()
+func TestZeroRowSegmentRoundTrip(t *testing.T) {
+	batch := mustBatch(t,
+		vector.Column{Name: "id", Vector: vector.NewInt64(nil)},
+		vector.Column{Name: "name", Vector: vector.NewString(nil)},
+	)
 
-	batch := mustBatch(t, columns...)
+	var buf bytes.Buffer
+	stats, err := WriteSegment(&buf, batch)
+	if err != nil {
+		t.Fatalf("WriteSegment() error = %v", err)
+	}
+	if stats.Rows != 0 {
+		t.Fatalf("stats.Rows = %d, want 0", stats.Rows)
+	}
+
+	reader, err := OpenSegmentBytes(buf.Bytes())
+	if err != nil {
+		t.Fatalf("OpenSegmentBytes() error = %v", err)
+	}
+	got, _, err := reader.ReadBatch(nil)
+	if err != nil {
+		t.Fatalf("ReadBatch() error = %v", err)
+	}
+	if got.Count != 0 {
+		t.Fatalf("batch.Count = %d, want 0", got.Count)
+	}
+	if mustColumn(t, got, "id").Vector.Len() != 0 {
+		t.Fatalf("id len = %d, want 0", mustColumn(t, got, "id").Vector.Len())
+	}
+	if mustColumn(t, got, "name").Vector.Len() != 0 {
+		t.Fatalf("name len = %d, want 0", mustColumn(t, got, "name").Vector.Len())
+	}
+}
+
+func TestOpenSegmentRejectsFooterCorruption(t *testing.T) {
+	batch := mustBatch(t, vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{1, 2, 3})})
 	var buf bytes.Buffer
 	if _, err := WriteSegment(&buf, batch); err != nil {
-		t.Fatal(err)
+		t.Fatalf("WriteSegment() error = %v", err)
 	}
-	return buf.Bytes()
+	tests := []struct {
+		name    string
+		corrupt func([]byte)
+	}{
+		{
+			name: "footer_body",
+			corrupt: func(data []byte) {
+				data[len(data)-footerTailLen-1] ^= 0xff
+			},
+		},
+		{
+			name: "trailer_checksum",
+			corrupt: func(data []byte) {
+				data[len(data)-footerTailLen+8] ^= 0xff
+			},
+		},
+		{
+			name: "trailer_magic",
+			corrupt: func(data []byte) {
+				data[len(data)-1] ^= 0xff
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := append([]byte(nil), buf.Bytes()...)
+			tt.corrupt(data)
+			if _, err := OpenSegmentBytes(data); err == nil {
+				t.Fatalf("OpenSegmentBytes() error = nil, want corruption error")
+			}
+		})
+	}
 }
 
-func mustBatch(t testing.TB, columns ...vector.Column) vector.Batch {
-	t.Helper()
+func TestOpenSegmentRejectsHeaderAndSizeCorruption(t *testing.T) {
+	batch := mustBatch(t, vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{1, 2, 3})})
+	var buf bytes.Buffer
+	if _, err := WriteSegment(&buf, batch); err != nil {
+		t.Fatalf("WriteSegment() error = %v", err)
+	}
+	tests := []struct {
+		name    string
+		data    func() []byte
+		openLen int
+	}{
+		{
+			name: "segment_magic",
+			data: func() []byte {
+				data := append([]byte(nil), buf.Bytes()...)
+				data[0] ^= 0xff
+				return data
+			},
+		},
+		{
+			name: "segment_version",
+			data: func() []byte {
+				data := append([]byte(nil), buf.Bytes()...)
+				binary.LittleEndian.PutUint16(data[len(segmentMagic):], formatVersion+1)
+				return data
+			},
+		},
+		{
+			name: "header_segment_length",
+			data: func() []byte {
+				data := append([]byte(nil), buf.Bytes()...)
+				segmentLenOffset := len(segmentMagic) + 2 + 8 + 4
+				binary.LittleEndian.PutUint64(data[segmentLenOffset:], uint64(len(data)+1))
+				return data
+			},
+		},
+		{
+			name: "truncated_segment",
+			data: func() []byte {
+				return append([]byte(nil), buf.Bytes()...)
+			},
+			openLen: buf.Len() - 1,
+		},
+		{
+			name: "footer_length_too_large",
+			data: func() []byte {
+				data := append([]byte(nil), buf.Bytes()...)
+				binary.LittleEndian.PutUint64(data[len(data)-footerTailLen:], uint64(len(data)))
+				return data
+			},
+		},
+	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := tt.data()
+			openLen := tt.openLen
+			if openLen == 0 {
+				openLen = len(data)
+			}
+			if _, _, err := OpenSegment(bytes.NewReader(data), 0, int64(openLen), nil); err == nil {
+				t.Fatalf("OpenSegment() error = nil, want corruption error")
+			}
+		})
+	}
+}
+
+func TestReadColumnRejectsMissingColumn(t *testing.T) {
+	batch := mustBatch(t, vector.Column{Name: "tenant_id", Vector: vector.NewInt64([]int64{1})})
+	var buf bytes.Buffer
+	if _, err := WriteSegment(&buf, batch); err != nil {
+		t.Fatalf("WriteSegment() error = %v", err)
+	}
+	reader, err := OpenSegmentBytes(buf.Bytes())
+	if err != nil {
+		t.Fatalf("OpenSegmentBytes() error = %v", err)
+	}
+	if _, _, err := reader.ReadColumn("missing", nil); err == nil {
+		t.Fatalf("ReadColumn() error = nil, want missing column error")
+	}
+}
+
+func mustBatch(t *testing.T, columns ...vector.Column) vector.Batch {
+	t.Helper()
 	batch, err := vector.NewBatch(columns...)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("NewBatch() error = %v", err)
 	}
-
 	return batch
 }
 
-func requireBatchEqual(t *testing.T, want, got vector.Batch) {
+func mustColumn(t *testing.T, batch vector.Batch, name string) vector.Column {
 	t.Helper()
-
-	if got.Count != want.Count {
-		t.Fatalf("batch count = %d, want %d", got.Count, want.Count)
+	col, ok := batch.Column(name)
+	if !ok {
+		t.Fatalf("missing column %q", name)
 	}
-	if len(got.Columns) != len(want.Columns) {
-		t.Fatalf("column count = %d, want %d", len(got.Columns), len(want.Columns))
-	}
-
-	for _, wantCol := range want.Columns {
-		gotCol, ok := got.Column(wantCol.Name)
-		if !ok {
-			t.Fatalf("missing column %q", wantCol.Name)
-		}
-
-		requireVectorEqual(t, wantCol.Vector, gotCol.Vector)
-	}
+	return col
 }
 
-func requireVectorEqual(t *testing.T, want, got vector.Vector) {
+func mustReaderColumn(t *testing.T, reader Reader, name string) Column {
 	t.Helper()
-
-	if got.Kind() != want.Kind() {
-		t.Fatalf("kind = %s, want %s", got.Kind(), want.Kind())
+	col, ok := reader.Column(name)
+	if !ok {
+		t.Fatalf("missing column %q", name)
 	}
-
-	switch wantValues := want.(type) {
-	case vector.Int64:
-		gotValues, ok := got.(vector.Int64)
-		if !ok {
-			t.Fatalf("got %T, want vector.Int64", got)
-		}
-		if !slices.Equal(gotValues.Values, wantValues.Values) {
-			t.Fatalf("values = %v, want %v", gotValues.Values, wantValues.Values)
-		}
-
-	case vector.String:
-		gotValues, ok := got.(vector.String)
-		if !ok {
-			t.Fatalf("got %T, want vector.String", got)
-		}
-		if gotValues.Len() != wantValues.Len() {
-			t.Fatalf("values len = %d, want %d", gotValues.Len(), wantValues.Len())
-		}
-		for i := 0; i < wantValues.Len(); i++ {
-			if gotValues.Value(i) != wantValues.Value(i) {
-				t.Fatalf("value[%d] = %q, want %q", i, gotValues.Value(i), wantValues.Value(i))
-			}
-		}
-
-	default:
-		t.Fatalf("unsupported vector type %T", want)
-	}
+	return col
 }
 
-func columnStats(t *testing.T, stats SegmentStats, name string) ColumnStats {
+func assertStrings(t *testing.T, got vector.String, want []string) {
 	t.Helper()
-
-	for _, col := range stats.Columns {
-		if col.Name == name {
-			return col
+	if got.Len() != len(want) {
+		gotValues := stringValues(got)
+		t.Fatalf("string len = %d, want %d; got %v", got.Len(), len(want), gotValues)
+	}
+	for i, wantValue := range want {
+		if gotValue := got.Value(i); gotValue != wantValue {
+			t.Fatalf("string[%d] = %q, want %q", i, gotValue, wantValue)
 		}
 	}
-
-	t.Fatalf("missing column stats for %q", name)
-	return ColumnStats{}
 }
 
-func benchmarkInt64StringSegment(b *testing.B) []byte {
-	b.Helper()
-
-	ids := make([]int64, 100_000)
-	for i := range ids {
-		ids[i] = int64(i % 1024)
+func stringValues(values vector.String) []string {
+	out := make([]string, values.Len())
+	for i := range out {
+		out[i] = values.Value(i)
 	}
-
-	events := make([]string, 100_000)
-	for i := range events {
-		events[i] = "event"
-	}
-
-	batch := mustBatch(b,
-		vector.Column{Name: "tenant_id", Vector: vector.FromInt64(ids)},
-		vector.Column{Name: "event_type", Vector: vector.FromString(events)},
-	)
-
-	var buf bytes.Buffer
-	if _, err := WriteSegment(&buf, batch); err != nil {
-		b.Fatal(err)
-	}
-	return buf.Bytes()
+	return out
 }
 
-func benchmarkStringInt64Segment(b *testing.B) []byte {
-	b.Helper()
-
-	events := make([]string, 100_000)
-	for i := range events {
-		events[i] = "event"
+func assertReadAtCall(t *testing.T, call readAtCall, r Range) {
+	t.Helper()
+	if call.off != r.Offset || call.n != int(r.Bytes) {
+		t.Fatalf("range call = %+v, want offset %d length %d", call, r.Offset, r.Bytes)
 	}
+}
 
-	ids := make([]int64, 100_000)
-	for i := range ids {
-		ids[i] = int64(i % 1024)
+type readAtCall struct {
+	off int64
+	n   int
+}
+
+type recordingReaderAt struct {
+	data  []byte
+	calls []readAtCall
+}
+
+func (r *recordingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	r.calls = append(r.calls, readAtCall{off: off, n: len(p)})
+	if off < 0 {
+		return 0, io.ErrUnexpectedEOF
 	}
-
-	batch := mustBatch(b,
-		vector.Column{Name: "event_type", Vector: vector.FromString(events)},
-		vector.Column{Name: "tenant_id", Vector: vector.FromInt64(ids)},
-	)
-
-	var buf bytes.Buffer
-	if _, err := WriteSegment(&buf, batch); err != nil {
-		b.Fatal(err)
+	if off >= int64(len(r.data)) {
+		return 0, io.EOF
 	}
-	return buf.Bytes()
+	n := copy(p, r.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+type recordingByteViewer struct {
+	data        []byte
+	readAtCalls []readAtCall
+	viewCalls   []readAtCall
+}
+
+func (r *recordingByteViewer) ReadAt(p []byte, off int64) (int, error) {
+	r.readAtCalls = append(r.readAtCalls, readAtCall{off: off, n: len(p)})
+	if off < 0 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	if off >= int64(len(r.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (r *recordingByteViewer) View(off int64, n int) ([]byte, bool) {
+	r.viewCalls = append(r.viewCalls, readAtCall{off: off, n: n})
+	if off < 0 || n < 0 {
+		return nil, false
+	}
+	if off > int64(len(r.data)) || int64(n) > int64(len(r.data))-off {
+		return nil, false
+	}
+	return r.data[off : off+int64(n)], true
+}
+
+type fallbackByteViewer struct {
+	data        []byte
+	readAtCalls []readAtCall
+	viewCalls   []readAtCall
+}
+
+func (r *fallbackByteViewer) ReadAt(p []byte, off int64) (int, error) {
+	r.readAtCalls = append(r.readAtCalls, readAtCall{off: off, n: len(p)})
+	if off < 0 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	if off >= int64(len(r.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (r *fallbackByteViewer) View(off int64, n int) ([]byte, bool) {
+	r.viewCalls = append(r.viewCalls, readAtCall{off: off, n: n})
+	return nil, false
 }

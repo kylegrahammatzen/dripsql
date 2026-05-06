@@ -78,28 +78,36 @@ func (t *Table) ColumnStorageStats() ([]ColumnStorageStats, error) {
 	return stats, nil
 }
 
-func (s *ColumnStorageStats) addSegment(stats storage.ColumnStats) {
-	encoding := stats.Encoding
-	if encoding.Codec == "" {
-		encoding.Codec = "unknown"
+func (s *ColumnStorageStats) addSegment(stats storage.Column) {
+	codec := stats.Codec.String()
+	if codec == "codec(0)" {
+		codec = "unknown"
 	}
-	s.Codec = mergeStatsLabel(s.Codec, encoding.Codec, s.Segments)
-	s.FilterPath = mergeStatsLabel(s.FilterPath, encoding.FilterPath, s.Segments)
-	s.GroupPath = mergeStatsLabel(s.GroupPath, encoding.GroupPath, s.Segments)
+	s.Codec = mergeStatsLabel(s.Codec, codec, s.Segments)
+	s.FilterPath = mergeStatsLabel(s.FilterPath, stats.FilterPath, s.Segments)
+	s.GroupPath = mergeStatsLabel(s.GroupPath, stats.GroupPath, s.Segments)
 	s.Rows += int64(stats.Count)
 	s.Segments++
-	s.EncodedBytes += int64(stats.EncodedLen)
-	s.PlainBytes += int64(encoding.PlainBytes)
-	if encoding.StringBloom != nil {
+	s.EncodedBytes += stats.Payload.Bytes
+	s.PlainBytes += int64(stats.PlainBytes)
+	if stats.Int64Bloom != nil {
 		s.BloomSegments++
-		s.BloomBytes += int64(len(encoding.StringBloom.Data))
+		s.BloomBytes += int64(len(stats.Int64Bloom.Data))
+	}
+	if stats.StringBloom != nil {
+		s.BloomSegments++
+		s.BloomBytes += int64(len(stats.StringBloom.Data))
+	}
+	if stats.Filters.Bytes > 0 {
+		s.BloomSegments++
+		s.BloomBytes += stats.Filters.Bytes
 	}
 
-	switch encoding.Codec {
-	case "plain":
+	switch stats.Codec {
+	case storage.CodecPlain:
 		s.PlainSegments++
-	case "dictionary":
-		s.addDictionarySegment(encoding)
+	case storage.CodecDictionary:
+		s.addDictionarySegment(stats)
 	}
 
 	if stats.HasMinMax {
@@ -118,31 +126,31 @@ func (s *ColumnStorageStats) addSegment(stats storage.ColumnStats) {
 	}
 }
 
-func (s *ColumnStorageStats) addDictionarySegment(encoding storage.ColumnEncoding) {
+func (s *ColumnStorageStats) addDictionarySegment(stats storage.Column) {
 	if s.DictionarySegments == 0 {
-		s.MinDictionaryValues = encoding.DictionaryValues
-		s.MaxDictionaryValues = encoding.DictionaryValues
+		s.MinDictionaryValues = stats.DictionaryValues
+		s.MaxDictionaryValues = stats.DictionaryValues
 	} else {
-		if encoding.DictionaryValues < s.MinDictionaryValues {
-			s.MinDictionaryValues = encoding.DictionaryValues
+		if stats.DictionaryValues < s.MinDictionaryValues {
+			s.MinDictionaryValues = stats.DictionaryValues
 		}
-		if encoding.DictionaryValues > s.MaxDictionaryValues {
-			s.MaxDictionaryValues = encoding.DictionaryValues
+		if stats.DictionaryValues > s.MaxDictionaryValues {
+			s.MaxDictionaryValues = stats.DictionaryValues
 		}
 	}
 	s.DictionarySegments++
-	s.DictionaryValues += int64(encoding.DictionaryValues)
+	s.DictionaryValues += int64(stats.DictionaryValues)
 
-	if encoding.DictionaryPacked {
+	if stats.DictionaryPacked {
 		if s.PackedIDSegments == 0 {
-			s.MinPackedIDBitWidth = encoding.DictionaryPackedBitWidth
-			s.MaxPackedIDBitWidth = encoding.DictionaryPackedBitWidth
+			s.MinPackedIDBitWidth = stats.DictionaryPackedBitWidth
+			s.MaxPackedIDBitWidth = stats.DictionaryPackedBitWidth
 		} else {
-			if encoding.DictionaryPackedBitWidth < s.MinPackedIDBitWidth {
-				s.MinPackedIDBitWidth = encoding.DictionaryPackedBitWidth
+			if stats.DictionaryPackedBitWidth < s.MinPackedIDBitWidth {
+				s.MinPackedIDBitWidth = stats.DictionaryPackedBitWidth
 			}
-			if encoding.DictionaryPackedBitWidth > s.MaxPackedIDBitWidth {
-				s.MaxPackedIDBitWidth = encoding.DictionaryPackedBitWidth
+			if stats.DictionaryPackedBitWidth > s.MaxPackedIDBitWidth {
+				s.MaxPackedIDBitWidth = stats.DictionaryPackedBitWidth
 			}
 		}
 		s.PackedIDSegments++
@@ -150,14 +158,14 @@ func (s *ColumnStorageStats) addDictionarySegment(encoding storage.ColumnEncodin
 	}
 
 	if s.FixedIDSegments == 0 {
-		s.MinDictionaryIDWidth = encoding.DictionaryIDWidth
-		s.MaxDictionaryIDWidth = encoding.DictionaryIDWidth
+		s.MinDictionaryIDWidth = stats.DictionaryIDWidth
+		s.MaxDictionaryIDWidth = stats.DictionaryIDWidth
 	} else {
-		if encoding.DictionaryIDWidth < s.MinDictionaryIDWidth {
-			s.MinDictionaryIDWidth = encoding.DictionaryIDWidth
+		if stats.DictionaryIDWidth < s.MinDictionaryIDWidth {
+			s.MinDictionaryIDWidth = stats.DictionaryIDWidth
 		}
-		if encoding.DictionaryIDWidth > s.MaxDictionaryIDWidth {
-			s.MaxDictionaryIDWidth = encoding.DictionaryIDWidth
+		if stats.DictionaryIDWidth > s.MaxDictionaryIDWidth {
+			s.MaxDictionaryIDWidth = stats.DictionaryIDWidth
 		}
 	}
 	s.FixedIDSegments++

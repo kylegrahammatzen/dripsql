@@ -74,7 +74,7 @@ func TestEmptyTableCountsZero(t *testing.T) {
 	}
 }
 
-func TestScannerReusesBufferAcrossCounts(t *testing.T) {
+func TestScannerReusesStorageReadersAcrossCounts(t *testing.T) {
 	tbl := createEventsTable(t, t.TempDir())
 	appendBatch(t, tbl, []int64{7, 42, 7}, []string{"signup", "checkout", "checkout"})
 
@@ -91,10 +91,9 @@ func TestScannerReusesBufferAcrossCounts(t *testing.T) {
 	if stats.RowsTotal != 3 || stats.RowsScanned != 3 || stats.BytesScanned <= 0 {
 		t.Fatalf("stats = %+v, want 3-row scan", stats)
 	}
-	if cap(scanner.buf) == 0 {
-		t.Fatal("expected scanner buffer to be retained")
+	if len(scanner.storageOK) != 1 || !scanner.storageOK[0] {
+		t.Fatal("expected scanner to cache the opened segment reader")
 	}
-	bufCap := cap(scanner.buf)
 
 	count, err = scanner.CountStringEqual("event_type", "checkout")
 	if err != nil {
@@ -103,13 +102,13 @@ func TestScannerReusesBufferAcrossCounts(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("event count = %d, want 2", count)
 	}
-	if cap(scanner.buf) < bufCap {
-		t.Fatalf("scanner buffer cap = %d, want at least %d", cap(scanner.buf), bufCap)
+	if len(scanner.storageOK) != 1 || !scanner.storageOK[0] {
+		t.Fatal("expected cached segment reader to survive repeated scans")
 	}
 
 	scanner.Reset()
-	if scanner.buf != nil {
-		t.Fatal("expected scanner reset to release buffer")
+	if scanner.buf != nil || scanner.storageReaders != nil || scanner.storageOK != nil {
+		t.Fatal("expected scanner reset to release scratch and cached readers")
 	}
 	if scanner.Stats() != (ScanStats{}) {
 		t.Fatalf("stats after reset = %+v, want zero", scanner.Stats())
@@ -214,6 +213,99 @@ func TestScannerStringBloomPrunesSegments(t *testing.T) {
 		}
 	}
 	t.Fatal("bloom did not skip any absent test values")
+}
+
+func TestScannerStringPageBloomSkipsRows(t *testing.T) {
+	tbl, err := Create(t.TempDir(), []Column{{Name: "url", Kind: vector.KindString}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make([]string, 5000)
+	for row := range values {
+		values[row] = strconv.FormatUint(testStringPageBloomHash(uint64(row+1)), 36)
+	}
+	if err := tbl.Append(mustBatch(t, vector.Column{Name: "url", Vector: vector.FromString(values)})); err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := tbl.NewScanner()
+	t.Cleanup(func() { _ = scanner.Close() })
+	count, err := scanner.CountStringEqual("url", values[123])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("existing count = %d, want 1", count)
+	}
+	if stats := scanner.Stats(); stats.SegmentsScanned != 1 || stats.RowsScanned == int64(len(values)) || stats.RowsSkipped == 0 {
+		t.Fatalf("existing stats = %+v, want page bloom to scan fewer than all rows", stats)
+	}
+
+	for i := 0; i < 100; i++ {
+		count, err = scanner.CountStringEqual("url", "/absent/"+strconv.Itoa(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("missing count = %d, want 0", count)
+		}
+		stats := scanner.Stats()
+		if stats.RowsSkipped == int64(len(values)) && stats.RowsScanned == 0 && stats.BytesScanned < stats.BytesTotal {
+			return
+		}
+	}
+	t.Fatal("storage page bloom did not skip all rows for any absent test value")
+}
+
+func testStringPageBloomHash(value uint64) uint64 {
+	value ^= value >> 30
+	value *= 0xbf58476d1ce4e5b9
+	value ^= value >> 27
+	value *= 0x94d049bb133111eb
+	value ^= value >> 31
+	return value
+}
+
+func TestScannerInt64BloomPrunesSegments(t *testing.T) {
+	tbl, err := Create(t.TempDir(), []Column{{Name: "user_id", Kind: vector.KindInt64}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make([]int64, 5000)
+	for row := range values {
+		values[row] = int64(row*1000 + (row*row)%97)
+	}
+	if err := tbl.Append(mustBatch(t, vector.Column{Name: "user_id", Vector: vector.FromInt64(values)})); err != nil {
+		t.Fatal(err)
+	}
+
+	scanner := tbl.NewScanner()
+	t.Cleanup(func() { _ = scanner.Close() })
+	count, err := scanner.CountInt64Equal("user_id", values[123])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("existing count = %d, want 1", count)
+	}
+	if stats := scanner.Stats(); stats.SegmentsScanned != 1 || stats.SegmentsSkipped != 0 {
+		t.Fatalf("existing stats = %+v, want one scanned segment", stats)
+	}
+
+	for i := 0; i < 100; i++ {
+		count, err = scanner.CountInt64Equal("user_id", int64(i*1000+500))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("missing count = %d, want 0", count)
+		}
+		stats := scanner.Stats()
+		if stats.SegmentsSkipped == 1 && stats.SegmentsScanned == 0 && stats.RowsSkipped == int64(len(values)) {
+			return
+		}
+	}
+	t.Fatal("storage segment bloom did not skip any absent int64 test values")
 }
 
 func TestGroupStringCounts(t *testing.T) {

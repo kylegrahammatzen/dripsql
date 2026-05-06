@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	manifestVersion = 2
-	manifestFile    = "manifest.json"
-	dataFile        = "table.dripdata"
+	manifestVersion             = 4
+	minSupportedManifestVersion = 4
+	manifestFile                = "manifest.json"
+	dataFile                    = "table.dripdata"
 )
 
 // Column describes one table column's physical storage type.
@@ -22,17 +23,13 @@ type Column struct {
 	Kind vector.Kind
 }
 
-// ColumnRange describes one encoded column payload range inside a segment.
-type ColumnRange = storage.ColumnPayloadRange
-
 // Segment describes one immutable segment recorded in a table manifest.
 type Segment struct {
-	ID      uint64               `json:"id"`
-	Offset  int64                `json:"offset"`
-	Rows    int                  `json:"rows"`
-	Bytes   int64                `json:"bytes"`
-	Stats   storage.SegmentStats `json:"stats"`
-	Columns []ColumnRange        `json:"columns,omitempty"`
+	ID     uint64               `json:"id"`
+	Offset int64                `json:"offset"`
+	Rows   int                  `json:"rows"`
+	Bytes  int64                `json:"bytes"`
+	Stats  storage.SegmentStats `json:"stats"`
 }
 
 // Table is a directory-backed collection of immutable columnar segments.

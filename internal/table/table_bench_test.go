@@ -1,6 +1,10 @@
 package table
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
+)
 
 func BenchmarkCountInt64EqualTable(b *testing.B) {
 	tbl := benchmarkEventsTable(b, 10, 100_000)
@@ -165,6 +169,31 @@ func BenchmarkScannerGroupStringCountsTable(b *testing.B) {
 	}
 }
 
+func BenchmarkScannerHighCardinalityStringTable(b *testing.B) {
+	const rows = 1_000_000
+	tbl, values := benchmarkURLTable(b, rows)
+	scanner := tbl.NewScanner()
+	b.Cleanup(func() { _ = scanner.Close() })
+	target := values[12_345]
+	if count, err := scanner.CountStringEqual("url", target); err != nil {
+		b.Fatal(err)
+	} else if count != 1 {
+		b.Fatalf("count = %d, want 1", count)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		count, err := scanner.CountStringEqual("url", target)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if count != 1 {
+			b.Fatalf("count = %d, want 1", count)
+		}
+	}
+}
+
 func benchmarkEventsTable(b *testing.B, segments int, rowsPerSegment int) *Table {
 	b.Helper()
 	tbl := createEventsTable(b, b.TempDir())
@@ -179,4 +208,35 @@ func benchmarkEventsTable(b *testing.B, segments int, rowsPerSegment int) *Table
 		appendBatch(b, tbl, tenants, events)
 	}
 	return tbl
+}
+
+func benchmarkURLTable(b *testing.B, rows int) (*Table, []string) {
+	b.Helper()
+	tbl, err := Create(b.TempDir(), []Column{{Name: "url", Kind: vector.KindString}})
+	if err != nil {
+		b.Fatal(err)
+	}
+	values := make([]string, rows)
+	for row := range values {
+		values[row] = "/item/" + benchmarkBase36(row)
+	}
+	if err := tbl.Append(mustBatch(b, vector.Column{Name: "url", Vector: vector.FromString(values)})); err != nil {
+		b.Fatal(err)
+	}
+	return tbl, values
+}
+
+func benchmarkBase36(n int) string {
+	const digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+	if n == 0 {
+		return "0"
+	}
+	var buf [16]byte
+	pos := len(buf)
+	for n > 0 {
+		pos--
+		buf[pos] = digits[n%len(digits)]
+		n /= len(digits)
+	}
+	return string(buf[pos:])
 }

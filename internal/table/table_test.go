@@ -66,6 +66,63 @@ func TestCreateAppendOpenAndCount(t *testing.T) {
 	}
 }
 
+func TestCreateAppendOpenParallelAndGroup(t *testing.T) {
+	dir := t.TempDir()
+	tbl := createEventsTable(t, dir)
+
+	appendBatch(t, tbl,
+		[]int64{7, 42, 7},
+		[]string{"signup", "checkout", "checkout"},
+	)
+	appendBatch(t, tbl,
+		[]int64{11, 7},
+		[]string{"cancel", "checkout"},
+	)
+	if tbl.Segments() != 2 {
+		t.Fatalf("segments = %d, want 2", tbl.Segments())
+	}
+
+	reopened, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Rows() != 5 || reopened.Segments() != 2 {
+		t.Fatalf("reopened rows/segments = %d/%d, want 5/2", reopened.Rows(), reopened.Segments())
+	}
+
+	count, err := reopened.CountInt64Equal("tenant_id", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("tenant count = %d, want 3", count)
+	}
+	count, err = reopened.CountStringEqual("event_type", "checkout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("event count = %d, want 3", count)
+	}
+
+	scanner := reopened.NewScanner()
+	t.Cleanup(func() { _ = scanner.Close() })
+	count, err = scanner.CountStringEqualParallel("event_type", "checkout", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("parallel fallback count = %d, want 3", count)
+	}
+	counts, err := scanner.GroupStringCounts("event_type")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["checkout"] != 3 || counts["signup"] != 1 || counts["cancel"] != 1 {
+		t.Fatalf("storage groups = %#v, want exact event counts", counts)
+	}
+}
+
 func TestManifestPersistsStats(t *testing.T) {
 	dir := t.TempDir()
 	tbl := createEventsTable(t, dir)
@@ -85,24 +142,6 @@ func TestManifestPersistsStats(t *testing.T) {
 	if segment.Offset != 0 || segment.Bytes <= 0 {
 		t.Fatalf("segment offset/bytes = %d/%d, want 0/positive", segment.Offset, segment.Bytes)
 	}
-	if len(segment.Columns) != 2 {
-		t.Fatalf("column ranges = %d, want 2", len(segment.Columns))
-	}
-	var tenantRange ColumnRange
-	foundTenantRange := false
-	for _, columnRange := range segment.Columns {
-		if columnRange.Name == "tenant_id" {
-			tenantRange = columnRange
-			foundTenantRange = true
-			break
-		}
-	}
-	if !foundTenantRange {
-		t.Fatal("missing tenant_id column range")
-	}
-	if tenantRange.Offset <= 0 || tenantRange.Bytes <= 0 || tenantRange.Offset+tenantRange.Bytes > segment.Bytes {
-		t.Fatalf("tenant range = %+v, segment bytes = %d", tenantRange, segment.Bytes)
-	}
 	stats, ok := segment.Stats.Column("tenant_id")
 	if !ok {
 		t.Fatal("missing tenant_id stats")
@@ -110,7 +149,7 @@ func TestManifestPersistsStats(t *testing.T) {
 	if !stats.HasMinMax || stats.MinInt64 != 7 || stats.MaxInt64 != 42 {
 		t.Fatalf("tenant stats = %+v, want min/max 7/42", stats)
 	}
-	if stats.Encoding.Codec == "" {
+	if stats.Codec == 0 {
 		t.Fatalf("tenant encoding stats were not persisted: %+v", stats)
 	}
 }
@@ -150,8 +189,8 @@ func TestColumnStorageStats(t *testing.T) {
 	}
 
 	event := columnStorageStats(t, stats, "event_type")
-	if event.Codec != "dictionary" || event.FilterPath != "dict-id" || event.GroupPath != "dict-counts" {
-		t.Fatalf("event storage stats = %+v, want dictionary filter/group paths", event)
+	if event.Codec != "dictionary" || event.FilterPath != "dictionary" || event.GroupPath != "dict-counts" {
+		t.Fatalf("event storage stats = %+v, want dictionary equality/group stats", event)
 	}
 }
 
