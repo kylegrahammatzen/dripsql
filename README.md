@@ -61,12 +61,6 @@ go run ./cmd/cli query <db> "SELECT count(*) FROM events"
 go run ./cmd/cli query <db> "EXPLAIN ANALYZE SELECT count(*) FROM events WHERE id = 42"
 ```
 
-## Notes
-
-- Active status: `current.md`.
-- Forward-looking goals: `goals.md`.
-- Benchmark history: `benchmarks.md`.
-
 ## License
 
 MIT
