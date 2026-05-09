@@ -3,233 +3,189 @@ package storage
 import (
 	"encoding/binary"
 	"fmt"
-	"math/bits"
+
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-const (
-	dictionaryPackedIDFlag             = 1 << 7
-	dictionaryCountWidth               = 8
-	maxLinearDictionaryValues          = 16
-	maxDictionaryValues                = 1 << 16
-	maxStringDictionaryDataLen         = 1 << 20
-	dictionarySampleRows               = 4096
-	dictionarySampleMinRows            = 1024
-	dictionarySampleMaxDistinctPercent = 80
-)
+// dictMaxValues is the cardinality threshold for picking dictionary
+// encoding over plain varlen for a text page. 256 keeps every value ID in
+// one byte, which is the densest representation we get without bitpacking.
+// Wider tables (uint16 IDs) are deferred until there's evidence they pay
+// off; the bench data so far only stresses ≤ 8 distinct values.
+const dictMaxValues = 256
 
-func dictionaryIDEncoding(dictCount int, rows int) int {
-	fixedWidth := dictionaryIDWidth(dictCount)
-	packedWidth := dictionaryPackedBitWidthForCount(dictCount)
-	if packedWidth >= fixedWidth*8 {
-		return fixedWidth
+// shouldDictionaryEncodeText decides whether to dict-encode a text page. A
+// nil/zero stats pointer or a distinct count above the threshold falls back
+// to plain. This is a heuristic, not a guarantee: callers must still call
+// the plain encoder if dictionary encoding fails (e.g. unexpectedly more
+// distinct values than the histogram suggested).
+func shouldDictionaryEncodeText(stats *TextStats) bool {
+	if stats == nil {
+		return false
 	}
-	fixedLen, fixedErr := checkedMulInt("dictionary fixed ids length", rows, fixedWidth)
-	packedLen, packedErr := packedDictionaryIDsLen(rows, packedWidth)
-	if fixedErr == nil && packedErr == nil && packedLen < fixedLen {
-		return dictionaryPackedIDFlag | packedWidth
-	}
-	return fixedWidth
+	distinct := len(stats.Values)
+	return stats.Complete && distinct > 0 && distinct <= dictMaxValues
 }
 
-func dictionaryIDWidth(dictCount int) int {
-	if dictCount <= 1<<8 {
-		return 1
-	}
-	if dictCount <= 1<<16 {
-		return 2
-	}
-	return 4
-}
-
-func dictionaryPackedBitWidthForCount(dictCount int) int {
-	if dictCount <= 1 {
-		return 0
-	}
-	return bits.Len(uint(dictCount - 1))
-}
-
-func dictionaryIDsLen(rows int, idEncoding int) (int, error) {
-	if idEncoding&dictionaryPackedIDFlag != 0 {
-		return packedDictionaryIDsLen(rows, idEncoding&^dictionaryPackedIDFlag)
-	}
-	return checkedMulInt("dictionary ids length", rows, idEncoding)
-}
-
-func packedDictionaryIDsLen(rows int, bitWidth int) (int, error) {
-	bitsLen, err := checkedMulInt("dictionary packed id bits", rows, bitWidth)
-	if err != nil {
-		return 0, err
-	}
-	bitsLen, err = checkedAddInt("dictionary packed id bits", bitsLen, 7)
-	if err != nil {
-		return 0, err
-	}
-	return bitsLen / 8, nil
-}
-
-func dictionaryCountsLen(dictCount int) (int, error) {
-	return checkedMulInt("dictionary counts length", dictCount, dictionaryCountWidth)
-}
-
-func dictionaryCountAt(counts []byte, id int) uint64 {
-	return binary.LittleEndian.Uint64(counts[id*dictionaryCountWidth:])
-}
-
-func validateDictionaryCounts(label string, counts []byte, dictCount int, rows int) error {
-	if rows < 0 {
-		return fmt.Errorf("negative %s dictionary row count %d", label, rows)
-	}
-	expected, err := dictionaryCountsLen(dictCount)
-	if err != nil {
-		return err
-	}
-	if len(counts) != expected {
-		return fmt.Errorf("%s dictionary counts have %d bytes, want %d", label, len(counts), expected)
-	}
-	var total uint64
-	for id := 0; id < dictCount; id++ {
-		count := dictionaryCountAt(counts, id)
-		if ^uint64(0)-total < count {
-			return fmt.Errorf("%s dictionary counts overflow", label)
-		}
-		total += count
-	}
-	if total != uint64(rows) {
-		return fmt.Errorf("%s dictionary counts sum %d does not match row count %d", label, total, rows)
-	}
-	return nil
-}
-
-func validateDictionaryIDEncoding(label string, rows int, dictCount int, idEncoding int) error {
-	if dictCount <= 0 {
-		return fmt.Errorf("%s dictionary value count %d must be positive", label, dictCount)
-	}
-	if dictCount > rows {
-		return fmt.Errorf("%s dictionary value count %d exceeds row count %d", label, dictCount, rows)
-	}
-	if idEncoding&dictionaryPackedIDFlag != 0 {
-		bitWidth := idEncoding &^ dictionaryPackedIDFlag
-		if bitWidth < 0 || bitWidth > 32 {
-			return fmt.Errorf("unsupported %s dictionary packed bit width %d", label, bitWidth)
-		}
-		if bitWidth == 0 {
-			if dictCount > 1 {
-				return fmt.Errorf("%s dictionary value count %d exceeds packed bit width %d", label, dictCount, bitWidth)
+// encodeTextPage picks dictionary or plain for a single text page based on
+// projected payload size, encodes it, and stamps meta.Codec / meta.Text. Plain
+// remains the fallback whenever stats are incomplete or the dictionary
+// estimate isn't strictly smaller.
+func encodeTextPage(col vector.Column, valid vector.Validity, start, rows int, meta *PageMeta) ([]byte, PageMeta, error) {
+	stats := buildTextStats(col.V.Var, valid, start, rows)
+	validBytes := validityPayloadLen(valid)
+	if shouldDictionaryEncodeText(stats) {
+		dictSize := dictionaryPayloadEstimate(stats, validBytes, rows)
+		plainSize := plainTextSizeFromStats(stats, validBytes, rows)
+		if dictSize < plainSize {
+			payload, _, err := encodeTextDictionary(col, valid, start, rows)
+			if err == nil {
+				meta.Text = stats
+				meta.Codec = CodecDictionary
+				return payload, *meta, nil
 			}
-			return nil
 		}
-		if uint64(dictCount) > uint64(1)<<uint(bitWidth) {
-			return fmt.Errorf("%s dictionary value count %d exceeds packed bit width %d", label, dictCount, bitWidth)
+	}
+	payload, _, err := encodeVarBytesPlain(col, valid, start, rows, true)
+	if err != nil {
+		return nil, PageMeta{}, err
+	}
+	meta.Text = stats
+	meta.Codec = CodecPlain
+	return payload, *meta, nil
+}
+
+// encodeTextDictionary serializes a text page as: validity bitmap, uint16
+// dict count, (count+1) uint32 offsets, dict data, then `rows` uint8 IDs.
+// Returns the payload, the page-level TextStats (so segment metadata still
+// records exact value/count info), and any error.
+func encodeTextDictionary(col vector.Column, valid vector.Validity, start, rows int) ([]byte, *TextStats, error) {
+	stats := buildTextStats(col.V.Var, valid, start, rows)
+	if !shouldDictionaryEncodeText(stats) {
+		return nil, stats, fmt.Errorf("text column %q does not fit dictionary threshold", col.Name)
+	}
+
+	dict := stats.Values
+	if len(dict) > dictMaxValues {
+		return nil, stats, fmt.Errorf("text column %q dictionary overflow", col.Name)
+	}
+	idByValue := make(map[string]uint8, len(dict))
+	for i, v := range dict {
+		idByValue[v.Value] = uint8(i)
+	}
+	dataLen := 0
+	for _, v := range dict {
+		dataLen += len(v.Value)
+	}
+
+	dictHeader := 2 + (len(dict)+1)*4
+	idLen := rows
+	payload := make([]byte, validityPayloadLen(valid)+dictHeader+dataLen+idLen)
+	pos := writeValidityPayload(payload, valid)
+
+	binary.LittleEndian.PutUint16(payload[pos:pos+2], uint16(len(dict)))
+	pos += 2
+	offsetPos := pos
+	dataStart := pos + (len(dict)+1)*4
+	dataPos := dataStart
+	binary.LittleEndian.PutUint32(payload[offsetPos:offsetPos+4], 0)
+	for i, v := range dict {
+		dataPos += copy(payload[dataPos:], v.Value)
+		binary.LittleEndian.PutUint32(payload[offsetPos+(i+1)*4:offsetPos+(i+2)*4], uint32(dataPos-dataStart))
+	}
+	pos = dataStart + dataLen
+
+	for row := 0; row < rows; row++ {
+		if !vector.IsValid(valid, row) {
+			payload[pos+row] = 0
+			continue
 		}
-		return nil
-	}
-	if idEncoding != 1 && idEncoding != 2 && idEncoding != 4 {
-		return fmt.Errorf("unsupported %s dictionary id width %d", label, idEncoding)
-	}
-	if idEncoding == 1 && dictCount > 1<<8 {
-		return fmt.Errorf("%s dictionary value count %d exceeds id width %d", label, dictCount, idEncoding)
-	}
-	if idEncoding == 2 && dictCount > 1<<16 {
-		return fmt.Errorf("%s dictionary value count %d exceeds id width %d", label, dictCount, idEncoding)
-	}
-	return nil
-}
-
-func appendDictionaryID(out []byte, id uint32, idWidth int) []byte {
-	switch idWidth {
-	case 1:
-		out = append(out, byte(id))
-	case 2:
-		out = binary.LittleEndian.AppendUint16(out, uint16(id))
-	case 4:
-		out = binary.LittleEndian.AppendUint32(out, id)
-	}
-	return out
-}
-
-func dictionaryIDAt(ids []byte, row int, idEncoding int, dictCount int, label string) (uint32, error) {
-	if idEncoding&dictionaryPackedIDFlag != 0 {
-		id := packedDictionaryIDAt(ids, row, idEncoding&^dictionaryPackedIDFlag)
-		if uint64(id) >= uint64(dictCount) {
-			return 0, fmt.Errorf("%s dictionary id %d out of range at row %d", label, id, row)
+		v := col.V.Var.Bytes(start + row)
+		id, ok := idByValue[string(v)]
+		if !ok {
+			return nil, stats, fmt.Errorf("text column %q row %d not in dictionary", col.Name, row)
 		}
-		return id, nil
+		payload[pos+row] = id
 	}
-	return fixedDictionaryIDAt(ids, row, idEncoding, dictCount, label)
+	return payload, stats, nil
 }
 
-func fixedDictionaryIDAt(ids []byte, row int, idWidth int, dictCount int, label string) (uint32, error) {
-	var id uint32
-	switch idWidth {
-	case 1:
-		id = uint32(ids[row])
-	case 2:
-		id = uint32(binary.LittleEndian.Uint16(ids[row*2:]))
-	case 4:
-		id = binary.LittleEndian.Uint32(ids[row*4:])
-	default:
-		return 0, fmt.Errorf("unsupported %s dictionary id width %d", label, idWidth)
+// decodeTextDictionary inverts encodeTextDictionary, materializing a
+// regular varbytes vector so query paths see the same shape as plain text.
+// Predicate / group / count fast-paths over dict IDs are deferred.
+func decodeTextDictionary(payload []byte, valid vector.Validity, pos, rows int, kind vector.Kind, colName string) (vector.Vec, error) {
+	if len(payload)-pos < 2 {
+		return vector.Vec{}, fmt.Errorf("column %q dictionary payload missing dict count", colName)
 	}
-	if uint64(id) >= uint64(dictCount) {
-		return 0, fmt.Errorf("%s dictionary id %d out of range at row %d", label, id, row)
+	dictCount := int(binary.LittleEndian.Uint16(payload[pos : pos+2]))
+	pos += 2
+	offsetBytes := (dictCount + 1) * 4
+	if len(payload)-pos < offsetBytes {
+		return vector.Vec{}, fmt.Errorf("column %q dictionary payload missing offsets", colName)
 	}
-	return id, nil
+	offsets := make([]uint32, dictCount+1)
+	for i := range offsets {
+		offsets[i] = binary.LittleEndian.Uint32(payload[pos : pos+4])
+		pos += 4
+	}
+	dataLen := int(offsets[dictCount])
+	if len(payload)-pos < dataLen+rows {
+		return vector.Vec{}, fmt.Errorf("column %q dictionary payload truncated", colName)
+	}
+	dictData := payload[pos : pos+dataLen]
+	pos += dataLen
+	ids := payload[pos : pos+rows]
+
+	outOffsets := make([]uint32, rows+1)
+	totalLen := 0
+	for row := 0; row < rows; row++ {
+		if vector.IsValid(valid, row) {
+			id := int(ids[row])
+			if id < 0 || id >= dictCount {
+				return vector.Vec{}, fmt.Errorf("column %q dictionary id %d out of range", colName, id)
+			}
+			totalLen += int(offsets[id+1] - offsets[id])
+		}
+		outOffsets[row+1] = uint32(totalLen)
+	}
+	outData := make([]byte, totalLen)
+	cursor := 0
+	for row := 0; row < rows; row++ {
+		if !vector.IsValid(valid, row) {
+			continue
+		}
+		id := int(ids[row])
+		valueStart := offsets[id]
+		valueEnd := offsets[id+1]
+		copy(outData[cursor:], dictData[valueStart:valueEnd])
+		cursor += int(valueEnd - valueStart)
+	}
+	return vector.Vec{Kind: kind, Len: rows, Valid: valid, Var: vector.VarBytes{Offsets: outOffsets, Data: outData}}, nil
 }
 
-func setPackedDictionaryID(ids []byte, row int, bitWidth int, id uint32) {
-	if bitWidth == 0 {
-		return
-	}
-	bitOffset := row * bitWidth
-	byteOffset := bitOffset / 8
-	shift := uint(bitOffset % 8)
-	value := uint64(id) << shift
-	bytes := (int(shift) + bitWidth + 7) / 8
-	switch bytes {
-	case 1:
-		ids[byteOffset] |= byte(value)
-	case 2:
-		v := binary.LittleEndian.Uint16(ids[byteOffset:]) | uint16(value)
-		binary.LittleEndian.PutUint16(ids[byteOffset:], v)
-	case 3:
-		v := binary.LittleEndian.Uint16(ids[byteOffset:]) | uint16(value)
-		binary.LittleEndian.PutUint16(ids[byteOffset:], v)
-		ids[byteOffset+2] |= byte(value >> 16)
-	case 4:
-		v := binary.LittleEndian.Uint32(ids[byteOffset:]) | uint32(value)
-		binary.LittleEndian.PutUint32(ids[byteOffset:], v)
-	case 5:
-		v := binary.LittleEndian.Uint32(ids[byteOffset:]) | uint32(value)
-		binary.LittleEndian.PutUint32(ids[byteOffset:], v)
-		ids[byteOffset+4] |= byte(value >> 32)
-	}
-}
-
-func packedDictionaryIDAt(ids []byte, row int, bitWidth int) uint32 {
-	if bitWidth == 0 {
+// dictionaryPayloadEstimate returns the byte size encodeTextDictionary
+// would produce for the given stats + row count. Used by codec selection
+// to compare against the plain varlen size before committing.
+func dictionaryPayloadEstimate(stats *TextStats, validBytes, rows int) int {
+	if stats == nil {
 		return 0
 	}
-	bitOffset := row * bitWidth
-	byteOffset := bitOffset / 8
-	shift := uint(bitOffset % 8)
-	bytes := (int(shift) + bitWidth + 7) / 8
-	var value uint64
-	switch bytes {
-	case 1:
-		value = uint64(ids[byteOffset])
-	case 2:
-		value = uint64(binary.LittleEndian.Uint16(ids[byteOffset:]))
-	case 3:
-		value = uint64(binary.LittleEndian.Uint16(ids[byteOffset:])) | uint64(ids[byteOffset+2])<<16
-	case 4:
-		value = uint64(binary.LittleEndian.Uint32(ids[byteOffset:]))
-	case 5:
-		value = uint64(binary.LittleEndian.Uint32(ids[byteOffset:])) | uint64(ids[byteOffset+4])<<32
+	dataLen := 0
+	for _, v := range stats.Values {
+		dataLen += len(v.Value)
 	}
-	value >>= shift
-	if bitWidth == 32 {
-		return uint32(value)
+	return validBytes + 2 + (len(stats.Values)+1)*4 + dataLen + rows
+}
+
+// plainTextSizeFromStats predicts encodeVarBytesPlain's payload size from
+// complete stats (validBytes + per-row offsets + total bytes).
+func plainTextSizeFromStats(stats *TextStats, validBytes, rows int) int {
+	if stats == nil || !stats.Complete {
+		return 0
 	}
-	mask := (uint64(1) << uint(bitWidth)) - 1
-	return uint32(value & mask)
+	dataLen := 0
+	for _, v := range stats.Values {
+		dataLen += len(v.Value) * int(v.Count)
+	}
+	return validBytes + (rows+1)*4 + dataLen
 }

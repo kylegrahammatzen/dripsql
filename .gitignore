@@ -1,14 +1,5 @@
-# DripSQL generated storage files
-*.dripseg
-*.dripdata
-dripsqlbench-*/
-
 # Go test binaries and profiles
 *.test.exe
 *.test
 *.prof
 *.out
-
-# Local planning notes
-todo.md
-goals.md
