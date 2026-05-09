@@ -1,0 +1,26 @@
+goos: windows
+goarch: amd64
+pkg: github.com/kylegrahammatzen/dripsql/internal/storage
+cpu: AMD Ryzen 7 3700X 8-Core Processor             
+BenchmarkGroupStringCountsWherePredicates/int64_eq-16         	     373	   1090355 ns/op	  15026344 rows/sec	  446796 B/op	      84 allocs/op
+BenchmarkGroupStringCountsWherePredicates/int64_eq-16         	     366	    975141 ns/op	  16801744 rows/sec	  446781 B/op	      84 allocs/op
+BenchmarkGroupStringCountsWherePredicates/int64_not_eq-16     	     291	   1299385 ns/op	  12609096 rows/sec	  446781 B/op	      84 allocs/op
+BenchmarkGroupStringCountsWherePredicates/int64_not_eq-16     	     278	   1503937 ns/op	  10894112 rows/sec	  446778 B/op	      84 allocs/op
+BenchmarkGroupStringCountsWherePredicates/int64_in-16         	     331	   1070706 ns/op	  15302117 rows/sec	  446779 B/op	      84 allocs/op
+BenchmarkGroupStringCountsWherePredicates/int64_in-16         	     363	   1112300 ns/op	  14729872 rows/sec	  446786 B/op	      84 allocs/op
+BenchmarkGroupStringCountsWherePredicates/int64_not_in-16     	     265	   1346303 ns/op	  12169647 rows/sec	  446785 B/op	      84 allocs/op
+BenchmarkGroupStringCountsWherePredicates/int64_not_in-16     	     252	   1201286 ns/op	  13638774 rows/sec	  446781 B/op	      84 allocs/op
+BenchmarkGroupStringCountsWherePredicates/int64_greater_equal-16         	     315	   1131333 ns/op	  14482072 rows/sec	  447163 B/op	      84 allocs/op
+BenchmarkGroupStringCountsWherePredicates/int64_greater_equal-16         	     286	   1103875 ns/op	  14842314 rows/sec	  447168 B/op	      84 allocs/op
+BenchmarkCountInt64EqPayloadOnlyAllValid-16                              	  341562	      1042 ns/op	15730.32 MB/s	1966607036 rows/sec	       0 B/op	       0 allocs/op
+BenchmarkCountInt64EqPayloadOnlyAllValid-16                              	  342442	      1057 ns/op	15495.37 MB/s	1937209078 rows/sec	       0 B/op	       0 allocs/op
+BenchmarkCountInt64EqPayloadOnlyWithNulls-16                             	  190128	      1947 ns/op	8413.97 MB/s	1051886943 rows/sec	       0 B/op	       0 allocs/op
+BenchmarkCountInt64EqPayloadOnlyWithNulls-16                             	  182727	      1933 ns/op	8473.92 MB/s	1059385314 rows/sec	       0 B/op	       0 allocs/op
+BenchmarkSumInt64AllValid-16                                             	    3970	     88203 ns/op	1486.03 MB/s	 185754120 rows/sec	    3201 B/op	      25 allocs/op
+BenchmarkSumInt64AllValid-16                                             	    4077	     90394 ns/op	1450.01 MB/s	 181252265 rows/sec	    3201 B/op	      25 allocs/op
+BenchmarkSumInt64Filtered-16                                             	    1788	    237487 ns/op	 551.91 MB/s	  68989292 rows/sec	    4746 B/op	      34 allocs/op
+BenchmarkSumInt64Filtered-16                                             	    1857	    214394 ns/op	 611.36 MB/s	  76420175 rows/sec	    4746 B/op	      34 allocs/op
+BenchmarkSumInt64FilteredDifferentColumn-16                              	     333	   1080238 ns/op	 121.34 MB/s	  15167077 rows/sec	  446144 B/op	      82 allocs/op
+BenchmarkSumInt64FilteredDifferentColumn-16                              	     331	   1186101 ns/op	 110.51 MB/s	  13813377 rows/sec	  446137 B/op	      82 allocs/op
+PASS
+ok  	github.com/kylegrahammatzen/dripsql/internal/storage	15.935s

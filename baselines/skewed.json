@@ -1,0 +1,924 @@
+{
+  "env": {
+    "Commit": "unknown",
+    "Dirty": false,
+    "Go": "go1.26.0",
+    "OS": "windows",
+    "Arch": "amd64",
+    "CPUs": 16
+  },
+  "dir": "C:\\Users\\cland\\AppData\\Local\\Temp\\dripsql-bench-875466189",
+  "profile": "skewed",
+  "rows": 100000,
+  "runs": 5,
+  "load": {
+    "Rows": 100000,
+    "Segments": 1,
+    "Elapsed": 10804700,
+    "GenerateNs": 9201300,
+    "AppendNs": 1603400,
+    "BytesPerRow": 26.05145,
+    "BytesTotal": 2605145
+  },
+  "storage": {
+    "Table": "events",
+    "Rows": 100000,
+    "Segments": 1,
+    "TableBytes": 2661303,
+    "ColumnPayloadBytes": 2605145,
+    "StorageOverhead": 56158,
+    "PlainEstimate": 6400000,
+    "Columns": [
+      {
+        "Name": "tenant_id",
+        "Type": {
+          "Kind": 4,
+          "Name": ""
+        },
+        "Codec": 1,
+        "Rows": 100000,
+        "NullCount": 0,
+        "Pages": 49,
+        "StoredBytes": 800000,
+        "PlainEstimate": 800000,
+        "HasMinMax": true,
+        "HasTextSummary": false
+      },
+      {
+        "Name": "user_id",
+        "Type": {
+          "Kind": 4,
+          "Name": ""
+        },
+        "Codec": 1,
+        "Rows": 100000,
+        "NullCount": 0,
+        "Pages": 49,
+        "StoredBytes": 800000,
+        "PlainEstimate": 800000,
+        "HasMinMax": true,
+        "HasTextSummary": false
+      },
+      {
+        "Name": "amount",
+        "Type": {
+          "Kind": 4,
+          "Name": ""
+        },
+        "Codec": 1,
+        "Rows": 100000,
+        "NullCount": 0,
+        "Pages": 49,
+        "StoredBytes": 800000,
+        "PlainEstimate": 800000,
+        "HasMinMax": true,
+        "HasTextSummary": false
+      },
+      {
+        "Name": "event_type",
+        "Type": {
+          "Kind": 8,
+          "Name": ""
+        },
+        "Codec": 6,
+        "Rows": 100000,
+        "NullCount": 0,
+        "Pages": 49,
+        "StoredBytes": 102499,
+        "PlainEstimate": 2000000,
+        "HasMinMax": false,
+        "HasTextSummary": true
+      },
+      {
+        "Name": "country",
+        "Type": {
+          "Kind": 8,
+          "Name": ""
+        },
+        "Codec": 6,
+        "Rows": 100000,
+        "NullCount": 0,
+        "Pages": 49,
+        "StoredBytes": 102646,
+        "PlainEstimate": 2000000,
+        "HasMinMax": false,
+        "HasTextSummary": true
+      }
+    ]
+  },
+  "queries": [
+    {
+      "query_name": "event checkout for tenant",
+      "sql": "SELECT count(*) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
+      "plan": {
+        "op": "Count",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "tenant_id = 42",
+        "event_type = 'checkout'"
+      ],
+      "access": [
+        {
+          "column": "tenant_id",
+          "decision": "min/max prune"
+        },
+        {
+          "column": "event_type",
+          "decision": "text summary prune"
+        },
+        {
+          "column": "count(*)",
+          "decision": "raw count loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 1,
+        "segments_candidate": 1,
+        "pages_total": 49,
+        "pages_candidate": 49,
+        "rows_total": 100000,
+        "rows_candidate": 100000,
+        "rows_matched": 810
+      },
+      "read": [
+        {
+          "purpose": "predicate payload",
+          "bytes": 902499
+        }
+      ],
+      "not_used": [
+        {
+          "name": "metadata count",
+          "reason": "no exact count for combined predicate"
+        }
+      ],
+      "timing": {
+        "first_ms": 15.9092,
+        "best_ms": 15.9092,
+        "avg_ms": 16.4906,
+        "samples": 5
+      }
+    },
+    {
+      "query_name": "absent tenant",
+      "sql": "SELECT count(*) FROM events WHERE tenant_id = 999999",
+      "plan": {
+        "op": "Count",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "tenant_id = 999999"
+      ],
+      "access": [
+        {
+          "column": "tenant_id",
+          "decision": "segment min/max prune"
+        },
+        {
+          "column": "count(*)",
+          "decision": "raw count loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 1,
+        "segments_candidate": 0,
+        "pages_total": 0,
+        "pages_candidate": 0,
+        "rows_total": 100000,
+        "rows_candidate": 0,
+        "rows_matched": 0
+      },
+      "timing": {
+        "samples": 5
+      }
+    },
+    {
+      "query_name": "checkout amount for tenant",
+      "sql": "SELECT sum(amount) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
+      "plan": {
+        "op": "Sum(amount)",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "tenant_id = 42",
+        "event_type = 'checkout'"
+      ],
+      "access": [
+        {
+          "column": "tenant_id",
+          "decision": "payload loaded for expression filter"
+        },
+        {
+          "column": "event_type",
+          "decision": "payload loaded for expression filter"
+        },
+        {
+          "column": "sum(amount)",
+          "decision": "raw int64 sum loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 1,
+        "segments_candidate": 1,
+        "pages_total": 49,
+        "pages_candidate": 49,
+        "rows_total": 100000,
+        "rows_candidate": 100000,
+        "rows_matched": 810
+      },
+      "read": [
+        {
+          "purpose": "predicate payload",
+          "bytes": 902499
+        },
+        {
+          "purpose": "aggregate payload",
+          "bytes": 800000
+        }
+      ],
+      "timing": {
+        "first_ms": 14.4539,
+        "best_ms": 14.0877,
+        "avg_ms": 14.9308,
+        "samples": 5
+      }
+    },
+    {
+      "query_name": "checkout counts by country",
+      "sql": "SELECT country, count(*) FROM events WHERE event_type = 'checkout' GROUP BY country",
+      "plan": {
+        "op": "Group(country), Count",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "event_type = 'checkout'"
+      ],
+      "access": [
+        {
+          "column": "event_type",
+          "decision": "text summary prune"
+        },
+        {
+          "column": "country",
+          "decision": "text payload grouped"
+        },
+        {
+          "column": "count(*)",
+          "decision": "raw count loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 0,
+        "segments_candidate": 0,
+        "pages_total": 0,
+        "pages_candidate": 0,
+        "rows_total": 0,
+        "rows_candidate": 0,
+        "rows_matched": 49722
+      },
+      "timing": {
+        "first_ms": 8.5809,
+        "best_ms": 8.0656,
+        "avg_ms": 8.56204,
+        "samples": 5
+      }
+    }
+  ]
+}
+{
+  "env": {
+    "Commit": "unknown",
+    "Dirty": false,
+    "Go": "go1.26.0",
+    "OS": "windows",
+    "Arch": "amd64",
+    "CPUs": 16
+  },
+  "dir": "C:\\Users\\cland\\AppData\\Local\\Temp\\dripsql-bench-666040632",
+  "profile": "skewed",
+  "rows": 500000,
+  "runs": 5,
+  "load": {
+    "Rows": 500000,
+    "Segments": 4,
+    "Elapsed": 42240700,
+    "GenerateNs": 39024600,
+    "AppendNs": 3216100,
+    "BytesPerRow": 26.05145,
+    "BytesTotal": 13025725
+  },
+  "storage": {
+    "Table": "events",
+    "Rows": 500000,
+    "Segments": 4,
+    "TableBytes": 13305490,
+    "ColumnPayloadBytes": 13025725,
+    "StorageOverhead": 279765,
+    "PlainEstimate": 32000000,
+    "Columns": [
+      {
+        "Name": "tenant_id",
+        "Type": {
+          "Kind": 4,
+          "Name": ""
+        },
+        "Codec": 1,
+        "Rows": 500000,
+        "NullCount": 0,
+        "Pages": 245,
+        "StoredBytes": 4000000,
+        "PlainEstimate": 4000000,
+        "HasMinMax": true,
+        "HasTextSummary": false
+      },
+      {
+        "Name": "user_id",
+        "Type": {
+          "Kind": 4,
+          "Name": ""
+        },
+        "Codec": 1,
+        "Rows": 500000,
+        "NullCount": 0,
+        "Pages": 245,
+        "StoredBytes": 4000000,
+        "PlainEstimate": 4000000,
+        "HasMinMax": true,
+        "HasTextSummary": false
+      },
+      {
+        "Name": "amount",
+        "Type": {
+          "Kind": 4,
+          "Name": ""
+        },
+        "Codec": 1,
+        "Rows": 500000,
+        "NullCount": 0,
+        "Pages": 245,
+        "StoredBytes": 4000000,
+        "PlainEstimate": 4000000,
+        "HasMinMax": true,
+        "HasTextSummary": false
+      },
+      {
+        "Name": "event_type",
+        "Type": {
+          "Kind": 8,
+          "Name": ""
+        },
+        "Codec": 6,
+        "Rows": 500000,
+        "NullCount": 0,
+        "Pages": 245,
+        "StoredBytes": 512495,
+        "PlainEstimate": 10000000,
+        "HasMinMax": false,
+        "HasTextSummary": true
+      },
+      {
+        "Name": "country",
+        "Type": {
+          "Kind": 8,
+          "Name": ""
+        },
+        "Codec": 6,
+        "Rows": 500000,
+        "NullCount": 0,
+        "Pages": 245,
+        "StoredBytes": 513230,
+        "PlainEstimate": 10000000,
+        "HasMinMax": false,
+        "HasTextSummary": true
+      }
+    ]
+  },
+  "queries": [
+    {
+      "query_name": "event checkout for tenant",
+      "sql": "SELECT count(*) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
+      "plan": {
+        "op": "Count",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "tenant_id = 42",
+        "event_type = 'checkout'"
+      ],
+      "access": [
+        {
+          "column": "tenant_id",
+          "decision": "min/max prune"
+        },
+        {
+          "column": "event_type",
+          "decision": "text summary prune"
+        },
+        {
+          "column": "count(*)",
+          "decision": "raw count loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 4,
+        "segments_candidate": 4,
+        "pages_total": 245,
+        "pages_candidate": 245,
+        "rows_total": 500000,
+        "rows_candidate": 500000,
+        "rows_matched": 4105
+      },
+      "read": [
+        {
+          "purpose": "predicate payload",
+          "bytes": 4512495
+        }
+      ],
+      "not_used": [
+        {
+          "name": "metadata count",
+          "reason": "no exact count for combined predicate"
+        }
+      ],
+      "timing": {
+        "first_ms": 77.4932,
+        "best_ms": 71.6852,
+        "avg_ms": 75.11197999999999,
+        "samples": 5
+      }
+    },
+    {
+      "query_name": "absent tenant",
+      "sql": "SELECT count(*) FROM events WHERE tenant_id = 999999",
+      "plan": {
+        "op": "Count",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "tenant_id = 999999"
+      ],
+      "access": [
+        {
+          "column": "tenant_id",
+          "decision": "segment min/max prune"
+        },
+        {
+          "column": "count(*)",
+          "decision": "raw count loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 4,
+        "segments_candidate": 0,
+        "pages_total": 0,
+        "pages_candidate": 0,
+        "rows_total": 500000,
+        "rows_candidate": 0,
+        "rows_matched": 0
+      },
+      "timing": {
+        "samples": 5
+      }
+    },
+    {
+      "query_name": "checkout amount for tenant",
+      "sql": "SELECT sum(amount) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
+      "plan": {
+        "op": "Sum(amount)",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "tenant_id = 42",
+        "event_type = 'checkout'"
+      ],
+      "access": [
+        {
+          "column": "tenant_id",
+          "decision": "payload loaded for expression filter"
+        },
+        {
+          "column": "event_type",
+          "decision": "payload loaded for expression filter"
+        },
+        {
+          "column": "sum(amount)",
+          "decision": "raw int64 sum loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 4,
+        "segments_candidate": 4,
+        "pages_total": 245,
+        "pages_candidate": 245,
+        "rows_total": 500000,
+        "rows_candidate": 500000,
+        "rows_matched": 4105
+      },
+      "read": [
+        {
+          "purpose": "predicate payload",
+          "bytes": 4512495
+        },
+        {
+          "purpose": "aggregate payload",
+          "bytes": 4000000
+        }
+      ],
+      "timing": {
+        "first_ms": 75.558,
+        "best_ms": 72.4653,
+        "avg_ms": 75.69608000000001,
+        "samples": 5
+      }
+    },
+    {
+      "query_name": "checkout counts by country",
+      "sql": "SELECT country, count(*) FROM events WHERE event_type = 'checkout' GROUP BY country",
+      "plan": {
+        "op": "Group(country), Count",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "event_type = 'checkout'"
+      ],
+      "access": [
+        {
+          "column": "event_type",
+          "decision": "text summary prune"
+        },
+        {
+          "column": "country",
+          "decision": "text payload grouped"
+        },
+        {
+          "column": "count(*)",
+          "decision": "raw count loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 0,
+        "segments_candidate": 0,
+        "pages_total": 0,
+        "pages_candidate": 0,
+        "rows_total": 0,
+        "rows_candidate": 0,
+        "rows_matched": 250097
+      },
+      "timing": {
+        "first_ms": 42.0811,
+        "best_ms": 41.3823,
+        "avg_ms": 42.665440000000004,
+        "samples": 5
+      }
+    }
+  ]
+}
+{
+  "env": {
+    "Commit": "unknown",
+    "Dirty": false,
+    "Go": "go1.26.0",
+    "OS": "windows",
+    "Arch": "amd64",
+    "CPUs": 16
+  },
+  "dir": "C:\\Users\\cland\\AppData\\Local\\Temp\\dripsql-bench-1963643434",
+  "profile": "skewed",
+  "rows": 5000000,
+  "runs": 5,
+  "load": {
+    "Rows": 5000000,
+    "Segments": 39,
+    "Elapsed": 489926300,
+    "GenerateNs": 420297900,
+    "AppendNs": 69628400,
+    "BytesPerRow": 26.051282,
+    "BytesTotal": 130256410
+  },
+  "storage": {
+    "Table": "events",
+    "Rows": 5000000,
+    "Segments": 39,
+    "TableBytes": 133044590,
+    "ColumnPayloadBytes": 130256410,
+    "StorageOverhead": 2788180,
+    "PlainEstimate": 320000000,
+    "Columns": [
+      {
+        "Name": "tenant_id",
+        "Type": {
+          "Kind": 4,
+          "Name": ""
+        },
+        "Codec": 1,
+        "Rows": 5000000,
+        "NullCount": 0,
+        "Pages": 2442,
+        "StoredBytes": 40000000,
+        "PlainEstimate": 40000000,
+        "HasMinMax": true,
+        "HasTextSummary": false
+      },
+      {
+        "Name": "user_id",
+        "Type": {
+          "Kind": 4,
+          "Name": ""
+        },
+        "Codec": 1,
+        "Rows": 5000000,
+        "NullCount": 0,
+        "Pages": 2442,
+        "StoredBytes": 40000000,
+        "PlainEstimate": 40000000,
+        "HasMinMax": true,
+        "HasTextSummary": false
+      },
+      {
+        "Name": "amount",
+        "Type": {
+          "Kind": 4,
+          "Name": ""
+        },
+        "Codec": 1,
+        "Rows": 5000000,
+        "NullCount": 0,
+        "Pages": 2442,
+        "StoredBytes": 40000000,
+        "PlainEstimate": 40000000,
+        "HasMinMax": true,
+        "HasTextSummary": false
+      },
+      {
+        "Name": "event_type",
+        "Type": {
+          "Kind": 8,
+          "Name": ""
+        },
+        "Codec": 6,
+        "Rows": 5000000,
+        "NullCount": 0,
+        "Pages": 2442,
+        "StoredBytes": 5124542,
+        "PlainEstimate": 100000000,
+        "HasMinMax": false,
+        "HasTextSummary": true
+      },
+      {
+        "Name": "country",
+        "Type": {
+          "Kind": 8,
+          "Name": ""
+        },
+        "Codec": 6,
+        "Rows": 5000000,
+        "NullCount": 0,
+        "Pages": 2442,
+        "StoredBytes": 5131868,
+        "PlainEstimate": 100000000,
+        "HasMinMax": false,
+        "HasTextSummary": true
+      }
+    ]
+  },
+  "queries": [
+    {
+      "query_name": "event checkout for tenant",
+      "sql": "SELECT count(*) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
+      "plan": {
+        "op": "Count",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "tenant_id = 42",
+        "event_type = 'checkout'"
+      ],
+      "access": [
+        {
+          "column": "tenant_id",
+          "decision": "min/max prune"
+        },
+        {
+          "column": "event_type",
+          "decision": "text summary prune"
+        },
+        {
+          "column": "count(*)",
+          "decision": "raw count loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 39,
+        "segments_candidate": 39,
+        "pages_total": 2442,
+        "pages_candidate": 2442,
+        "rows_total": 5000000,
+        "rows_candidate": 5000000,
+        "rows_matched": 40129
+      },
+      "read": [
+        {
+          "purpose": "predicate payload",
+          "bytes": 45124542
+        }
+      ],
+      "not_used": [
+        {
+          "name": "metadata count",
+          "reason": "no exact count for combined predicate"
+        }
+      ],
+      "timing": {
+        "first_ms": 839.23,
+        "best_ms": 775.4392,
+        "avg_ms": 808.89654,
+        "samples": 5
+      }
+    },
+    {
+      "query_name": "absent tenant",
+      "sql": "SELECT count(*) FROM events WHERE tenant_id = 999999",
+      "plan": {
+        "op": "Count",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "tenant_id = 999999"
+      ],
+      "access": [
+        {
+          "column": "tenant_id",
+          "decision": "segment min/max prune"
+        },
+        {
+          "column": "count(*)",
+          "decision": "raw count loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 39,
+        "segments_candidate": 0,
+        "pages_total": 0,
+        "pages_candidate": 0,
+        "rows_total": 5000000,
+        "rows_candidate": 0,
+        "rows_matched": 0
+      },
+      "timing": {
+        "samples": 5
+      }
+    },
+    {
+      "query_name": "checkout amount for tenant",
+      "sql": "SELECT sum(amount) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
+      "plan": {
+        "op": "Sum(amount)",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "tenant_id = 42",
+        "event_type = 'checkout'"
+      ],
+      "access": [
+        {
+          "column": "tenant_id",
+          "decision": "payload loaded for expression filter"
+        },
+        {
+          "column": "event_type",
+          "decision": "payload loaded for expression filter"
+        },
+        {
+          "column": "sum(amount)",
+          "decision": "raw int64 sum loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 39,
+        "segments_candidate": 39,
+        "pages_total": 2442,
+        "pages_candidate": 2442,
+        "rows_total": 5000000,
+        "rows_candidate": 5000000,
+        "rows_matched": 40129
+      },
+      "read": [
+        {
+          "purpose": "predicate payload",
+          "bytes": 45124542
+        },
+        {
+          "purpose": "aggregate payload",
+          "bytes": 40000000
+        }
+      ],
+      "timing": {
+        "first_ms": 775.5373,
+        "best_ms": 751.8944,
+        "avg_ms": 797.72568,
+        "samples": 5
+      }
+    },
+    {
+      "query_name": "checkout counts by country",
+      "sql": "SELECT country, count(*) FROM events WHERE event_type = 'checkout' GROUP BY country",
+      "plan": {
+        "op": "Group(country), Count",
+        "children": [
+          {
+            "op": "ReadSegments",
+            "table": "events"
+          }
+        ]
+      },
+      "predicate": [
+        "event_type = 'checkout'"
+      ],
+      "access": [
+        {
+          "column": "event_type",
+          "decision": "text summary prune"
+        },
+        {
+          "column": "country",
+          "decision": "text payload grouped"
+        },
+        {
+          "column": "count(*)",
+          "decision": "raw count loop"
+        }
+      ],
+      "reduction": {
+        "segments_total": 0,
+        "segments_candidate": 0,
+        "pages_total": 0,
+        "pages_candidate": 0,
+        "rows_total": 0,
+        "rows_candidate": 0,
+        "rows_matched": 2500448
+      },
+      "timing": {
+        "first_ms": 474.732,
+        "best_ms": 416.613,
+        "avg_ms": 457.24578,
+        "samples": 5
+      }
+    }
+  ]
+}
