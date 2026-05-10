@@ -12,7 +12,7 @@ will change.
 - `internal/explain` — report types and renderers.
 - `internal/storage` — immutable columnar segments, predicate pushdown.
 - `internal/sql` — parser, binder, logical plan.
-- `internal/{kernel,vector}` — typed kernels and vectors.
+- `internal/types` — table specs, typed batches, and vectors.
 
 ## Tests
 
@@ -22,35 +22,30 @@ go test -count=1 ./...
 
 `-count=1` bypasses Go's test cache so every invocation re-runs.
 
-## Microbenchmarks
+## Performance commands
 
 ```
-go test ./internal/kernel ./internal/storage -run ^$ -bench . -benchmem -benchtime=100ms -count=1
+go test ./internal/storage ./internal/storage/codec ./internal/sql -run ^$ -bench . -benchmem -benchtime=100ms -count=1
 ```
 
 Use longer `-benchtime` and higher `-count` for noisy paths.
 
 ## Workload benchmark
 
-```
-go run ./cmd/bench -rows 100000 -runs 5
-```
+Benchmark usage and workflow are documented in [`cmd/bench/README.md`](cmd/bench/README.md).
 
-Flags:
+### Baseline snapshot (2026-05-10)
 
-- `-rows N[,N...]` — row counts to benchmark.
-- `-runs N` — timing samples per query.
-- `-profile structured|random|skewed` — `structured` rotates a fixed value set, `random` is uniform splitmix64, `skewed` is heavy-tailed (representative of real event analytics).
-- `-emit text|json` — output format; JSON is the input shape for `-baseline`.
-- `-baseline previous.json` — diff this run against a saved JSON report; only deltas above 5% render unless `-show-all` is passed.
-- `-dir <path>` and `-keep` — run against a chosen directory and leave it on disk.
+Hardware: `AMD Ryzen 7 3700X`, `Windows amd64`.
 
-Baseline workflow:
+| Scope | Command / profile | Snapshot metric |
+| --- | --- | --- |
+| Event type count metadata | `go run ./cmd/bench -runs 3 -profile structured` (10,000,000-row point in sweep) | `count(*) WHERE event_type = 'checkout'` best `3.254ms`, avg `3.439ms`, payload `0 B`, result `2,500,000`. |
+| Text summary group scan | `go run ./cmd/bench -runs 3 -profile structured` (10,000,000-row point in sweep) | `event_type, count(*) GROUP BY event_type` best `2.666ms`, avg `2.684ms`, payload `0 B`, result `4` rows. |
+| Grouped text count + sum | `go run ./cmd/bench -runs 5 -profile structured -query "country aggregate summary"` (1,000,000-row point in sweep) | first `51.9ms`, best `8.040ms`, avg `17.3ms`, p95 `51.9ms`, payload `1.82 MiB`. |
+| Multi-aggregate coverage | `go run ./cmd/bench -runs 3 -profile all` (100,000-row point in sweep) | `count(*), sum(amount), min(amount), max(amount)` and `country, count(*), sum(amount) GROUP BY country` now report p95 + fractional bytes/match in output. |
 
-```
-go run ./cmd/bench -rows 100000 -runs 5 -emit json > run-a.json
-go run ./cmd/bench -rows 100000 -runs 5 -baseline run-a.json
-```
+These are baseline reference points, not new benchmark claims.
 
 ## CLI
 

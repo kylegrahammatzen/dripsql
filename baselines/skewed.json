@@ -1,923 +1,2147 @@
 {
   "env": {
-    "Commit": "unknown",
-    "Dirty": false,
-    "Go": "go1.26.0",
-    "OS": "windows",
-    "Arch": "amd64",
-    "CPUs": 16
+    "commit": "unknown",
+    "dirty": false,
+    "go": "go1.26.0",
+    "os": "windows",
+    "arch": "amd64",
+    "cpus": 16
   },
-  "dir": "C:\\Users\\cland\\AppData\\Local\\Temp\\dripsql-bench-875466189",
+  "dir": "C:\\Users\\cland\\AppData\\Local\\Temp\\dripsql-v3-bench-1717243872",
   "profile": "skewed",
   "rows": 100000,
   "runs": 5,
   "load": {
-    "Rows": 100000,
-    "Segments": 1,
-    "Elapsed": 10804700,
-    "GenerateNs": 9201300,
-    "AppendNs": 1603400,
-    "BytesPerRow": 26.05145,
-    "BytesTotal": 2605145
+    "rows": 100000,
+    "elapsed": 71761100,
+    "generate_ns": 8521700,
+    "append_ns": 63239400
   },
   "storage": {
-    "Table": "events",
-    "Rows": 100000,
-    "Segments": 1,
-    "TableBytes": 2661303,
-    "ColumnPayloadBytes": 2605145,
-    "StorageOverhead": 56158,
-    "PlainEstimate": 6400000,
-    "Columns": [
-      {
-        "Name": "tenant_id",
-        "Type": {
-          "Kind": 4,
-          "Name": ""
-        },
-        "Codec": 1,
-        "Rows": 100000,
-        "NullCount": 0,
-        "Pages": 49,
-        "StoredBytes": 800000,
-        "PlainEstimate": 800000,
-        "HasMinMax": true,
-        "HasTextSummary": false
-      },
-      {
-        "Name": "user_id",
-        "Type": {
-          "Kind": 4,
-          "Name": ""
-        },
-        "Codec": 1,
-        "Rows": 100000,
-        "NullCount": 0,
-        "Pages": 49,
-        "StoredBytes": 800000,
-        "PlainEstimate": 800000,
-        "HasMinMax": true,
-        "HasTextSummary": false
-      },
-      {
-        "Name": "amount",
-        "Type": {
-          "Kind": 4,
-          "Name": ""
-        },
-        "Codec": 1,
-        "Rows": 100000,
-        "NullCount": 0,
-        "Pages": 49,
-        "StoredBytes": 800000,
-        "PlainEstimate": 800000,
-        "HasMinMax": true,
-        "HasTextSummary": false
-      },
-      {
-        "Name": "event_type",
-        "Type": {
-          "Kind": 8,
-          "Name": ""
-        },
-        "Codec": 6,
-        "Rows": 100000,
-        "NullCount": 0,
-        "Pages": 49,
-        "StoredBytes": 102499,
-        "PlainEstimate": 2000000,
-        "HasMinMax": false,
-        "HasTextSummary": true
-      },
-      {
-        "Name": "country",
-        "Type": {
-          "Kind": 8,
-          "Name": ""
-        },
-        "Codec": 6,
-        "Rows": 100000,
-        "NullCount": 0,
-        "Pages": 49,
-        "StoredBytes": 102646,
-        "PlainEstimate": 2000000,
-        "HasMinMax": false,
-        "HasTextSummary": true
-      }
-    ]
+    "table": "events",
+    "rows": 100000,
+    "segments": 1,
+    "table_bytes": 786926,
+    "column_payload_bytes": 768968,
+    "storage_overhead_bytes": 17958,
+    "plain_estimate_bytes": 6400000,
+    "column_compression": 8.32284308319722,
+    "table_compression": 8.132912116259979,
+    "bytes_per_row": 7.86926
   },
   "queries": [
     {
       "query_name": "event checkout for tenant",
       "sql": "SELECT count(*) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
-      "plan": {
-        "op": "Count",
-        "children": [
-          {
-            "op": "ReadSegments",
-            "table": "events"
-          }
+      "columns": [
+        "count"
+      ],
+      "values": [
+        [
+          810
         ]
-      },
-      "predicate": [
-        "tenant_id = 42",
-        "event_type = 'checkout'"
       ],
-      "access": [
-        {
-          "column": "tenant_id",
-          "decision": "min/max prune"
-        },
-        {
-          "column": "event_type",
-          "decision": "text summary prune"
-        },
-        {
-          "column": "count(*)",
-          "decision": "raw count loop"
-        }
-      ],
-      "reduction": {
-        "segments_total": 1,
-        "segments_candidate": 1,
-        "pages_total": 49,
-        "pages_candidate": 49,
-        "rows_total": 100000,
-        "rows_candidate": 100000,
-        "rows_matched": 810
-      },
-      "read": [
-        {
-          "purpose": "predicate payload",
-          "bytes": 902499
-        }
-      ],
-      "not_used": [
-        {
-          "name": "metadata count",
-          "reason": "no exact count for combined predicate"
-        }
-      ],
+      "rows": 1,
       "timing": {
-        "first_ms": 15.9092,
-        "best_ms": 15.9092,
-        "avg_ms": 16.4906,
+        "first_ms": 7.4905,
+        "best_ms": 1.5809,
+        "avg_ms": 3.18782,
+        "first_ns": 7490500,
+        "best_ns": 1580900,
+        "avg_ns": 3187820,
         "samples": 5
+      },
+      "explain": {
+        "plan": "Project(count) -\u003e Aggregate(count(*)) -\u003e Filter(tenant_id = 42 AND event_type = 'checkout') -\u003e Scan(events)",
+        "output": {
+          "batches": 1,
+          "rows": 1,
+          "kept": 1
+        },
+        "selectivity": {
+          "matched": 810,
+          "total": 100000,
+          "percent": 0.81,
+          "valid": true
+        },
+        "bytes_per_match": {
+          "bytes": 768968,
+          "rows": 810,
+          "value": 949.3432098765433,
+          "valid": true
+        },
+        "reduction": {
+          "segments": {
+            "scanned": 1,
+            "candidate": 1,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "pages": {
+            "scanned": 49,
+            "candidate": 49,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "rows": {
+            "scanned": 100000,
+            "candidate": 100000,
+            "matched": 810
+          }
+        },
+        "access": [
+          {
+            "name": "tenant_id",
+            "strategy": "min/max prune",
+            "effect": "no effect"
+          },
+          {
+            "name": "event_type",
+            "strategy": "text summary prune",
+            "effect": "no effect"
+          },
+          {
+            "name": "count(*)",
+            "strategy": "raw count loop",
+            "effect": ""
+          }
+        ],
+        "read": {
+          "payload_bytes": 768968,
+          "predicate_payload_bytes": 768968
+        },
+        "timing": {
+          "first_ms": 7.4905,
+          "best_ms": 1.5809,
+          "avg_ms": 3.18782,
+          "first_ns": 7490500,
+          "best_ns": 1580900,
+          "avg_ns": 3187820,
+          "samples": 5
+        }
       }
     },
     {
       "query_name": "absent tenant",
       "sql": "SELECT count(*) FROM events WHERE tenant_id = 999999",
-      "plan": {
-        "op": "Count",
-        "children": [
-          {
-            "op": "ReadSegments",
-            "table": "events"
-          }
+      "columns": [
+        "count"
+      ],
+      "values": [
+        [
+          0
         ]
-      },
-      "predicate": [
-        "tenant_id = 999999"
       ],
-      "access": [
-        {
-          "column": "tenant_id",
-          "decision": "segment min/max prune"
-        },
-        {
-          "column": "count(*)",
-          "decision": "raw count loop"
-        }
-      ],
-      "reduction": {
-        "segments_total": 1,
-        "segments_candidate": 0,
-        "pages_total": 0,
-        "pages_candidate": 0,
-        "rows_total": 100000,
-        "rows_candidate": 0,
-        "rows_matched": 0
-      },
+      "rows": 1,
       "timing": {
+        "first_ms": 0.041764,
+        "best_ms": 0.029416,
+        "avg_ms": 0.034453,
+        "first_ns": 41764,
+        "best_ns": 29416,
+        "avg_ns": 34453,
         "samples": 5
+      },
+      "explain": {
+        "plan": "Project(count) -\u003e Aggregate(count(*)) -\u003e Filter(tenant_id = 999999) -\u003e Scan(events)",
+        "output": {
+          "batches": 1,
+          "rows": 1,
+          "kept": 1
+        },
+        "selectivity": {
+          "matched": 0,
+          "total": 100000,
+          "percent": 0,
+          "valid": true
+        },
+        "bytes_per_match": {
+          "bytes": 0,
+          "rows": 0,
+          "value": 0,
+          "valid": false
+        },
+        "reduction": {
+          "segments": {
+            "scanned": 1,
+            "candidate": 0,
+            "pruned": 1,
+            "pruned_percent": 100
+          },
+          "pages": {
+            "scanned": 49,
+            "candidate": 0,
+            "pruned": 49,
+            "pruned_percent": 100
+          },
+          "rows": {
+            "scanned": 100000,
+            "candidate": 0,
+            "matched": 0
+          }
+        },
+        "access": [
+          {
+            "name": "tenant_id",
+            "strategy": "min/max prune",
+            "effect": "effective"
+          },
+          {
+            "name": "count(*)",
+            "strategy": "raw count loop",
+            "effect": ""
+          }
+        ],
+        "read": {
+          "payload_bytes": 0
+        },
+        "timing": {
+          "first_ms": 0.041764,
+          "best_ms": 0.029416,
+          "avg_ms": 0.034453,
+          "first_ns": 41764,
+          "best_ns": 29416,
+          "avg_ns": 34453,
+          "samples": 5
+        }
       }
     },
     {
       "query_name": "checkout amount for tenant",
       "sql": "SELECT sum(amount) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
-      "plan": {
-        "op": "Sum(amount)",
-        "children": [
-          {
-            "op": "ReadSegments",
-            "table": "events"
-          }
+      "columns": [
+        "sum"
+      ],
+      "values": [
+        [
+          401811
         ]
-      },
-      "predicate": [
-        "tenant_id = 42",
-        "event_type = 'checkout'"
       ],
-      "access": [
-        {
-          "column": "tenant_id",
-          "decision": "payload loaded for expression filter"
-        },
-        {
-          "column": "event_type",
-          "decision": "payload loaded for expression filter"
-        },
-        {
-          "column": "sum(amount)",
-          "decision": "raw int64 sum loop"
-        }
-      ],
-      "reduction": {
-        "segments_total": 1,
-        "segments_candidate": 1,
-        "pages_total": 49,
-        "pages_candidate": 49,
-        "rows_total": 100000,
-        "rows_candidate": 100000,
-        "rows_matched": 810
-      },
-      "read": [
-        {
-          "purpose": "predicate payload",
-          "bytes": 902499
-        },
-        {
-          "purpose": "aggregate payload",
-          "bytes": 800000
-        }
-      ],
+      "rows": 1,
       "timing": {
-        "first_ms": 14.4539,
-        "best_ms": 14.0877,
-        "avg_ms": 14.9308,
+        "first_ms": 1.5754,
+        "best_ms": 1.5754,
+        "avg_ms": 1.9986,
+        "first_ns": 1575400,
+        "best_ns": 1575400,
+        "avg_ns": 1998600,
         "samples": 5
+      },
+      "explain": {
+        "plan": "Project(sum) -\u003e Aggregate(sum(amount)) -\u003e Filter(tenant_id = 42 AND event_type = 'checkout') -\u003e Scan(events)",
+        "output": {
+          "batches": 1,
+          "rows": 1,
+          "kept": 1
+        },
+        "selectivity": {
+          "matched": 810,
+          "total": 100000,
+          "percent": 0.81,
+          "valid": true
+        },
+        "bytes_per_match": {
+          "bytes": 768968,
+          "rows": 810,
+          "value": 949.3432098765433,
+          "valid": true
+        },
+        "reduction": {
+          "segments": {
+            "scanned": 1,
+            "candidate": 1,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "pages": {
+            "scanned": 49,
+            "candidate": 49,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "rows": {
+            "scanned": 100000,
+            "candidate": 100000,
+            "matched": 810
+          }
+        },
+        "access": [
+          {
+            "name": "tenant_id",
+            "strategy": "min/max prune",
+            "effect": "no effect"
+          },
+          {
+            "name": "event_type",
+            "strategy": "text summary prune",
+            "effect": "no effect"
+          },
+          {
+            "name": "sum(amount)",
+            "strategy": "raw sum loop",
+            "effect": ""
+          }
+        ],
+        "read": {
+          "payload_bytes": 768968,
+          "predicate_payload_bytes": 768968
+        },
+        "timing": {
+          "first_ms": 1.5754,
+          "best_ms": 1.5754,
+          "avg_ms": 1.9986,
+          "first_ns": 1575400,
+          "best_ns": 1575400,
+          "avg_ns": 1998600,
+          "samples": 5
+        }
       }
     },
     {
       "query_name": "checkout counts by country",
       "sql": "SELECT country, count(*) FROM events WHERE event_type = 'checkout' GROUP BY country",
-      "plan": {
-        "op": "Group(country), Count",
-        "children": [
-          {
-            "op": "ReadSegments",
-            "table": "events"
-          }
+      "columns": [
+        "country",
+        "count"
+      ],
+      "values": [
+        [
+          "AU",
+          378
+        ],
+        [
+          "AU",
+          378
+        ],
+        [
+          "AU",
+          378
+        ],
+        [
+          "AU",
+          378
+        ],
+        [
+          "AU",
+          378
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "BR",
+          71
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "CA",
+          608
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "DE",
+          272
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "FR",
+          365
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "GB",
+          1146
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "JP",
+          50
+        ],
+        [
+          "US",
+          306
+        ],
+        [
+          "US",
+          306
+        ],
+        [
+          "US",
+          306
+        ],
+        [
+          "US",
+          306
+        ],
+        [
+          "US",
+          306
+        ],
+        [
+          "US",
+          306
+        ],
+        [
+          "US",
+          306
+        ],
+        [
+          "US",
+          306
+        ],
+        [
+          "US",
+          306
+        ],
+        [
+          "US",
+          306
         ]
-      },
-      "predicate": [
-        "event_type = 'checkout'"
       ],
-      "access": [
-        {
-          "column": "event_type",
-          "decision": "text summary prune"
-        },
-        {
-          "column": "country",
-          "decision": "text payload grouped"
-        },
-        {
-          "column": "count(*)",
-          "decision": "raw count loop"
-        }
-      ],
-      "reduction": {
-        "segments_total": 0,
-        "segments_candidate": 0,
-        "pages_total": 0,
-        "pages_candidate": 0,
-        "rows_total": 0,
-        "rows_candidate": 0,
-        "rows_matched": 49722
-      },
+      "rows": 96,
       "timing": {
-        "first_ms": 8.5809,
-        "best_ms": 8.0656,
-        "avg_ms": 8.56204,
+        "first_ms": 2.1124,
+        "best_ms": 1.0308,
+        "avg_ms": 1.88344,
+        "first_ns": 2112400,
+        "best_ns": 1030800,
+        "avg_ns": 1883440,
         "samples": 5
+      },
+      "explain": {
+        "plan": "Project(country, count) -\u003e Aggregate(count(*)) -\u003e Filter(event_type = 'checkout') -\u003e Scan(events)",
+        "output": {
+          "batches": 1,
+          "rows": 96,
+          "kept": 96
+        },
+        "selectivity": {
+          "matched": 49722,
+          "total": 100000,
+          "percent": 49.722,
+          "valid": true
+        },
+        "bytes_per_match": {
+          "bytes": 768968,
+          "rows": 49722,
+          "value": 15.465347331161256,
+          "valid": true
+        },
+        "reduction": {
+          "segments": {
+            "scanned": 1,
+            "candidate": 1,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "pages": {
+            "scanned": 49,
+            "candidate": 49,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "rows": {
+            "scanned": 100000,
+            "candidate": 100000,
+            "matched": 49722
+          }
+        },
+        "access": [
+          {
+            "name": "event_type",
+            "strategy": "text summary prune",
+            "effect": "no effect"
+          },
+          {
+            "name": "group by country",
+            "strategy": "hash group",
+            "effect": "in memory"
+          },
+          {
+            "name": "count(*)",
+            "strategy": "raw count loop",
+            "effect": ""
+          }
+        ],
+        "read": {
+          "payload_bytes": 768968,
+          "predicate_payload_bytes": 768968
+        },
+        "timing": {
+          "first_ms": 2.1124,
+          "best_ms": 1.0308,
+          "avg_ms": 1.88344,
+          "first_ns": 2112400,
+          "best_ns": 1030800,
+          "avg_ns": 1883440,
+          "samples": 5
+        }
       }
     }
   ]
 }
 {
   "env": {
-    "Commit": "unknown",
-    "Dirty": false,
-    "Go": "go1.26.0",
-    "OS": "windows",
-    "Arch": "amd64",
-    "CPUs": 16
+    "commit": "unknown",
+    "dirty": false,
+    "go": "go1.26.0",
+    "os": "windows",
+    "arch": "amd64",
+    "cpus": 16
   },
-  "dir": "C:\\Users\\cland\\AppData\\Local\\Temp\\dripsql-bench-666040632",
+  "dir": "C:\\Users\\cland\\AppData\\Local\\Temp\\dripsql-v3-bench-3802261870",
   "profile": "skewed",
-  "rows": 500000,
+  "rows": 1000000,
   "runs": 5,
   "load": {
-    "Rows": 500000,
-    "Segments": 4,
-    "Elapsed": 42240700,
-    "GenerateNs": 39024600,
-    "AppendNs": 3216100,
-    "BytesPerRow": 26.05145,
-    "BytesTotal": 13025725
+    "rows": 1000000,
+    "elapsed": 615651200,
+    "generate_ns": 71629300,
+    "append_ns": 544021900
   },
   "storage": {
-    "Table": "events",
-    "Rows": 500000,
-    "Segments": 4,
-    "TableBytes": 13305490,
-    "ColumnPayloadBytes": 13025725,
-    "StorageOverhead": 279765,
-    "PlainEstimate": 32000000,
-    "Columns": [
-      {
-        "Name": "tenant_id",
-        "Type": {
-          "Kind": 4,
-          "Name": ""
-        },
-        "Codec": 1,
-        "Rows": 500000,
-        "NullCount": 0,
-        "Pages": 245,
-        "StoredBytes": 4000000,
-        "PlainEstimate": 4000000,
-        "HasMinMax": true,
-        "HasTextSummary": false
-      },
-      {
-        "Name": "user_id",
-        "Type": {
-          "Kind": 4,
-          "Name": ""
-        },
-        "Codec": 1,
-        "Rows": 500000,
-        "NullCount": 0,
-        "Pages": 245,
-        "StoredBytes": 4000000,
-        "PlainEstimate": 4000000,
-        "HasMinMax": true,
-        "HasTextSummary": false
-      },
-      {
-        "Name": "amount",
-        "Type": {
-          "Kind": 4,
-          "Name": ""
-        },
-        "Codec": 1,
-        "Rows": 500000,
-        "NullCount": 0,
-        "Pages": 245,
-        "StoredBytes": 4000000,
-        "PlainEstimate": 4000000,
-        "HasMinMax": true,
-        "HasTextSummary": false
-      },
-      {
-        "Name": "event_type",
-        "Type": {
-          "Kind": 8,
-          "Name": ""
-        },
-        "Codec": 6,
-        "Rows": 500000,
-        "NullCount": 0,
-        "Pages": 245,
-        "StoredBytes": 512495,
-        "PlainEstimate": 10000000,
-        "HasMinMax": false,
-        "HasTextSummary": true
-      },
-      {
-        "Name": "country",
-        "Type": {
-          "Kind": 8,
-          "Name": ""
-        },
-        "Codec": 6,
-        "Rows": 500000,
-        "NullCount": 0,
-        "Pages": 245,
-        "StoredBytes": 513230,
-        "PlainEstimate": 10000000,
-        "HasMinMax": false,
-        "HasTextSummary": true
-      }
-    ]
+    "table": "events",
+    "rows": 1000000,
+    "segments": 8,
+    "table_bytes": 7867938,
+    "column_payload_bytes": 7689548,
+    "storage_overhead_bytes": 178390,
+    "plain_estimate_bytes": 64000000,
+    "column_compression": 8.322985954441016,
+    "table_compression": 8.134278638189574,
+    "bytes_per_row": 7.867938
   },
   "queries": [
     {
       "query_name": "event checkout for tenant",
       "sql": "SELECT count(*) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
-      "plan": {
-        "op": "Count",
-        "children": [
-          {
-            "op": "ReadSegments",
-            "table": "events"
-          }
+      "columns": [
+        "count"
+      ],
+      "values": [
+        [
+          8085
         ]
-      },
-      "predicate": [
-        "tenant_id = 42",
-        "event_type = 'checkout'"
       ],
-      "access": [
-        {
-          "column": "tenant_id",
-          "decision": "min/max prune"
-        },
-        {
-          "column": "event_type",
-          "decision": "text summary prune"
-        },
-        {
-          "column": "count(*)",
-          "decision": "raw count loop"
-        }
-      ],
-      "reduction": {
-        "segments_total": 4,
-        "segments_candidate": 4,
-        "pages_total": 245,
-        "pages_candidate": 245,
-        "rows_total": 500000,
-        "rows_candidate": 500000,
-        "rows_matched": 4105
-      },
-      "read": [
-        {
-          "purpose": "predicate payload",
-          "bytes": 4512495
-        }
-      ],
-      "not_used": [
-        {
-          "name": "metadata count",
-          "reason": "no exact count for combined predicate"
-        }
-      ],
+      "rows": 1,
       "timing": {
-        "first_ms": 77.4932,
-        "best_ms": 71.6852,
-        "avg_ms": 75.11197999999999,
+        "first_ms": 23.4636,
+        "best_ms": 21.0346,
+        "avg_ms": 22.185,
+        "first_ns": 23463600,
+        "best_ns": 21034600,
+        "avg_ns": 22185000,
         "samples": 5
+      },
+      "explain": {
+        "plan": "Project(count) -\u003e Aggregate(count(*)) -\u003e Filter(tenant_id = 42 AND event_type = 'checkout') -\u003e Scan(events)",
+        "output": {
+          "batches": 1,
+          "rows": 1,
+          "kept": 1
+        },
+        "selectivity": {
+          "matched": 8085,
+          "total": 1000000,
+          "percent": 0.8085,
+          "valid": true
+        },
+        "bytes_per_match": {
+          "bytes": 7689548,
+          "rows": 8085,
+          "value": 951.0881880024738,
+          "valid": true
+        },
+        "reduction": {
+          "segments": {
+            "scanned": 8,
+            "candidate": 8,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "pages": {
+            "scanned": 489,
+            "candidate": 489,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "rows": {
+            "scanned": 1000000,
+            "candidate": 1000000,
+            "matched": 8085
+          }
+        },
+        "access": [
+          {
+            "name": "tenant_id",
+            "strategy": "min/max prune",
+            "effect": "no effect"
+          },
+          {
+            "name": "event_type",
+            "strategy": "text summary prune",
+            "effect": "no effect"
+          },
+          {
+            "name": "count(*)",
+            "strategy": "raw count loop",
+            "effect": ""
+          }
+        ],
+        "read": {
+          "payload_bytes": 7689548,
+          "predicate_payload_bytes": 7689548
+        },
+        "timing": {
+          "first_ms": 23.4636,
+          "best_ms": 21.0346,
+          "avg_ms": 22.185,
+          "first_ns": 23463600,
+          "best_ns": 21034600,
+          "avg_ns": 22185000,
+          "samples": 5
+        }
       }
     },
     {
       "query_name": "absent tenant",
       "sql": "SELECT count(*) FROM events WHERE tenant_id = 999999",
-      "plan": {
-        "op": "Count",
-        "children": [
-          {
-            "op": "ReadSegments",
-            "table": "events"
-          }
+      "columns": [
+        "count"
+      ],
+      "values": [
+        [
+          0
         ]
-      },
-      "predicate": [
-        "tenant_id = 999999"
       ],
-      "access": [
-        {
-          "column": "tenant_id",
-          "decision": "segment min/max prune"
-        },
-        {
-          "column": "count(*)",
-          "decision": "raw count loop"
-        }
-      ],
-      "reduction": {
-        "segments_total": 4,
-        "segments_candidate": 0,
-        "pages_total": 0,
-        "pages_candidate": 0,
-        "rows_total": 500000,
-        "rows_candidate": 0,
-        "rows_matched": 0
-      },
+      "rows": 1,
       "timing": {
+        "first_ms": 0.251875,
+        "best_ms": 0.1441,
+        "avg_ms": 0.184728,
+        "first_ns": 251875,
+        "best_ns": 144100,
+        "avg_ns": 184728,
         "samples": 5
+      },
+      "explain": {
+        "plan": "Project(count) -\u003e Aggregate(count(*)) -\u003e Filter(tenant_id = 999999) -\u003e Scan(events)",
+        "output": {
+          "batches": 1,
+          "rows": 1,
+          "kept": 1
+        },
+        "selectivity": {
+          "matched": 0,
+          "total": 1000000,
+          "percent": 0,
+          "valid": true
+        },
+        "bytes_per_match": {
+          "bytes": 0,
+          "rows": 0,
+          "value": 0,
+          "valid": false
+        },
+        "reduction": {
+          "segments": {
+            "scanned": 8,
+            "candidate": 0,
+            "pruned": 8,
+            "pruned_percent": 100
+          },
+          "pages": {
+            "scanned": 489,
+            "candidate": 0,
+            "pruned": 489,
+            "pruned_percent": 100
+          },
+          "rows": {
+            "scanned": 1000000,
+            "candidate": 0,
+            "matched": 0
+          }
+        },
+        "access": [
+          {
+            "name": "tenant_id",
+            "strategy": "min/max prune",
+            "effect": "effective"
+          },
+          {
+            "name": "count(*)",
+            "strategy": "raw count loop",
+            "effect": ""
+          }
+        ],
+        "read": {
+          "payload_bytes": 0
+        },
+        "timing": {
+          "first_ms": 0.251875,
+          "best_ms": 0.1441,
+          "avg_ms": 0.184728,
+          "first_ns": 251875,
+          "best_ns": 144100,
+          "avg_ns": 184728,
+          "samples": 5
+        }
       }
     },
     {
       "query_name": "checkout amount for tenant",
       "sql": "SELECT sum(amount) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
-      "plan": {
-        "op": "Sum(amount)",
-        "children": [
-          {
-            "op": "ReadSegments",
-            "table": "events"
-          }
+      "columns": [
+        "sum"
+      ],
+      "values": [
+        [
+          4004224
         ]
-      },
-      "predicate": [
-        "tenant_id = 42",
-        "event_type = 'checkout'"
       ],
-      "access": [
-        {
-          "column": "tenant_id",
-          "decision": "payload loaded for expression filter"
-        },
-        {
-          "column": "event_type",
-          "decision": "payload loaded for expression filter"
-        },
-        {
-          "column": "sum(amount)",
-          "decision": "raw int64 sum loop"
-        }
-      ],
-      "reduction": {
-        "segments_total": 4,
-        "segments_candidate": 4,
-        "pages_total": 245,
-        "pages_candidate": 245,
-        "rows_total": 500000,
-        "rows_candidate": 500000,
-        "rows_matched": 4105
-      },
-      "read": [
-        {
-          "purpose": "predicate payload",
-          "bytes": 4512495
-        },
-        {
-          "purpose": "aggregate payload",
-          "bytes": 4000000
-        }
-      ],
+      "rows": 1,
       "timing": {
-        "first_ms": 75.558,
-        "best_ms": 72.4653,
-        "avg_ms": 75.69608000000001,
+        "first_ms": 19.8524,
+        "best_ms": 19.6485,
+        "avg_ms": 20.36556,
+        "first_ns": 19852400,
+        "best_ns": 19648500,
+        "avg_ns": 20365560,
         "samples": 5
+      },
+      "explain": {
+        "plan": "Project(sum) -\u003e Aggregate(sum(amount)) -\u003e Filter(tenant_id = 42 AND event_type = 'checkout') -\u003e Scan(events)",
+        "output": {
+          "batches": 1,
+          "rows": 1,
+          "kept": 1
+        },
+        "selectivity": {
+          "matched": 8085,
+          "total": 1000000,
+          "percent": 0.8085,
+          "valid": true
+        },
+        "bytes_per_match": {
+          "bytes": 7689548,
+          "rows": 8085,
+          "value": 951.0881880024738,
+          "valid": true
+        },
+        "reduction": {
+          "segments": {
+            "scanned": 8,
+            "candidate": 8,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "pages": {
+            "scanned": 489,
+            "candidate": 489,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "rows": {
+            "scanned": 1000000,
+            "candidate": 1000000,
+            "matched": 8085
+          }
+        },
+        "access": [
+          {
+            "name": "tenant_id",
+            "strategy": "min/max prune",
+            "effect": "no effect"
+          },
+          {
+            "name": "event_type",
+            "strategy": "text summary prune",
+            "effect": "no effect"
+          },
+          {
+            "name": "sum(amount)",
+            "strategy": "raw sum loop",
+            "effect": ""
+          }
+        ],
+        "read": {
+          "payload_bytes": 7689548,
+          "predicate_payload_bytes": 7689548
+        },
+        "timing": {
+          "first_ms": 19.8524,
+          "best_ms": 19.6485,
+          "avg_ms": 20.36556,
+          "first_ns": 19852400,
+          "best_ns": 19648500,
+          "avg_ns": 20365560,
+          "samples": 5
+        }
       }
     },
     {
       "query_name": "checkout counts by country",
       "sql": "SELECT country, count(*) FROM events WHERE event_type = 'checkout' GROUP BY country",
-      "plan": {
-        "op": "Group(country), Count",
-        "children": [
-          {
-            "op": "ReadSegments",
-            "table": "events"
-          }
+      "columns": [
+        "country",
+        "count"
+      ],
+      "values": [
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "AU",
+          284
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "BR",
+          3409
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "CA",
+          3127
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "DE",
+          572
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "FR",
+          3843
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "GB",
+          601
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "JP",
+          1221
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
+        ],
+        [
+          "US",
+          6095
         ]
-      },
-      "predicate": [
-        "event_type = 'checkout'"
       ],
-      "access": [
-        {
-          "column": "event_type",
-          "decision": "text summary prune"
-        },
-        {
-          "column": "country",
-          "decision": "text payload grouped"
-        },
-        {
-          "column": "count(*)",
-          "decision": "raw count loop"
-        }
-      ],
-      "reduction": {
-        "segments_total": 0,
-        "segments_candidate": 0,
-        "pages_total": 0,
-        "pages_candidate": 0,
-        "rows_total": 0,
-        "rows_candidate": 0,
-        "rows_matched": 250097
-      },
+      "rows": 246,
       "timing": {
-        "first_ms": 42.0811,
-        "best_ms": 41.3823,
-        "avg_ms": 42.665440000000004,
+        "first_ms": 20.2483,
+        "best_ms": 19.6295,
+        "avg_ms": 20.62562,
+        "first_ns": 20248300,
+        "best_ns": 19629500,
+        "avg_ns": 20625620,
         "samples": 5
-      }
-    }
-  ]
-}
-{
-  "env": {
-    "Commit": "unknown",
-    "Dirty": false,
-    "Go": "go1.26.0",
-    "OS": "windows",
-    "Arch": "amd64",
-    "CPUs": 16
-  },
-  "dir": "C:\\Users\\cland\\AppData\\Local\\Temp\\dripsql-bench-1963643434",
-  "profile": "skewed",
-  "rows": 5000000,
-  "runs": 5,
-  "load": {
-    "Rows": 5000000,
-    "Segments": 39,
-    "Elapsed": 489926300,
-    "GenerateNs": 420297900,
-    "AppendNs": 69628400,
-    "BytesPerRow": 26.051282,
-    "BytesTotal": 130256410
-  },
-  "storage": {
-    "Table": "events",
-    "Rows": 5000000,
-    "Segments": 39,
-    "TableBytes": 133044590,
-    "ColumnPayloadBytes": 130256410,
-    "StorageOverhead": 2788180,
-    "PlainEstimate": 320000000,
-    "Columns": [
-      {
-        "Name": "tenant_id",
-        "Type": {
-          "Kind": 4,
-          "Name": ""
-        },
-        "Codec": 1,
-        "Rows": 5000000,
-        "NullCount": 0,
-        "Pages": 2442,
-        "StoredBytes": 40000000,
-        "PlainEstimate": 40000000,
-        "HasMinMax": true,
-        "HasTextSummary": false
       },
-      {
-        "Name": "user_id",
-        "Type": {
-          "Kind": 4,
-          "Name": ""
+      "explain": {
+        "plan": "Project(country, count) -\u003e Aggregate(count(*)) -\u003e Filter(event_type = 'checkout') -\u003e Scan(events)",
+        "output": {
+          "batches": 1,
+          "rows": 246,
+          "kept": 246
         },
-        "Codec": 1,
-        "Rows": 5000000,
-        "NullCount": 0,
-        "Pages": 2442,
-        "StoredBytes": 40000000,
-        "PlainEstimate": 40000000,
-        "HasMinMax": true,
-        "HasTextSummary": false
-      },
-      {
-        "Name": "amount",
-        "Type": {
-          "Kind": 4,
-          "Name": ""
+        "selectivity": {
+          "matched": 499922,
+          "total": 1000000,
+          "percent": 49.9922,
+          "valid": true
         },
-        "Codec": 1,
-        "Rows": 5000000,
-        "NullCount": 0,
-        "Pages": 2442,
-        "StoredBytes": 40000000,
-        "PlainEstimate": 40000000,
-        "HasMinMax": true,
-        "HasTextSummary": false
-      },
-      {
-        "Name": "event_type",
-        "Type": {
-          "Kind": 8,
-          "Name": ""
+        "bytes_per_match": {
+          "bytes": 7689548,
+          "rows": 499922,
+          "value": 15.381495513300075,
+          "valid": true
         },
-        "Codec": 6,
-        "Rows": 5000000,
-        "NullCount": 0,
-        "Pages": 2442,
-        "StoredBytes": 5124542,
-        "PlainEstimate": 100000000,
-        "HasMinMax": false,
-        "HasTextSummary": true
-      },
-      {
-        "Name": "country",
-        "Type": {
-          "Kind": 8,
-          "Name": ""
-        },
-        "Codec": 6,
-        "Rows": 5000000,
-        "NullCount": 0,
-        "Pages": 2442,
-        "StoredBytes": 5131868,
-        "PlainEstimate": 100000000,
-        "HasMinMax": false,
-        "HasTextSummary": true
-      }
-    ]
-  },
-  "queries": [
-    {
-      "query_name": "event checkout for tenant",
-      "sql": "SELECT count(*) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
-      "plan": {
-        "op": "Count",
-        "children": [
-          {
-            "op": "ReadSegments",
-            "table": "events"
+        "reduction": {
+          "segments": {
+            "scanned": 8,
+            "candidate": 8,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "pages": {
+            "scanned": 489,
+            "candidate": 489,
+            "pruned": 0,
+            "pruned_percent": 0
+          },
+          "rows": {
+            "scanned": 1000000,
+            "candidate": 1000000,
+            "matched": 499922
           }
-        ]
-      },
-      "predicate": [
-        "tenant_id = 42",
-        "event_type = 'checkout'"
-      ],
-      "access": [
-        {
-          "column": "tenant_id",
-          "decision": "min/max prune"
         },
-        {
-          "column": "event_type",
-          "decision": "text summary prune"
-        },
-        {
-          "column": "count(*)",
-          "decision": "raw count loop"
-        }
-      ],
-      "reduction": {
-        "segments_total": 39,
-        "segments_candidate": 39,
-        "pages_total": 2442,
-        "pages_candidate": 2442,
-        "rows_total": 5000000,
-        "rows_candidate": 5000000,
-        "rows_matched": 40129
-      },
-      "read": [
-        {
-          "purpose": "predicate payload",
-          "bytes": 45124542
-        }
-      ],
-      "not_used": [
-        {
-          "name": "metadata count",
-          "reason": "no exact count for combined predicate"
-        }
-      ],
-      "timing": {
-        "first_ms": 839.23,
-        "best_ms": 775.4392,
-        "avg_ms": 808.89654,
-        "samples": 5
-      }
-    },
-    {
-      "query_name": "absent tenant",
-      "sql": "SELECT count(*) FROM events WHERE tenant_id = 999999",
-      "plan": {
-        "op": "Count",
-        "children": [
+        "access": [
           {
-            "op": "ReadSegments",
-            "table": "events"
-          }
-        ]
-      },
-      "predicate": [
-        "tenant_id = 999999"
-      ],
-      "access": [
-        {
-          "column": "tenant_id",
-          "decision": "segment min/max prune"
-        },
-        {
-          "column": "count(*)",
-          "decision": "raw count loop"
-        }
-      ],
-      "reduction": {
-        "segments_total": 39,
-        "segments_candidate": 0,
-        "pages_total": 0,
-        "pages_candidate": 0,
-        "rows_total": 5000000,
-        "rows_candidate": 0,
-        "rows_matched": 0
-      },
-      "timing": {
-        "samples": 5
-      }
-    },
-    {
-      "query_name": "checkout amount for tenant",
-      "sql": "SELECT sum(amount) FROM events WHERE tenant_id = 42 AND event_type = 'checkout'",
-      "plan": {
-        "op": "Sum(amount)",
-        "children": [
+            "name": "event_type",
+            "strategy": "text summary prune",
+            "effect": "no effect"
+          },
           {
-            "op": "ReadSegments",
-            "table": "events"
-          }
-        ]
-      },
-      "predicate": [
-        "tenant_id = 42",
-        "event_type = 'checkout'"
-      ],
-      "access": [
-        {
-          "column": "tenant_id",
-          "decision": "payload loaded for expression filter"
-        },
-        {
-          "column": "event_type",
-          "decision": "payload loaded for expression filter"
-        },
-        {
-          "column": "sum(amount)",
-          "decision": "raw int64 sum loop"
-        }
-      ],
-      "reduction": {
-        "segments_total": 39,
-        "segments_candidate": 39,
-        "pages_total": 2442,
-        "pages_candidate": 2442,
-        "rows_total": 5000000,
-        "rows_candidate": 5000000,
-        "rows_matched": 40129
-      },
-      "read": [
-        {
-          "purpose": "predicate payload",
-          "bytes": 45124542
-        },
-        {
-          "purpose": "aggregate payload",
-          "bytes": 40000000
-        }
-      ],
-      "timing": {
-        "first_ms": 775.5373,
-        "best_ms": 751.8944,
-        "avg_ms": 797.72568,
-        "samples": 5
-      }
-    },
-    {
-      "query_name": "checkout counts by country",
-      "sql": "SELECT country, count(*) FROM events WHERE event_type = 'checkout' GROUP BY country",
-      "plan": {
-        "op": "Group(country), Count",
-        "children": [
+            "name": "group by country",
+            "strategy": "hash group",
+            "effect": "in memory"
+          },
           {
-            "op": "ReadSegments",
-            "table": "events"
+            "name": "count(*)",
+            "strategy": "raw count loop",
+            "effect": ""
           }
-        ]
-      },
-      "predicate": [
-        "event_type = 'checkout'"
-      ],
-      "access": [
-        {
-          "column": "event_type",
-          "decision": "text summary prune"
+        ],
+        "read": {
+          "payload_bytes": 7689548,
+          "predicate_payload_bytes": 7689548
         },
-        {
-          "column": "country",
-          "decision": "text payload grouped"
-        },
-        {
-          "column": "count(*)",
-          "decision": "raw count loop"
+        "timing": {
+          "first_ms": 20.2483,
+          "best_ms": 19.6295,
+          "avg_ms": 20.62562,
+          "first_ns": 20248300,
+          "best_ns": 19629500,
+          "avg_ns": 20625620,
+          "samples": 5
         }
-      ],
-      "reduction": {
-        "segments_total": 0,
-        "segments_candidate": 0,
-        "pages_total": 0,
-        "pages_candidate": 0,
-        "rows_total": 0,
-        "rows_candidate": 0,
-        "rows_matched": 2500448
-      },
-      "timing": {
-        "first_ms": 474.732,
-        "best_ms": 416.613,
-        "avg_ms": 457.24578,
-        "samples": 5
       }
     }
   ]
