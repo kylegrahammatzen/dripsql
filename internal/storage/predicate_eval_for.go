@@ -6,7 +6,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-func evalFORBitPackLeafBound(v types.Vec, pred boundPredicate, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalFORBitPackLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) int {
 	switch pred.op {
 	case PredicateOpEq:
 		return evalFORBitPackEq(v, pred.int64Value, false, input, out)

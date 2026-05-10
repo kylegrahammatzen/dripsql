@@ -220,36 +220,21 @@ func BenchmarkPredicateTextInFlatLarge(b *testing.B) {
 	predicateBenchSink = sink
 }
 
-func BenchmarkPredicatePruneBoundVsUnbound(b *testing.B) {
+func BenchmarkPredicatePruneBound(b *testing.B) {
 	meta := benchmarkPruneMeta(16, 256)
 	pred := Predicate{Column: "col_15", Op: PredicateOpBetween, Lo: 1000, Hi: 1400}
 	plan := BindPrunePredicate(pred, meta)
-	b.Run("unbound", func(b *testing.B) {
-		var sink int
-		b.ReportAllocs()
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			for page := range meta.Columns[0].Pages {
-				if segmentPageCandidate(meta, page, pred) {
-					sink++
-				}
+	var sink int
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for page := range meta.Columns[0].Pages {
+			if plan.PageCandidate(meta, page) {
+				sink++
 			}
 		}
-		predicateBenchSink = sink
-	})
-	b.Run("bound", func(b *testing.B) {
-		var sink int
-		b.ReportAllocs()
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			for page := range meta.Columns[0].Pages {
-				if plan.PageCandidate(meta, page) {
-					sink++
-				}
-			}
-		}
-		predicateBenchSink = sink
-	})
+	}
+	predicateBenchSink = sink
 }
 
 func benchmarkTextBatch(tb testing.TB, enc types.Encoding) types.Batch {

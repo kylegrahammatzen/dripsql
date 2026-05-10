@@ -2,17 +2,17 @@ package storage
 
 import (
 	"fmt"
+	"math/bits"
 	"slices"
 
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-type BoundPredicateEvaluator struct {
-	root    boundPredicate
-	columns []string
-}
-
-type boundPredicate struct {
+// boundNode is the shared predicate tree for row evaluation and segment pruning.
+// colIndex points to the bound column source: batch.Columns for eval, meta.Columns
+// for pruning. A negative leaf colIndex means the column is missing: eval fails
+// at bind time, while pruning treats it as possibly matching.
+type boundNode struct {
 	op       PredicateOp
 	colIndex int
 
@@ -26,7 +26,7 @@ type boundPredicate struct {
 	intSet  int64Matcher
 	textSet textMatcher
 
-	children []boundPredicate
+	children []boundNode
 }
 
 type boolMatcher struct {
@@ -44,8 +44,79 @@ type textMatcher struct {
 	large map[string]struct{}
 }
 
+type PredicateEvaluator interface {
+	RequiredColumns() []string
+	Eval(batch types.Batch, sel *types.SelectionMask) (int, error)
+	EvalSelected(batch types.Batch, input types.SelectionMask, sel *types.SelectionMask) (int, error)
+}
+
+type predicateEvaluator struct {
+	pred    Predicate
+	columns []string
+	bound   BoundPredicateEvaluator
+	schema  []string
+	boundOK bool
+}
+
+func NewPredicateEvaluator(pred Predicate) PredicateEvaluator {
+	return &predicateEvaluator{pred: pred, columns: PredicateColumns(pred)}
+}
+
+func (e *predicateEvaluator) RequiredColumns() []string {
+	return e.columns
+}
+
+func (e *predicateEvaluator) Eval(batch types.Batch, sel *types.SelectionMask) (int, error) {
+	if sel == nil {
+		return 0, fmt.Errorf("selection mask is nil")
+	}
+	bound, err := e.boundForBatch(batch)
+	if err != nil {
+		return 0, err
+	}
+	return bound.Eval(batch, sel)
+}
+
+func (e *predicateEvaluator) EvalSelected(batch types.Batch, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
+	if sel == nil {
+		return 0, fmt.Errorf("selection mask is nil")
+	}
+	if input.Rows != batch.Len {
+		return 0, fmt.Errorf("selection rows %d do not match batch length %d", input.Rows, batch.Len)
+	}
+	if selectionAliases(input, *sel) {
+		copyInput := types.NewSelectionMask(input.Rows)
+		copy(copyInput.Words, input.Words)
+		input = copyInput
+	}
+	bound, err := e.boundForBatch(batch)
+	if err != nil {
+		return 0, err
+	}
+	return bound.EvalSelected(batch, input, sel)
+}
+
+func (e *predicateEvaluator) boundForBatch(batch types.Batch) (BoundPredicateEvaluator, error) {
+	if e.boundOK && sameBatchSchema(e.schema, batch) {
+		return e.bound, nil
+	}
+	bound, err := BindPredicate(e.pred, batch)
+	if err != nil {
+		return BoundPredicateEvaluator{}, err
+	}
+	e.bound = bound
+	e.schema = batchSchema(e.schema[:0], batch)
+	e.boundOK = true
+	return bound, nil
+}
+
+type BoundPredicateEvaluator struct {
+	root    boundNode
+	columns []string
+}
+
 func BindPredicate(pred Predicate, batch types.Batch) (BoundPredicateEvaluator, error) {
-	root, err := bindPredicateNode(pred, batch)
+	root, err := bindEvalNode(pred, batch)
 	if err != nil {
 		return BoundPredicateEvaluator{}, err
 	}
@@ -60,7 +131,7 @@ func (e BoundPredicateEvaluator) Eval(batch types.Batch, sel *types.SelectionMas
 	if sel == nil {
 		return 0, fmt.Errorf("selection mask is nil")
 	}
-	return evalBoundPredicateInto(batch, e.root, sel)
+	return evalBoundInto(batch, e.root, sel)
 }
 
 func (e BoundPredicateEvaluator) EvalSelected(batch types.Batch, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
@@ -75,11 +146,11 @@ func (e BoundPredicateEvaluator) EvalSelected(batch types.Batch, input types.Sel
 		copy(copyInput.Words, input.Words)
 		input = copyInput
 	}
-	return evalBoundPredicateSelectedInto(batch, e.root, input, sel)
+	return evalBoundSelectedInto(batch, e.root, input, sel)
 }
 
-func bindPredicateNode(pred Predicate, batch types.Batch) (boundPredicate, error) {
-	node := boundPredicate{
+func bindEvalNode(pred Predicate, batch types.Batch) (boundNode, error) {
+	node := boundNode{
 		op:         pred.Op,
 		colIndex:   -1,
 		boolValue:  pred.Bool,
@@ -95,11 +166,11 @@ func bindPredicateNode(pred Predicate, batch types.Batch) (boundPredicate, error
 	case PredicateNone:
 		return node, nil
 	case PredicateAnd, PredicateOr, PredicateNot:
-		node.children = make([]boundPredicate, len(pred.Children))
+		node.children = make([]boundNode, len(pred.Children))
 		for i, child := range pred.Children {
-			boundChild, err := bindPredicateNode(child, batch)
+			boundChild, err := bindEvalNode(child, batch)
 			if err != nil {
-				return boundPredicate{}, err
+				return boundNode{}, err
 			}
 			node.children[i] = boundChild
 		}
@@ -107,14 +178,14 @@ func bindPredicateNode(pred Predicate, batch types.Batch) (boundPredicate, error
 	default:
 		colIndex, ok := columnIndexByName(batch, pred.Column)
 		if !ok {
-			return boundPredicate{}, fmt.Errorf("missing predicate column %q", pred.Column)
+			return boundNode{}, fmt.Errorf("missing predicate column %q", pred.Column)
 		}
 		node.colIndex = colIndex
 		return node, nil
 	}
 }
 
-func evalBoundPredicateInto(batch types.Batch, pred boundPredicate, sel *types.SelectionMask) (int, error) {
+func evalBoundInto(batch types.Batch, pred boundNode, sel *types.SelectionMask) (int, error) {
 	switch pred.op {
 	case PredicateNone:
 		sel.Resize(batch.Len)
@@ -123,14 +194,14 @@ func evalBoundPredicateInto(batch types.Batch, pred boundPredicate, sel *types.S
 		if len(pred.children) == 0 {
 			return 0, fmt.Errorf("AND predicate requires children")
 		}
-		matched, err := evalBoundPredicateInto(batch, pred.children[0], sel)
+		matched, err := evalBoundInto(batch, pred.children[0], sel)
 		if err != nil || matched == 0 {
 			return matched, err
 		}
 		var scratchWords [selectionScratchWords]uint64
 		scratch := scratchSelectionMask(batch.Len, &scratchWords)
 		for _, child := range pred.children[1:] {
-			if _, err := evalBoundPredicateInto(batch, child, &scratch); err != nil {
+			if _, err := evalBoundInto(batch, child, &scratch); err != nil {
 				return 0, err
 			}
 			matched = sel.AndCount(scratch)
@@ -143,14 +214,14 @@ func evalBoundPredicateInto(batch types.Batch, pred boundPredicate, sel *types.S
 		if len(pred.children) == 0 {
 			return 0, fmt.Errorf("OR predicate requires children")
 		}
-		matched, err := evalBoundPredicateInto(batch, pred.children[0], sel)
+		matched, err := evalBoundInto(batch, pred.children[0], sel)
 		if err != nil || matched == batch.Len {
 			return matched, err
 		}
 		var scratchWords [selectionScratchWords]uint64
 		scratch := scratchSelectionMask(batch.Len, &scratchWords)
 		for _, child := range pred.children[1:] {
-			if _, err := evalBoundPredicateInto(batch, child, &scratch); err != nil {
+			if _, err := evalBoundInto(batch, child, &scratch); err != nil {
 				return 0, err
 			}
 			matched = sel.OrCount(scratch)
@@ -163,16 +234,16 @@ func evalBoundPredicateInto(batch types.Batch, pred boundPredicate, sel *types.S
 		if len(pred.children) != 1 {
 			return 0, fmt.Errorf("NOT predicate requires one child")
 		}
-		if _, err := evalBoundPredicateInto(batch, pred.children[0], sel); err != nil {
+		if _, err := evalBoundInto(batch, pred.children[0], sel); err != nil {
 			return 0, err
 		}
 		return sel.NotCount(), nil
 	default:
-		return evalBoundLeafInto(batch, pred, sel)
+		return evalLeafInto(batch, pred, sel)
 	}
 }
 
-func evalBoundPredicateSelectedInto(batch types.Batch, pred boundPredicate, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
+func evalBoundSelectedInto(batch types.Batch, pred boundNode, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
 	switch pred.op {
 	case PredicateNone:
 		return copySelectionInto(sel, input), nil
@@ -180,14 +251,14 @@ func evalBoundPredicateSelectedInto(batch types.Batch, pred boundPredicate, inpu
 		if len(pred.children) == 0 {
 			return 0, fmt.Errorf("AND predicate requires children")
 		}
-		matched, err := evalBoundPredicateSelectedInto(batch, pred.children[0], input, sel)
+		matched, err := evalBoundSelectedInto(batch, pred.children[0], input, sel)
 		if err != nil || matched == 0 {
 			return matched, err
 		}
 		var scratchWords [selectionScratchWords]uint64
 		scratch := scratchSelectionMask(batch.Len, &scratchWords)
 		for _, child := range pred.children[1:] {
-			matched, err = evalBoundPredicateSelectedInto(batch, child, *sel, &scratch)
+			matched, err = evalBoundSelectedInto(batch, child, *sel, &scratch)
 			if err != nil || matched == 0 {
 				return matched, err
 			}
@@ -199,14 +270,14 @@ func evalBoundPredicateSelectedInto(batch types.Batch, pred boundPredicate, inpu
 			return 0, fmt.Errorf("OR predicate requires children")
 		}
 		inputCount := input.PopCount()
-		matched, err := evalBoundPredicateSelectedInto(batch, pred.children[0], input, sel)
+		matched, err := evalBoundSelectedInto(batch, pred.children[0], input, sel)
 		if err != nil || matched == inputCount {
 			return matched, err
 		}
 		var scratchWords [selectionScratchWords]uint64
 		scratch := scratchSelectionMask(batch.Len, &scratchWords)
 		for _, child := range pred.children[1:] {
-			if _, err := evalBoundPredicateSelectedInto(batch, child, input, &scratch); err != nil {
+			if _, err := evalBoundSelectedInto(batch, child, input, &scratch); err != nil {
 				return 0, err
 			}
 			matched = sel.OrCount(scratch)
@@ -221,50 +292,12 @@ func evalBoundPredicateSelectedInto(batch types.Batch, pred boundPredicate, inpu
 		}
 		var scratchWords [selectionScratchWords]uint64
 		scratch := scratchSelectionMask(batch.Len, &scratchWords)
-		if _, err := evalBoundPredicateSelectedInto(batch, pred.children[0], input, &scratch); err != nil {
+		if _, err := evalBoundSelectedInto(batch, pred.children[0], input, &scratch); err != nil {
 			return 0, err
 		}
 		return andNotSelectionInto(sel, input, scratch), nil
 	default:
-		return evalBoundLeafSelectedInto(batch, pred, input, sel)
-	}
-}
-
-func evalBoundLeafInto(batch types.Batch, pred boundPredicate, mask *types.SelectionMask) (int, error) {
-	col := batch.Columns[pred.colIndex]
-	mask.Resize(batch.Len)
-	switch col.V.Kind {
-	case types.VecBool:
-		return evalBoolLeafBound(col.V, pred, nil, mask), nil
-	case types.VecInt16:
-		return evalIntLeafBound(col.V, col.V.I16, pred, nil, mask), nil
-	case types.VecInt32, types.VecDate:
-		return evalIntLeafBound(col.V, col.V.I32, pred, nil, mask), nil
-	case types.VecInt64, types.VecTimestamp, types.VecTime:
-		return evalIntLeafBound(col.V, col.V.I64, pred, nil, mask), nil
-	case types.VecText, types.VecBytes:
-		return evalTextLeafBound(col.V, pred, nil, mask)
-	default:
-		return 0, fmt.Errorf("predicate unsupported vector kind %s", col.V.Kind)
-	}
-}
-
-func evalBoundLeafSelectedInto(batch types.Batch, pred boundPredicate, input types.SelectionMask, mask *types.SelectionMask) (int, error) {
-	col := batch.Columns[pred.colIndex]
-	mask.Resize(batch.Len)
-	switch col.V.Kind {
-	case types.VecBool:
-		return evalBoolLeafBound(col.V, pred, &input, mask), nil
-	case types.VecInt16:
-		return evalIntLeafBound(col.V, col.V.I16, pred, &input, mask), nil
-	case types.VecInt32, types.VecDate:
-		return evalIntLeafBound(col.V, col.V.I32, pred, &input, mask), nil
-	case types.VecInt64, types.VecTimestamp, types.VecTime:
-		return evalIntLeafBound(col.V, col.V.I64, pred, &input, mask), nil
-	case types.VecText, types.VecBytes:
-		return evalTextLeafBound(col.V, pred, &input, mask)
-	default:
-		return 0, fmt.Errorf("predicate unsupported vector kind %s", col.V.Kind)
+		return evalLeafSelectedInto(batch, pred, input, sel)
 	}
 }
 
@@ -352,24 +385,125 @@ func (m textMatcher) Has(value string) bool {
 	return false
 }
 
-func (m textMatcher) AnyHashIn(hashes []uint16) bool {
+func (m textMatcher) AnyHashIn(hashes []uint32) bool {
 	if len(hashes) == 0 {
 		return true
 	}
 	if m.large != nil {
 		for value := range m.large {
-			if _, ok := slices.BinarySearch(hashes, textHash16String(value)); ok {
+			if _, ok := slices.BinarySearch(hashes, textHash32String(value)); ok {
 				return true
 			}
 		}
 		return false
 	}
 	for _, value := range m.small {
-		if _, ok := slices.BinarySearch(hashes, textHash16String(value)); ok {
+		if _, ok := slices.BinarySearch(hashes, textHash32String(value)); ok {
 			return true
 		}
 	}
 	return false
+}
+
+func (m textMatcher) AnyInBloom(bloom []uint64) bool {
+	if len(bloom) == 0 {
+		return true
+	}
+	if m.large != nil {
+		for value := range m.large {
+			if textHashBloomHas(bloom, value) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, value := range m.small {
+		if textHashBloomHas(bloom, value) {
+			return true
+		}
+	}
+	return false
+}
+
+const selectionScratchWords = (types.StandardBatchRows + 63) / 64
+
+func scratchSelectionMask(rows int, words *[selectionScratchWords]uint64) types.SelectionMask {
+	wordCount := types.ValidityWords(rows)
+	if wordCount > len(words) {
+		return types.NewSelectionMask(rows)
+	}
+	return types.SelectionMask{Words: words[:wordCount], Rows: rows}
+}
+
+func copySelectionInto(dst *types.SelectionMask, src types.SelectionMask) int {
+	if selectionAliases(src, *dst) {
+		return src.PopCount()
+	}
+	dst.Resize(src.Rows)
+	copy(dst.Words, src.Words)
+	return dst.PopCount()
+}
+
+func copySelectionWords(dst *types.SelectionMask, src types.SelectionMask) {
+	dst.Resize(src.Rows)
+	copy(dst.Words, src.Words)
+}
+
+func selectValidRows(valid types.Validity, rows int, input *types.SelectionMask, out *types.SelectionMask) int {
+	if input == nil {
+		if valid == nil {
+			return out.FillAll()
+		}
+		matched := 0
+		for row := 0; row < rows; row++ {
+			if types.IsValid(valid, row) {
+				out.SetUnsafe(row)
+				matched++
+			}
+		}
+		return matched
+	}
+	if valid == nil {
+		return copySelectionInto(out, *input)
+	}
+	matched := 0
+	input.IterSet(func(row int) {
+		if types.IsValid(valid, row) {
+			out.SetUnsafe(row)
+			matched++
+		}
+	})
+	return matched
+}
+
+func andNotSelectionInto(dst *types.SelectionMask, left types.SelectionMask, right types.SelectionMask) int {
+	leftRows := left.Rows
+	dst.Resize(leftRows)
+	if leftRows == 0 {
+		return 0
+	}
+	last := len(left.Words) - 1
+	count := 0
+	for i := range left.Words {
+		word := left.Words[i] &^ right.Words[i]
+		if i == last {
+			word &= predicateTailMask(leftRows)
+		}
+		dst.Words[i] = word
+		count += bits.OnesCount64(word)
+	}
+	return count
+}
+
+func selectionAliases(left types.SelectionMask, right types.SelectionMask) bool {
+	return len(left.Words) != 0 && len(right.Words) != 0 && &left.Words[0] == &right.Words[0]
+}
+
+func predicateTailMask(rows int) uint64 {
+	if rem := rows & 63; rem != 0 {
+		return (uint64(1) << uint(rem)) - 1
+	}
+	return ^uint64(0)
 }
 
 func sameBatchSchema(schema []string, batch types.Batch) bool {
@@ -402,4 +536,13 @@ func columnIndexByName(batch types.Batch, name string) (int, bool) {
 		}
 	}
 	return -1, false
+}
+
+func dictTextID(values types.VarBytes, value string) (uint8, bool) {
+	for row := 0; row < values.Rows(); row++ {
+		if values.String(row) == value {
+			return uint8(row), true
+		}
+	}
+	return 0, false
 }
