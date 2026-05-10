@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sync"
 
@@ -113,6 +114,7 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 		colMeta := &meta.Columns[i]
 		colMeta.AllValid = colMeta.NullCount == 0
 		colMeta.AllNull = colMeta.NullCount == colMeta.Rows
+		finalizeColumnTextHashes(colMeta)
 	}
 	footer, err := marshalSegmentMeta(meta)
 	if err != nil {
@@ -210,7 +212,7 @@ func ReadSegmentFooter(path string) (SegmentMeta, error) {
 	footerLen := binary.LittleEndian.Uint64(tail[:8])
 	dataEnd := info.Size() - int64(len(tail))
 	footerCapacity := dataEnd - int64(len(segmentMagic))
-	if footerCapacity < 0 || footerLen > uint64(footerCapacity) || footerLen > uint64(maxInt()) {
+	if footerCapacity < 0 || footerLen > uint64(footerCapacity) || footerLen > uint64(math.MaxInt) {
 		return SegmentMeta{}, fmt.Errorf("segment %q has invalid footer length", path)
 	}
 	footerStart := dataEnd - int64(footerLen)
@@ -219,11 +221,6 @@ func ReadSegmentFooter(path string) (SegmentMeta, error) {
 		return SegmentMeta{}, err
 	}
 	return unmarshalSegmentMeta(footer)
-}
-
-func encodeSegmentPage(v types.Vec) (codec.Page, error) {
-	page, _, err := encodeSegmentPageInto(v, nil)
-	return page, err
 }
 
 func encodeSegmentPageInto(v types.Vec, scratch []byte) (codec.Page, []byte, error) {
@@ -518,16 +515,29 @@ func (r *segmentMetaReader) readTextStats() *TextStats {
 	if r.err != nil {
 		return nil
 	}
-	if uint64(hashCount) > uint64(r.r.Len()/2) {
+	if uint64(hashCount) > uint64(r.r.Len()/4) {
 		r.err = io.ErrUnexpectedEOF
 		return nil
 	}
-	if hashCount == 0 {
-		return out
+	if hashCount != 0 {
+		out.Hashes = make([]uint32, 0, int(hashCount))
 	}
-	out.Hashes = make([]uint16, 0, int(hashCount))
 	for i := uint32(0); i < hashCount; i++ {
-		out.Hashes = append(out.Hashes, r.readU16())
+		out.Hashes = append(out.Hashes, r.readU32())
+	}
+	bloomCount := r.readU32()
+	if r.err != nil {
+		return nil
+	}
+	if uint64(bloomCount) > uint64(r.r.Len()/8) {
+		r.err = io.ErrUnexpectedEOF
+		return nil
+	}
+	if bloomCount != 0 {
+		out.HashBloom = make([]uint64, 0, int(bloomCount))
+		for i := uint32(0); i < bloomCount; i++ {
+			out.HashBloom = append(out.HashBloom, r.readU64())
+		}
 	}
 	if r.err != nil {
 		return nil
@@ -574,18 +584,6 @@ func (r *segmentMetaReader) readU32() uint32 {
 		return 0
 	}
 	return binary.LittleEndian.Uint32(buf[:])
-}
-
-func (r *segmentMetaReader) readU16() uint16 {
-	if r.err != nil {
-		return 0
-	}
-	var buf [2]byte
-	if _, err := io.ReadFull(r.r, buf[:]); err != nil {
-		r.err = err
-		return 0
-	}
-	return binary.LittleEndian.Uint16(buf[:])
 }
 
 func (r *segmentMetaReader) readU64() uint64 {
@@ -685,7 +683,11 @@ func writeTextStats(w io.Writer, stats *TextStats) {
 	}
 	writeU32(w, uint32(len(stats.Hashes)))
 	for _, hash := range stats.Hashes {
-		writeU16(w, hash)
+		writeU32(w, hash)
+	}
+	writeU32(w, uint32(len(stats.HashBloom)))
+	for _, word := range stats.HashBloom {
+		writeU64(w, word)
 	}
 }
 
@@ -700,18 +702,9 @@ func writeU32(w io.Writer, value uint32) {
 	_, _ = w.Write(buf[:])
 }
 
-func writeU16(w io.Writer, value uint16) {
-	var buf [2]byte
-	binary.LittleEndian.PutUint16(buf[:], value)
-	_, _ = w.Write(buf[:])
-}
-
 func writeU64(w io.Writer, value uint64) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], value)
 	_, _ = w.Write(buf[:])
 }
 
-func maxInt() int {
-	return int(^uint(0) >> 1)
-}

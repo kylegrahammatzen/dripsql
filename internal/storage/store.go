@@ -22,25 +22,29 @@ type Store struct {
 }
 
 type tableState struct {
-	spec          types.TableSpec
-	dir           string
-	appendMu      sync.Mutex
-	mu            sync.RWMutex
-	segments      []storedSegment
-	nextSegmentID SegmentID
-	buffer        *IngestBuffer
-	sealMu        sync.Mutex
-	sealCond      *sync.Cond
-	sealQueue     []sealJob
-	sealPending   int
-	sealRunning   bool
-	sealClosed    bool
-	sealErr       error
+	spec           types.TableSpec
+	dir            string
+	appendMu       sync.Mutex
+	mu             sync.RWMutex
+	segments       []storedSegment
+	nextSegmentID  SegmentID
+	buffer         *IngestBuffer
+	sealMu         sync.Mutex
+	sealCond       *sync.Cond
+	sealQueue      []sealJob
+	sealPending    int
+	sealRunning    int
+	sealNextCommit SegmentID
+	sealClosed     bool
+	sealErr        error
 }
 
 type sealJob struct {
+	id      SegmentID
 	batches []types.Batch
 }
+
+const asyncSealWorkers = 2
 
 type storedSegment struct {
 	path      string
@@ -110,16 +114,11 @@ func (s *Store) AppendBatch(ctx context.Context, table types.TableSpec, batch ty
 }
 
 func (s *Store) AppendBatches(ctx context.Context, table types.TableSpec, batches []types.Batch) (SegmentMeta, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return SegmentMeta{}, err
-	}
 	if err := validateStoreBatches(table, batches); err != nil {
 		return SegmentMeta{}, err
 	}
-	if err := s.beginOp(); err != nil {
+	ctx, err := s.startOp(ctx)
+	if err != nil {
 		return SegmentMeta{}, err
 	}
 	defer s.endOp()
@@ -140,11 +139,26 @@ func (s *Store) appendBatchesToState(ctx context.Context, state *tableState, bat
 	if err := ctx.Err(); err != nil {
 		return SegmentMeta{}, err
 	}
+	id := reserveSegmentID(state)
+	meta, err := s.appendBatchesToStateWithID(ctx, state, id, batches)
+	if err != nil {
+		finishSegmentCommitTurn(state, id)
+	}
+	return meta, err
+}
+
+func reserveSegmentID(state *tableState) SegmentID {
 	state.mu.Lock()
 	id := state.nextSegmentID
 	state.nextSegmentID++
 	state.mu.Unlock()
+	return id
+}
 
+func (s *Store) appendBatchesToStateWithID(ctx context.Context, state *tableState, id SegmentID, batches []types.Batch) (SegmentMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return SegmentMeta{}, err
+	}
 	relPath := filepath.Join("segments", fmt.Sprintf("%016d.dsv3", id))
 	finalPath := filepath.Join(state.dir, relPath)
 	tmpPath := finalPath + ".tmp"
@@ -152,6 +166,16 @@ func (s *Store) appendBatchesToState(ctx context.Context, state *tableState, bat
 	if err != nil {
 		return SegmentMeta{}, err
 	}
+	if err := waitForSegmentCommitTurn(state, id); err != nil {
+		_ = os.Remove(tmpPath)
+		return SegmentMeta{}, err
+	}
+	committed := false
+	defer func() {
+		if committed {
+			finishSegmentCommitTurn(state, id)
+		}
+	}()
 	if err := os.Rename(tmpPath, finalPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return SegmentMeta{}, err
@@ -170,7 +194,26 @@ func (s *Store) appendBatchesToState(ctx context.Context, state *tableState, bat
 	state.mu.Lock()
 	state.segments = append(state.segments, segment)
 	state.mu.Unlock()
+	committed = true
 	return meta, nil
+}
+
+func waitForSegmentCommitTurn(state *tableState, id SegmentID) error {
+	state.sealMu.Lock()
+	defer state.sealMu.Unlock()
+	for state.sealErr == nil && state.sealNextCommit != id {
+		state.sealCond.Wait()
+	}
+	return state.sealErr
+}
+
+func finishSegmentCommitTurn(state *tableState, id SegmentID) {
+	state.sealMu.Lock()
+	if state.sealNextCommit == id {
+		state.sealNextCommit++
+	}
+	state.sealCond.Broadcast()
+	state.sealMu.Unlock()
 }
 
 // populateStoredSegmentCache fills size + pageInfos so ScanSegments can return
@@ -211,13 +254,8 @@ func (s *Store) AppendBufferedOwned(ctx context.Context, table types.TableSpec, 
 }
 
 func (s *Store) appendBuffered(ctx context.Context, table types.TableSpec, batch types.Batch, clone bool) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := s.beginOp(); err != nil {
+	ctx, err := s.startOp(ctx)
+	if err != nil {
 		return err
 	}
 	defer s.endOp()
@@ -253,13 +291,8 @@ func (s *Store) appendBuffered(ctx context.Context, table types.TableSpec, batch
 }
 
 func (s *Store) FlushBuffered(ctx context.Context, table types.TableSpec) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := s.beginOp(); err != nil {
+	ctx, err := s.startOp(ctx)
+	if err != nil {
 		return err
 	}
 	defer s.endOp()
@@ -274,13 +307,8 @@ func (s *Store) FlushBuffered(ctx context.Context, table types.TableSpec) error 
 }
 
 func (s *Store) FlushAllBuffered(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := s.beginOp(); err != nil {
+	ctx, err := s.startOp(ctx)
+	if err != nil {
 		return err
 	}
 	defer s.endOp()
@@ -288,13 +316,7 @@ func (s *Store) FlushAllBuffered(ctx context.Context) error {
 }
 
 func (s *Store) flushAllBufferedLocked(ctx context.Context) error {
-	s.mu.RLock()
-	states := make([]*tableState, 0, len(s.tables))
-	for _, state := range s.tables {
-		states = append(states, state)
-	}
-	s.mu.RUnlock()
-	for _, state := range states {
+	for _, state := range s.snapshotTables() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -323,13 +345,8 @@ func (s *Store) flushStateBuffer(ctx context.Context, state *tableState) (Segmen
 }
 
 func (s *Store) ScanSegments(ctx context.Context, table types.TableSpec) ([]ScanSegment, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := s.beginOp(); err != nil {
+	ctx, err := s.startOp(ctx)
+	if err != nil {
 		return nil, err
 	}
 	defer s.endOp()
@@ -427,7 +444,8 @@ func (s *Store) ensureTableState(table types.TableSpec, create bool) (*tableStat
 	if err != nil {
 		return nil, err
 	}
-	state = &tableState{spec: table, dir: dir, segments: segments, nextSegmentID: nextSegmentID(segments)}
+	nextID := nextSegmentID(segments)
+	state = &tableState{spec: table, dir: dir, segments: segments, nextSegmentID: nextID, sealNextCommit: nextID}
 	state.sealCond = sync.NewCond(&state.sealMu)
 	s.tables[key] = state
 	return state, nil
@@ -448,13 +466,16 @@ func (s *Store) queueStateBufferSeal(ctx context.Context, state *tableState) err
 	if state.sealClosed {
 		return fmt.Errorf("storage table sealer is closed")
 	}
-	if !state.sealRunning {
-		state.sealRunning = true
-		go s.runAsyncSealer(state)
+	id := reserveSegmentID(state)
+	if state.sealRunning == 0 {
+		state.sealRunning = sealWorkerCount()
+		for range state.sealRunning {
+			go s.runAsyncSealer(state)
+		}
 	}
-	state.sealQueue = append(state.sealQueue, sealJob{batches: state.buffer.detach()})
+	state.sealQueue = append(state.sealQueue, sealJob{id: id, batches: state.buffer.detach()})
 	state.sealPending++
-	state.sealCond.Signal()
+	state.sealCond.Broadcast()
 	return nil
 }
 
@@ -465,7 +486,7 @@ func (s *Store) runAsyncSealer(state *tableState) {
 			state.sealCond.Wait()
 		}
 		if len(state.sealQueue) == 0 || state.sealErr != nil {
-			state.sealRunning = false
+			state.sealRunning--
 			state.sealCond.Broadcast()
 			state.sealMu.Unlock()
 			return
@@ -476,7 +497,7 @@ func (s *Store) runAsyncSealer(state *tableState) {
 		state.sealQueue = state.sealQueue[:len(state.sealQueue)-1]
 		state.sealMu.Unlock()
 
-		_, err := s.appendBatchesToState(context.Background(), state, job.batches)
+		_, err := s.appendBatchesToStateWithID(context.Background(), state, job.id, job.batches)
 
 		state.sealMu.Lock()
 		if err != nil && state.sealErr == nil {
@@ -513,14 +534,8 @@ func (s *Store) asyncSealError(state *tableState) error {
 }
 
 func (s *Store) stopAllAsyncSealers() error {
-	s.mu.RLock()
-	states := make([]*tableState, 0, len(s.tables))
-	for _, state := range s.tables {
-		states = append(states, state)
-	}
-	s.mu.RUnlock()
 	var firstErr error
-	for _, state := range states {
+	for _, state := range s.snapshotTables() {
 		if err := stopAsyncSealer(state); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -533,10 +548,33 @@ func stopAsyncSealer(state *tableState) error {
 	defer state.sealMu.Unlock()
 	state.sealClosed = true
 	state.sealCond.Broadcast()
-	for state.sealRunning {
+	for state.sealRunning > 0 {
 		state.sealCond.Wait()
 	}
 	return state.sealErr
+}
+
+func sealWorkerCount() int {
+	if runtime.GOMAXPROCS(0) <= 1 {
+		return 1
+	}
+	return asyncSealWorkers
+}
+
+// startOp resolves a nil context to Background, checks for cancellation, and
+// takes the close-read lock so the store can't shut down mid-operation. The
+// caller MUST defer s.endOp() on success to release that lock.
+func (s *Store) startOp(ctx context.Context) (context.Context, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.beginOp(); err != nil {
+		return nil, err
+	}
+	return ctx, nil
 }
 
 func (s *Store) beginOp() error {
@@ -556,6 +594,19 @@ func (s *Store) beginOp() error {
 
 func (s *Store) endOp() {
 	s.closeMu.RUnlock()
+}
+
+// snapshotTables returns a stable slice of table states under the store
+// read-lock. Callers can iterate without holding the lock since the slice
+// holds pointers to states that have their own internal locking.
+func (s *Store) snapshotTables() []*tableState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	states := make([]*tableState, 0, len(s.tables))
+	for _, state := range s.tables {
+		states = append(states, state)
+	}
+	return states
 }
 
 func validateStoreBatches(table types.TableSpec, batches []types.Batch) error {

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"math"
 	"os"
 
 	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
@@ -282,20 +283,12 @@ func (p *SegmentReadPlan) shouldReadEncoded(columnIndex int, pageIndex int) bool
 }
 
 func ReadColumnPage(path string, meta SegmentMeta, columnIndex int, pageIndex int) (types.Column, error) {
-	return readColumnPage(path, meta, columnIndex, pageIndex, nil)
-}
-
-func readColumnPage(path string, meta SegmentMeta, columnIndex int, pageIndex int, cache *segmentFileCache) (types.Column, error) {
-	return readColumnPageWithSize(path, meta, columnIndex, pageIndex, 0, cache)
-}
-
-func readColumnPageWithSize(path string, meta SegmentMeta, columnIndex int, pageIndex int, segmentSize int64, cache *segmentFileCache) (types.Column, error) {
-	file, closeFile, err := openSegmentFile(path, cache)
+	file, closeFile, err := openSegmentFile(path, nil)
 	if err != nil {
 		return types.Column{}, err
 	}
 	defer closeFile()
-	col, _, err := readColumnPageFromFile(file, meta, columnIndex, pageIndex, segmentSize, nil)
+	col, _, err := readColumnPageFromFileInto(file, meta, columnIndex, pageIndex, 0, nil, nil)
 	return col, err
 }
 
@@ -314,32 +307,39 @@ func openSegmentFile(path string, cache *segmentFileCache) (*os.File, func(), er
 	return file, func() { _ = file.Close() }, nil
 }
 
-func readColumnPageFromFile(file *os.File, meta SegmentMeta, columnIndex int, pageIndex int, segmentSize int64, scratch []byte) (types.Column, []byte, error) {
-	return readColumnPageFromFileInto(file, meta, columnIndex, pageIndex, segmentSize, scratch, nil)
-}
-
-func readColumnPageFromFileInto(file *os.File, meta SegmentMeta, columnIndex int, pageIndex int, segmentSize int64, scratch []byte, dst *types.Vec) (types.Column, []byte, error) {
+// resolveColumnPage validates the file/index/size triple and resolves the
+// column+page metadata used by both the in-place and encoded-passthrough
+// readers. Returning the segment size lets the caller fill it in lazily via
+// Stat() when the writer didn't pre-cache it.
+func resolveColumnPage(file *os.File, meta SegmentMeta, columnIndex int, pageIndex int, segmentSize int64) (ColumnMeta, PageMeta, int64, error) {
 	if file == nil {
-		return types.Column{}, scratch, fmt.Errorf("segment file is nil")
+		return ColumnMeta{}, PageMeta{}, 0, fmt.Errorf("segment file is nil")
 	}
 	if columnIndex < 0 || columnIndex >= len(meta.Columns) {
-		return types.Column{}, scratch, fmt.Errorf("column index %d out of range", columnIndex)
+		return ColumnMeta{}, PageMeta{}, 0, fmt.Errorf("column index %d out of range", columnIndex)
 	}
 	colMeta := meta.Columns[columnIndex]
 	if pageIndex < 0 || pageIndex >= len(colMeta.Pages) {
-		return types.Column{}, scratch, fmt.Errorf("page index %d out of range", pageIndex)
+		return ColumnMeta{}, PageMeta{}, 0, fmt.Errorf("page index %d out of range", pageIndex)
 	}
 	if segmentSize < 0 {
-		return types.Column{}, scratch, fmt.Errorf("segment size is negative")
+		return ColumnMeta{}, PageMeta{}, 0, fmt.Errorf("segment size is negative")
 	}
 	if segmentSize == 0 {
 		info, err := file.Stat()
 		if err != nil {
-			return types.Column{}, scratch, err
+			return ColumnMeta{}, PageMeta{}, 0, err
 		}
 		segmentSize = info.Size()
 	}
-	pageMeta := colMeta.Pages[pageIndex]
+	return colMeta, colMeta.Pages[pageIndex], segmentSize, nil
+}
+
+func readColumnPageFromFileInto(file *os.File, meta SegmentMeta, columnIndex int, pageIndex int, segmentSize int64, scratch []byte, dst *types.Vec) (types.Column, []byte, error) {
+	colMeta, pageMeta, segmentSize, err := resolveColumnPage(file, meta, columnIndex, pageIndex, segmentSize)
+	if err != nil {
+		return types.Column{}, scratch, err
+	}
 	payload, scratch, err := readPagePayload(file, pageMeta, segmentSize, scratch)
 	if err != nil {
 		return types.Column{}, scratch, fmt.Errorf("page %d for column %q: %w", pageIndex, colMeta.Name, err)
@@ -352,27 +352,10 @@ func readColumnPageFromFileInto(file *os.File, meta SegmentMeta, columnIndex int
 }
 
 func readEncodedColumnPageFromFile(file *os.File, meta SegmentMeta, columnIndex int, pageIndex int, segmentSize int64, scratch []byte) (types.Column, []byte, error) {
-	if file == nil {
-		return types.Column{}, scratch, fmt.Errorf("segment file is nil")
+	colMeta, pageMeta, segmentSize, err := resolveColumnPage(file, meta, columnIndex, pageIndex, segmentSize)
+	if err != nil {
+		return types.Column{}, scratch, err
 	}
-	if columnIndex < 0 || columnIndex >= len(meta.Columns) {
-		return types.Column{}, scratch, fmt.Errorf("column index %d out of range", columnIndex)
-	}
-	colMeta := meta.Columns[columnIndex]
-	if pageIndex < 0 || pageIndex >= len(colMeta.Pages) {
-		return types.Column{}, scratch, fmt.Errorf("page index %d out of range", pageIndex)
-	}
-	if segmentSize < 0 {
-		return types.Column{}, scratch, fmt.Errorf("segment size is negative")
-	}
-	if segmentSize == 0 {
-		info, err := file.Stat()
-		if err != nil {
-			return types.Column{}, scratch, err
-		}
-		segmentSize = info.Size()
-	}
-	pageMeta := colMeta.Pages[pageIndex]
 	payload, scratch, err := readPagePayload(file, pageMeta, segmentSize, scratch)
 	if err != nil {
 		return types.Column{}, scratch, fmt.Errorf("page %d for column %q: %w", pageIndex, colMeta.Name, err)
@@ -448,10 +431,6 @@ func readPagePayload(file *os.File, page PageMeta, segmentSize int64, scratch []
 	return payload, scratch, nil
 }
 
-func decodeColumnPage(colMeta ColumnMeta, pageMeta PageMeta, payload []byte) (types.Column, error) {
-	return decodeColumnPageInto(colMeta, pageMeta, payload, nil)
-}
-
 func decodeColumnPageInto(colMeta ColumnMeta, pageMeta PageMeta, payload []byte, dst *types.Vec) (types.Column, error) {
 	c, err := pageCodec(pageMeta.Encoding)
 	if err != nil {
@@ -502,11 +481,10 @@ func pageCodec(enc types.Encoding) (codec.Codec, error) {
 }
 
 func pageReadOffset(page PageMeta) (int64, error) {
-	const maxReadOffset = uint64(^uint64(0) >> 1)
-	if page.Length > uint64(maxInt()) {
+	if page.Length > uint64(math.MaxInt) {
 		return 0, fmt.Errorf("payload size exceeds int capacity")
 	}
-	if page.Offset > maxReadOffset || page.Length > maxReadOffset-page.Offset {
+	if page.Offset > math.MaxInt64 || page.Length > math.MaxInt64-page.Offset {
 		return 0, fmt.Errorf("offset exceeds int64 capacity")
 	}
 	return int64(page.Offset), nil
@@ -563,42 +541,40 @@ func buildSegmentPageInfos(meta SegmentMeta, indexes []int) ([]SegmentPageInfo, 
 		infos[pageIndex].RowStart = page.RowStart
 		infos[pageIndex].Rows = page.Rows
 	}
-
+	walk := func(colIndex int) error {
+		if colIndex < 0 || colIndex >= len(meta.Columns) {
+			return fmt.Errorf("column index %d out of range", colIndex)
+		}
+		col := meta.Columns[colIndex]
+		if len(col.Pages) != len(infos) {
+			return fmt.Errorf("column %q page count %d does not match %d", col.Name, len(col.Pages), len(infos))
+		}
+		for pageIndex, page := range col.Pages {
+			info := &infos[pageIndex]
+			if page.RowStart != info.RowStart || page.Rows != info.Rows {
+				return fmt.Errorf("page %d column %q row range mismatch", pageIndex, col.Name)
+			}
+			if page.Length > uint64(math.MaxInt-info.PayloadBytes) {
+				return fmt.Errorf("page %d payload size exceeds int capacity", pageIndex)
+			}
+			info.PayloadBytes += int(page.Length)
+		}
+		return nil
+	}
 	if indexes == nil {
 		for colIndex := range meta.Columns {
-			if err := addColumnPageInfos(meta, colIndex, infos); err != nil {
+			if err := walk(colIndex); err != nil {
 				return nil, err
 			}
 		}
 		return infos, nil
 	}
 	for _, colIndex := range indexes {
-		if err := addColumnPageInfos(meta, colIndex, infos); err != nil {
+		if err := walk(colIndex); err != nil {
 			return nil, err
 		}
 	}
 	return infos, nil
-}
-
-func addColumnPageInfos(meta SegmentMeta, colIndex int, infos []SegmentPageInfo) error {
-	if colIndex < 0 || colIndex >= len(meta.Columns) {
-		return fmt.Errorf("column index %d out of range", colIndex)
-	}
-	col := meta.Columns[colIndex]
-	if len(col.Pages) != len(infos) {
-		return fmt.Errorf("column %q page count %d does not match %d", col.Name, len(col.Pages), len(infos))
-	}
-	for pageIndex, page := range col.Pages {
-		info := &infos[pageIndex]
-		if page.RowStart != info.RowStart || page.Rows != info.Rows {
-			return fmt.Errorf("page %d column %q row range mismatch", pageIndex, col.Name)
-		}
-		if page.Length > uint64(maxInt()-info.PayloadBytes) {
-			return fmt.Errorf("page %d payload size exceeds int capacity", pageIndex)
-		}
-		info.PayloadBytes += int(page.Length)
-	}
-	return nil
 }
 
 func segmentPageCount(meta SegmentMeta) (int, error) {

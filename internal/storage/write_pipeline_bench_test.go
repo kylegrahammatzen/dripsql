@@ -92,9 +92,9 @@ func BenchmarkStorageDecodePage(b *testing.B) {
 			var sink types.Batch
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				col, err := decodeColumnPage(colMeta, pageMeta, page.Payload)
+				col, err := decodeColumnPageInto(colMeta, pageMeta, page.Payload, nil)
 				if err != nil {
-					b.Fatalf("decodeColumnPage: %v", err)
+					b.Fatalf("decodeColumnPageInto: %v", err)
 				}
 				sink, err = types.NewBatchNoClone([]types.Column{col})
 				if err != nil {

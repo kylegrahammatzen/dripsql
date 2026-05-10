@@ -32,8 +32,7 @@ func BenchmarkSegmentScanIteratorMemoryPredicate(b *testing.B) {
 				return nil
 			}
 			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				if err := it.ForEach(visit); err != nil {
 					b.Fatal(err)
 				}
@@ -65,8 +64,7 @@ func BenchmarkSegmentScanIteratorPrunedMiss(b *testing.B) {
 		return nil
 	}
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if err := it.ForEach(visit); err != nil {
 			b.Fatal(err)
 		}
@@ -114,8 +112,7 @@ func BenchmarkSegmentScanIteratorPersistedPredicate(b *testing.B) {
 			}
 			sink = 0
 			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				if err := it.ForEach(visit); err != nil {
 					b.Fatal(err)
 				}

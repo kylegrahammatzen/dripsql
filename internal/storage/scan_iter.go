@@ -34,37 +34,53 @@ type SegmentScanIterator struct {
 	prunePlans           []PredicatePrunePlan
 	pruneReady           []bool
 	sel                  types.SelectionMask
+
+	// Derived metadata cached on first ForEach so the per-page hot paths
+	// don't reallocate column slices/maps each iteration.
+	metaReady          bool
+	late               bool
+	predicateColumns   []string
+	missingOutputCols  []string
+	readColumns        []string
+	encodedReadCols    map[string]struct{}
+	encodedPredCols    map[string]struct{}
 }
 
 func (it *SegmentScanIterator) ForEach(visit func(types.Batch, types.SelectionMask) error) error {
+	it.ensureMeta()
+	pred := it.Predicate
+	stats := it.Stats
 	ctx := it.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	sel := &it.sel
+	late := it.late
+
 	for segmentIndex := range it.Segments {
 		segment := &it.Segments[segmentIndex]
-		if err := ctx.Err(); err != nil {
-			return err
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
 		if len(segment.Pages) != 0 || segment.Path == "" {
-			it.Stats.ObserveSegment(true)
+			stats.ObserveSegment(true)
 			for _, page := range segment.Pages {
-				if err := ctx.Err(); err != nil {
-					return err
+				if ctx != nil {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
 				}
 				matched := page.Batch.Len
-				if it.Predicate == nil {
+				if pred == nil {
 					sel.Resize(page.Batch.Len)
 					matched = sel.FillAll()
 				} else {
 					var err error
-					matched, err = it.Predicate.Eval(page.Batch, sel)
+					matched, err = pred.Eval(page.Batch, sel)
 					if err != nil {
 						return err
 					}
 				}
-				it.Stats.ObservePage(page.Batch.Len, page.PayloadBytes, matched, true)
+				stats.ObservePage(page.Batch.Len, page.PayloadBytes, matched, true)
 				if matched == 0 {
 					continue
 				}
@@ -76,29 +92,35 @@ func (it *SegmentScanIterator) ForEach(visit func(types.Batch, types.SelectionMa
 		}
 		prunePlan := it.segmentPrunePlan(segmentIndex, segment.Meta)
 		if !prunePlan.SegmentCandidate(segment.Meta) {
-			it.Stats.ObserveSegment(false)
-			if err := it.observeSkippedSegment(segment); err != nil {
-				return err
+			// Skip page-level accounting entirely when stats are off — the whole
+			// point of segment pruning is to bail before touching pages.
+			if stats != nil {
+				stats.ObserveSegment(false)
+				if err := it.observeSkippedSegment(segment); err != nil {
+					return err
+				}
 			}
 			continue
 		}
-		it.Stats.ObserveSegment(true)
+		stats.ObserveSegment(true)
 		plan, err := it.segmentReadPlan(segmentIndex, segment)
 		if err != nil {
 			return err
 		}
-		if it.usesLateMaterialization() {
+		if late {
 			if err := it.forEachLateMaterialized(ctx, segmentIndex, segment, plan, prunePlan, sel, visit); err != nil {
 				return err
 			}
 			continue
 		}
 		for pageIndex, info := range plan.PageInfos {
-			if err := ctx.Err(); err != nil {
-				return err
+			if ctx != nil {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 			}
 			if !prunePlan.PageCandidate(segment.Meta, pageIndex) {
-				it.Stats.ObservePage(int(info.Rows), 0, 0, false)
+				stats.ObservePage(int(info.Rows), 0, 0, false)
 				continue
 			}
 			batch, payloadBytes, err := plan.ReadBatchReused(pageIndex)
@@ -106,17 +128,17 @@ func (it *SegmentScanIterator) ForEach(visit func(types.Batch, types.SelectionMa
 				return err
 			}
 			matched := batch.Len
-			if it.Predicate == nil {
+			if pred == nil {
 				sel.Resize(batch.Len)
 				matched = sel.FillAll()
 			} else {
 				var err error
-				matched, err = it.Predicate.Eval(batch, sel)
+				matched, err = pred.Eval(batch, sel)
 				if err != nil {
 					return err
 				}
 			}
-			it.Stats.ObservePage(batch.Len, payloadBytes, matched, true)
+			stats.ObservePage(batch.Len, payloadBytes, matched, true)
 			if matched == 0 {
 				continue
 			}
@@ -133,12 +155,15 @@ func (it *SegmentScanIterator) forEachLateMaterialized(ctx context.Context, segm
 	if err != nil {
 		return err
 	}
+	stats := it.Stats
 	for pageIndex, info := range plan.PageInfos {
-		if err := ctx.Err(); err != nil {
-			return err
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
 		if !prunePlan.PageCandidate(segment.Meta, pageIndex) {
-			it.Stats.ObservePage(int(info.Rows), 0, 0, false)
+			stats.ObservePage(int(info.Rows), 0, 0, false)
 			continue
 		}
 		batch, payloadBytes, err := predPlan.ReadBatchReused(pageIndex)
@@ -157,7 +182,7 @@ func (it *SegmentScanIterator) forEachLateMaterialized(ctx context.Context, segm
 			payloadBytes += outputPayload
 			batch = outputBatch
 		}
-		it.Stats.ObservePage(batch.Len, payloadBytes, matched, true)
+		stats.ObservePage(batch.Len, payloadBytes, matched, true)
 		if matched == 0 {
 			continue
 		}
@@ -183,6 +208,79 @@ func (it *SegmentScanIterator) observeSkippedSegment(segment *ScanSegment) error
 	return nil
 }
 
+// ensureMeta computes the column-projection metadata derived from the
+// iterator's immutable config (Predicate, OutputColumns, EncodedOutputColumns).
+// All fields it produces are read-only after this call so subsequent ForEach
+// invocations only pay this cost once.
+func (it *SegmentScanIterator) ensureMeta() {
+	if it.metaReady {
+		return
+	}
+	if it.Predicate != nil {
+		it.predicateColumns = it.Predicate.RequiredColumns()
+	}
+	it.late = it.Predicate != nil && it.OutputColumns != nil
+
+	if len(it.OutputColumns) > 0 {
+		var predSet map[string]struct{}
+		if len(it.predicateColumns) > 0 {
+			predSet = make(map[string]struct{}, len(it.predicateColumns))
+			for _, column := range it.predicateColumns {
+				predSet[column] = struct{}{}
+			}
+		}
+		missing := make([]string, 0, len(it.OutputColumns))
+		for _, column := range it.OutputColumns {
+			if _, ok := predSet[column]; ok {
+				continue
+			}
+			missing = append(missing, column)
+		}
+		it.missingOutputCols = missing
+	}
+
+	if it.OutputColumns != nil {
+		read := make([]string, 0, len(it.OutputColumns)+len(it.predicateColumns))
+		read = append(read, it.OutputColumns...)
+		read = append(read, it.predicateColumns...)
+		it.readColumns = read
+	}
+
+	if it.late {
+		outputSet := make(map[string]struct{}, len(it.OutputColumns))
+		for _, column := range it.OutputColumns {
+			outputSet[column] = struct{}{}
+		}
+		encoded := make(map[string]struct{})
+		for _, column := range it.predicateColumns {
+			if _, isOutput := outputSet[column]; isOutput {
+				if _, wantsEncoded := it.EncodedOutputColumns[column]; !wantsEncoded {
+					continue
+				}
+			}
+			encoded[column] = struct{}{}
+		}
+		if len(encoded) > 0 {
+			it.encodedPredCols = encoded
+		}
+	}
+
+	encoded := it.encodedPredCols
+	if len(it.EncodedOutputColumns) != 0 {
+		merged := make(map[string]struct{}, len(encoded)+len(it.EncodedOutputColumns))
+		for column := range encoded {
+			merged[column] = struct{}{}
+		}
+		for column := range it.EncodedOutputColumns {
+			merged[column] = struct{}{}
+		}
+		encoded = merged
+	}
+	it.encodedReadCols = encoded
+
+	it.metaReady = true
+}
+
 func (it *SegmentScanIterator) segmentReadPlan(segmentIndex int, segment *ScanSegment) (*SegmentReadPlan, error) {
 	if len(it.readPlans) != len(it.Segments) {
 		it.readPlans = make([]*SegmentReadPlan, len(it.Segments))
@@ -190,11 +288,11 @@ func (it *SegmentScanIterator) segmentReadPlan(segmentIndex int, segment *ScanSe
 	if plan := it.readPlans[segmentIndex]; plan != nil {
 		return plan, nil
 	}
-	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, it.segmentReadColumns(), segment.Size, segment.PageInfos, it.fileCache)
+	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, it.readColumns, segment.Size, segment.PageInfos, it.fileCache)
 	if err != nil {
 		return nil, err
 	}
-	plan.Encoded = it.encodedReadColumns()
+	plan.Encoded = it.encodedReadCols
 	plan.EncodedConstants = it.Predicate == nil && len(it.EncodedOutputColumns) != 0
 	it.readPlans[segmentIndex] = plan
 	return plan, nil
@@ -207,18 +305,17 @@ func (it *SegmentScanIterator) segmentPredicateReadPlan(segmentIndex int, segmen
 	if plan := it.predPlans[segmentIndex]; plan != nil {
 		return plan, nil
 	}
-	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, it.Predicate.RequiredColumns(), segment.Size, segment.PageInfos, it.fileCache)
+	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, it.predicateColumns, segment.Size, segment.PageInfos, it.fileCache)
 	if err != nil {
 		return nil, err
 	}
-	plan.Encoded = it.encodedPredicateColumns()
+	plan.Encoded = it.encodedPredCols
 	it.predPlans[segmentIndex] = plan
 	return plan, nil
 }
 
 func (it *SegmentScanIterator) segmentOutputReadPlan(segmentIndex int, segment *ScanSegment) (*SegmentReadPlan, error) {
-	missing := it.missingOutputColumns()
-	if len(missing) == 0 {
+	if len(it.missingOutputCols) == 0 {
 		return nil, nil
 	}
 	if len(it.outputPlans) != len(it.Segments) {
@@ -227,7 +324,7 @@ func (it *SegmentScanIterator) segmentOutputReadPlan(segmentIndex int, segment *
 	if plan := it.outputPlans[segmentIndex]; plan != nil {
 		return plan, nil
 	}
-	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, missing, segment.Size, segment.PageInfos, it.fileCache)
+	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, it.missingOutputCols, segment.Size, segment.PageInfos, it.fileCache)
 	if err != nil {
 		return nil, err
 	}
@@ -268,77 +365,4 @@ func (it *SegmentScanIterator) segmentPrunePlan(segmentIndex int, meta SegmentMe
 	it.prunePlans[segmentIndex] = plan
 	it.pruneReady[segmentIndex] = true
 	return plan
-}
-
-func (it *SegmentScanIterator) segmentReadColumns() []string {
-	if it.OutputColumns == nil {
-		return nil
-	}
-	columns := make([]string, 0, len(it.OutputColumns)+4)
-	columns = append(columns, it.OutputColumns...)
-	if it.Predicate != nil {
-		columns = append(columns, it.Predicate.RequiredColumns()...)
-	}
-	return columns
-}
-
-func (it *SegmentScanIterator) usesLateMaterialization() bool {
-	return it.Predicate != nil && it.OutputColumns != nil
-}
-
-func (it *SegmentScanIterator) missingOutputColumns() []string {
-	if len(it.OutputColumns) == 0 {
-		return nil
-	}
-	predicate := make(map[string]struct{})
-	if it.Predicate != nil {
-		for _, column := range it.Predicate.RequiredColumns() {
-			predicate[column] = struct{}{}
-		}
-	}
-	missing := make([]string, 0, len(it.OutputColumns))
-	for _, column := range it.OutputColumns {
-		if _, ok := predicate[column]; ok {
-			continue
-		}
-		missing = append(missing, column)
-	}
-	return missing
-}
-
-func (it *SegmentScanIterator) encodedPredicateColumns() map[string]struct{} {
-	if it.Predicate == nil || it.OutputColumns == nil {
-		return nil
-	}
-	output := make(map[string]struct{}, len(it.OutputColumns))
-	for _, column := range it.OutputColumns {
-		output[column] = struct{}{}
-	}
-	encoded := make(map[string]struct{})
-	for _, column := range it.Predicate.RequiredColumns() {
-		if _, isOutput := output[column]; isOutput {
-			if _, wantsEncoded := it.EncodedOutputColumns[column]; !wantsEncoded {
-				continue
-			}
-		}
-		encoded[column] = struct{}{}
-	}
-	if len(encoded) == 0 {
-		return nil
-	}
-	return encoded
-}
-
-func (it *SegmentScanIterator) encodedReadColumns() map[string]struct{} {
-	encoded := it.encodedPredicateColumns()
-	if len(it.EncodedOutputColumns) == 0 {
-		return encoded
-	}
-	if encoded == nil {
-		encoded = make(map[string]struct{}, len(it.EncodedOutputColumns))
-	}
-	for column := range it.EncodedOutputColumns {
-		encoded[column] = struct{}{}
-	}
-	return encoded
 }

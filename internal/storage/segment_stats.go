@@ -3,9 +3,98 @@ package storage
 import (
 	"math"
 	"slices"
+	"strconv"
 
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
+
+const (
+	DefaultPageRows     = types.StandardBatchRows
+	DefaultSegmentRows  = 64 * types.StandardBatchRows
+	TextStatsMaxValues  = 64
+	ValueStatsMaxValues = 64
+)
+
+const (
+	textSegmentBloomBitsPerValue = 16
+	textSegmentBloomMinWords     = 1024
+	textSegmentBloomMaxWords     = 128 * 1024
+	textSegmentBloomProbes       = 3
+)
+
+type Int32Stats struct {
+	Min      int32
+	Max      int32
+	Sum      int64
+	SumValid bool
+}
+
+type Int64Stats struct {
+	Min      int64
+	Max      int64
+	Sum      int64
+	SumValid bool
+}
+
+type BoolStats struct {
+	HasTrue  bool
+	HasFalse bool
+}
+
+// ValueStats records up to ValueStatsMaxValues distinct numeric values seen in
+// a page, used by predicate pruning to skip pages that cannot contain a
+// matching value. Truncated signals the writer gave up before reaching the
+// cap, in which case the values list is unreliable for membership checks.
+type ValueStats[T int32 | int64] struct {
+	Values    []T
+	Truncated bool
+}
+
+type Int32ValueStats = ValueStats[int32]
+type Int64ValueStats = ValueStats[int64]
+
+type TextStats struct {
+	Values    []string
+	Counts    []uint32
+	Hashes    []uint32
+	HashBloom []uint64
+	Truncated bool
+}
+
+type ExecStats struct {
+	SegmentsTotal     int64
+	SegmentsCandidate int64
+	PagesTotal        int64
+	PagesCandidate    int64
+	RowsTotal         int64
+	RowsCandidate     int64
+	RowsMatched       int64
+	PayloadBytesRead  int64
+}
+
+func (s *ExecStats) ObserveSegment(candidate bool) {
+	if s == nil {
+		return
+	}
+	s.SegmentsTotal++
+	if candidate {
+		s.SegmentsCandidate++
+	}
+}
+
+func (s *ExecStats) ObservePage(rows int, payloadBytes int, matched int, candidate bool) {
+	if s == nil {
+		return
+	}
+	s.PagesTotal++
+	s.RowsTotal += int64(rows)
+	if candidate {
+		s.PagesCandidate++
+		s.RowsCandidate += int64(rows)
+	}
+	s.RowsMatched += int64(matched)
+	s.PayloadBytesRead += int64(payloadBytes)
+}
 
 func applyPageStats(page *PageMeta, v types.Vec) {
 	page.AllValid = page.NullCount == 0
@@ -215,12 +304,12 @@ func addInt64Stat(left int64, right int64) (int64, bool) {
 func textStats(values types.VarBytes, valid types.Validity) *TextStats {
 	out := &TextStats{Values: make([]string, 0, min(values.Rows(), TextStatsMaxValues)), Counts: make([]uint32, 0, min(values.Rows(), TextStatsMaxValues))}
 	seen := make(map[string]int, min(values.Rows(), TextStatsMaxValues))
-	hashes := make([]uint16, 0, values.Rows())
+	hashes := make([]uint32, 0, values.Rows())
 	for row := 0; row < values.Rows(); row++ {
 		if !types.IsValid(valid, row) {
 			continue
 		}
-		hashes = append(hashes, textHash16Bytes(values.Bytes(row)))
+		hashes = append(hashes, textHash32Bytes(values.Bytes(row)))
 		value := values.String(row)
 		if index, ok := seen[value]; ok {
 			out.Counts[index]++
@@ -237,12 +326,14 @@ func textStats(values types.VarBytes, valid types.Validity) *TextStats {
 	if len(out.Values) == 0 {
 		return nil
 	}
-	slices.Sort(hashes)
-	out.Hashes = compactSortedUint16(hashes)
+	if out.Truncated {
+		slices.Sort(hashes)
+		out.Hashes = compactSortedUint32(hashes)
+	}
 	return out
 }
 
-func compactSortedUint16(values []uint16) []uint16 {
+func compactSortedUint32(values []uint32) []uint32 {
 	if len(values) < 2 {
 		return values
 	}
@@ -255,7 +346,7 @@ func compactSortedUint16(values []uint16) []uint16 {
 	return out
 }
 
-func textHash16String(value string) uint16 {
+func textHash32String(value string) uint32 {
 	const (
 		offset64 = 14695981039346656037
 		prime64  = 1099511628211
@@ -265,10 +356,10 @@ func textHash16String(value string) uint16 {
 		hash ^= uint64(value[i])
 		hash *= prime64
 	}
-	return uint16(hash ^ (hash >> 32) ^ (hash >> 16))
+	return uint32(hash ^ (hash >> 32))
 }
 
-func textHash16Bytes(value []byte) uint16 {
+func textHash32Bytes(value []byte) uint32 {
 	const (
 		offset64 = 14695981039346656037
 		prime64  = 1099511628211
@@ -278,7 +369,7 @@ func textHash16Bytes(value []byte) uint16 {
 		hash ^= uint64(b)
 		hash *= prime64
 	}
-	return uint16(hash ^ (hash >> 32) ^ (hash >> 16))
+	return uint32(hash ^ (hash >> 32))
 }
 
 func mergeBoolStats(left *BoolStats, right *BoolStats) *BoolStats {
@@ -377,5 +468,125 @@ func mergeTextStats(left *TextStats, right *TextStats) *TextStats {
 		}
 	}
 	left.Truncated = left.Truncated || right.Truncated
+	left.Hashes = nil
 	return left
+}
+
+func finalizeColumnTextHashes(col *ColumnMeta) {
+	if col.Text == nil || !col.Text.Truncated {
+		return
+	}
+	valueCount := 0
+	for _, page := range col.Pages {
+		if page.Text == nil {
+			continue
+		}
+		if page.Text.Truncated {
+			if len(page.Text.Hashes) == 0 {
+				col.Text.HashBloom = nil
+				return
+			}
+			valueCount += len(page.Text.Hashes)
+			continue
+		}
+		valueCount += len(page.Text.Values)
+	}
+	if valueCount == 0 {
+		return
+	}
+	bloom := newTextHashBloom(valueCount)
+	hasValue := false
+	for _, page := range col.Pages {
+		if page.Text == nil {
+			continue
+		}
+		if page.Text.Truncated {
+			if len(page.Text.Hashes) == 0 {
+				col.Text.HashBloom = nil
+				return
+			}
+			for _, hash := range page.Text.Hashes {
+				textHashBloomAdd(bloom, hash)
+			}
+			hasValue = true
+			continue
+		}
+		for _, value := range page.Text.Values {
+			textHashBloomAdd(bloom, textHash32String(value))
+		}
+		hasValue = hasValue || len(page.Text.Values) != 0
+	}
+	if !hasValue {
+		return
+	}
+	col.Text.Hashes = nil
+	col.Text.HashBloom = bloom
+}
+
+func newTextHashBloom(valueCount int) []uint64 {
+	words := textSegmentBloomWordsFor(valueCount)
+	if words == 0 {
+		return nil
+	}
+	return make([]uint64, words)
+}
+
+func textHashBloomAdd(bloom []uint64, hash uint32) {
+	if len(bloom) == 0 {
+		return
+	}
+	for probe := uint64(0); probe < textSegmentBloomProbes; probe++ {
+		bit := textHashBloomBit(hash, probe, len(bloom))
+		bloom[bit>>6] |= uint64(1) << (bit & 63)
+	}
+}
+
+func textHashBloomHas(bloom []uint64, value string) bool {
+	if len(bloom) == 0 {
+		return true
+	}
+	hash := textHash32String(value)
+	for probe := uint64(0); probe < textSegmentBloomProbes; probe++ {
+		bit := textHashBloomBit(hash, probe, len(bloom))
+		if bloom[bit>>6]&(uint64(1)<<(bit&63)) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func textSegmentBloomWordsFor(valueCount int) int {
+	if valueCount <= 0 {
+		return 0
+	}
+	bits := valueCount * textSegmentBloomBitsPerValue
+	words := (bits + 63) / 64
+	if words < textSegmentBloomMinWords {
+		words = textSegmentBloomMinWords
+	}
+	if words > textSegmentBloomMaxWords {
+		words = textSegmentBloomMaxWords
+	}
+	return nextPowerOfTwo(words)
+}
+
+func nextPowerOfTwo(value int) int {
+	if value <= 1 {
+		return 1
+	}
+	value--
+	for shift := 1; shift < strconv.IntSize; shift <<= 1 {
+		value |= value >> shift
+	}
+	return value + 1
+}
+
+func textHashBloomBit(hash uint32, probe uint64, words int) uint64 {
+	x := uint64(hash) + 0x9e3779b97f4a7c15*(probe+1)
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	x ^= x >> 31
+	return x & uint64(words*64-1)
 }
