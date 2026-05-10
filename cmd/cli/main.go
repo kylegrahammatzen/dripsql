@@ -1,6 +1,4 @@
-// Command cli is the DripSQL admin/shell entrypoint. It exposes three
-// verbs against a database directory: version, exec, and query. EXPLAIN
-// [ANALYZE] flows through query because it's just a SELECT statement.
+// Command cli is the DripSQL v3 admin/shell entrypoint.
 package main
 
 import (
@@ -87,7 +85,7 @@ func printError(w io.Writer, err error) {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "DripSQL experimental engine")
+	fmt.Fprintln(w, "DripSQL experimental v3 engine")
 	fmt.Fprintln(w, "usage: dripsql version")
 	fmt.Fprintln(w, "       dripsql exec <db-path> <sql>")
 	fmt.Fprintln(w, "       dripsql query <db-path> <sql>")

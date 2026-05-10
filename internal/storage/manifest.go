@@ -11,7 +11,12 @@ import (
 
 const manifestFileName = "manifest.jsonl"
 
-func appendManifest(dir string, meta SegmentMeta) error {
+type manifestSegment struct {
+	Path string      `json:"path"`
+	Meta SegmentMeta `json:"meta"`
+}
+
+func appendManifest(dir string, segment storedSegment) error {
 	path := filepath.Join(dir, manifestFileName)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
@@ -21,7 +26,13 @@ func appendManifest(dir string, meta SegmentMeta) error {
 		_ = file.Close()
 		return err
 	}
-	data, err := json.Marshal(meta)
+	relPath, err := filepath.Rel(dir, segment.path)
+	if err != nil {
+		_ = file.Close()
+		return err
+	}
+	record := manifestSegment{Path: filepath.ToSlash(relPath), Meta: segment.meta}
+	data, err := json.Marshal(record)
 	if err != nil {
 		_ = file.Close()
 		return err
@@ -43,6 +54,47 @@ func appendManifest(dir string, meta SegmentMeta) error {
 		return err
 	}
 	return syncDir(dir)
+}
+
+func readManifest(dir string) ([]storedSegment, error) {
+	data, err := os.ReadFile(filepath.Join(dir, manifestFileName))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	complete := bytes.HasSuffix(data, []byte{'\n'})
+	lines := bytes.Split(data, []byte{'\n'})
+	segments := make([]storedSegment, 0, len(lines))
+	for i, line := range lines {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		if i == len(lines)-1 && !complete {
+			break
+		}
+		var record manifestSegment
+		if err := json.Unmarshal(line, &record); err != nil {
+			return nil, fmt.Errorf("manifest line %d: %w", i+1, err)
+		}
+		if record.Path == "" {
+			return nil, fmt.Errorf("manifest line %d: segment path is required", i+1)
+		}
+		path := filepath.Join(dir, filepath.FromSlash(record.Path))
+		footer, err := ReadSegmentFooter(path)
+		if err != nil {
+			return nil, err
+		}
+		if footer.ID != record.Meta.ID || footer.Rows != record.Meta.Rows || len(footer.Columns) != len(record.Meta.Columns) {
+			return nil, fmt.Errorf("manifest line %d does not match segment footer", i+1)
+		}
+		segments = append(segments, storedSegment{path: path, meta: footer})
+	}
+	return segments, nil
 }
 
 func truncatePartialManifestTail(file *os.File) error {
@@ -77,34 +129,4 @@ func truncatePartialManifestTail(file *os.File) error {
 		offset = start
 	}
 	return file.Truncate(0)
-}
-
-func readManifest(dir string) ([]SegmentMeta, error) {
-	data, err := os.ReadFile(filepath.Join(dir, manifestFileName))
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if len(data) == 0 {
-		return nil, nil
-	}
-	complete := bytes.HasSuffix(data, []byte{'\n'})
-	lines := bytes.Split(data, []byte{'\n'})
-	segments := make([]SegmentMeta, 0, len(lines))
-	for i, line := range lines {
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
-		}
-		if i == len(lines)-1 && !complete {
-			break
-		}
-		var meta SegmentMeta
-		if err := json.Unmarshal(line, &meta); err != nil {
-			return nil, fmt.Errorf("manifest line %d: %w", i+1, err)
-		}
-		segments = append(segments, meta)
-	}
-	return segments, nil
 }

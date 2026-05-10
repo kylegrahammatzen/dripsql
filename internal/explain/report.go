@@ -1,104 +1,376 @@
-// Package explain holds the report types shared by the SQL EXPLAIN surface
-// and the cmd/bench driver. Storage layers do not import this package; they
-// populate execution counters through internal/storage.ExecStats and the
-// engine layer folds the result into a QueryReport.
 package explain
 
-// QueryReport is the per-query report consumed by the EXPLAIN renderer and
-// the bench driver. Sections that are not populated render as nothing, which
-// is how plain EXPLAIN (without ANALYZE) hides Reduction/Read/Timing.
-type QueryReport struct {
-	Name      string         `json:"query_name,omitempty"`
-	SQL       string         `json:"sql,omitempty"`
-	Strategy  string         `json:"strategy,omitempty"`
-	Plan      *PlanNode      `json:"plan,omitempty"`
-	Predicate []string       `json:"predicate,omitempty"`
-	Access    []AccessEntry  `json:"access,omitempty"`
-	Reduction *Reduction     `json:"reduction,omitempty"`
-	Read      []ReadEntry    `json:"read,omitempty"`
-	NotUsed   []NotUsedEntry `json:"not_used,omitempty"`
-	Why       string         `json:"why,omitempty"`
-	Timing    *Timing        `json:"timing,omitempty"`
+import (
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+	"time"
+
+	humanfmt "github.com/kylegrahammatzen/dripsql/internal/format"
+	"github.com/kylegrahammatzen/dripsql/internal/storage"
+)
+
+type Report struct {
+	Plan          string        `json:"plan"`
+	Output        Output        `json:"output"`
+	Selectivity   Selectivity   `json:"selectivity"`
+	BytesPerMatch BytesPerMatch `json:"bytes_per_match"`
+	Reduction     Reduction     `json:"reduction"`
+	Access        []Access      `json:"access"`
+	Read          Read          `json:"read"`
+	Timing        Timing        `json:"timing"`
 }
 
-// AccessEntry records the storage path chosen for one referenced column
-// during query execution.
-type AccessEntry struct {
-	Column   string `json:"column"`
-	Decision string `json:"decision"`
+type Output struct {
+	Batches int64 `json:"batches"`
+	Rows    int64 `json:"rows"`
+	Kept    int64 `json:"kept"`
 }
 
-// Reduction records segment/page/row narrowing across pruning and filtering
-// stages. Counts are inclusive of the buffered hot rows where applicable.
+type Selectivity struct {
+	Matched int64   `json:"matched"`
+	Total   int64   `json:"total"`
+	Percent float64 `json:"percent"`
+	Valid   bool    `json:"valid"`
+}
+
+type BytesPerMatch struct {
+	Bytes int64   `json:"bytes"`
+	Rows  int64   `json:"rows"`
+	Value float64 `json:"value"`
+	Valid bool    `json:"valid"`
+}
+
 type Reduction struct {
-	SegmentsTotal     uint64 `json:"segments_total"`
-	SegmentsCandidate uint64 `json:"segments_candidate"`
-	PagesTotal        uint64 `json:"pages_total"`
-	PagesCandidate    uint64 `json:"pages_candidate"`
-	RowsTotal         uint64 `json:"rows_total"`
-	RowsCandidate     uint64 `json:"rows_candidate"`
-	RowsMatched       uint64 `json:"rows_matched"`
+	Segments Counter      `json:"segments"`
+	Pages    Counter      `json:"pages"`
+	Rows     RowReduction `json:"rows"`
 }
 
-// ReadEntry records bytes loaded for one logical purpose during execution.
-// Common purposes: "predicate payload", "aggregate payload", "group payload",
-// "metadata".
-type ReadEntry struct {
-	Purpose string `json:"purpose"`
-	Bytes   uint64 `json:"bytes"`
+type Counter struct {
+	Scanned   int64   `json:"scanned"`
+	Candidate int64   `json:"candidate"`
+	Pruned    int64   `json:"pruned"`
+	PrunedPct float64 `json:"pruned_percent"`
 }
 
-// NotUsedEntry documents an optimization that was eligible but did not fire,
-// with a short reason.
-type NotUsedEntry struct {
-	Name   string `json:"name"`
-	Reason string `json:"reason"`
+type RowReduction struct {
+	Scanned   int64 `json:"scanned"`
+	Candidate int64 `json:"candidate"`
+	Matched   int64 `json:"matched"`
 }
 
-// Timing carries either benchmark sample timings (first/best/avg/samples) or
-// EXPLAIN ANALYZE single-run timing (Total). Both shapes can coexist; the
-// renderer prefers Total when Samples is zero.
+type Access struct {
+	Name     string `json:"name"`
+	Strategy string `json:"strategy"`
+	Effect   string `json:"effect"`
+}
+
+type Read struct {
+	PayloadBytes          int64 `json:"payload_bytes"`
+	PredicatePayloadBytes int64 `json:"predicate_payload_bytes,omitempty"`
+	AggregatePayloadBytes int64 `json:"aggregate_payload_bytes,omitempty"`
+}
+
 type Timing struct {
-	FirstMs float64 `json:"first_ms,omitempty"`
-	BestMs  float64 `json:"best_ms,omitempty"`
-	AvgMs   float64 `json:"avg_ms,omitempty"`
-	Samples int     `json:"samples,omitempty"`
-	TotalMs float64 `json:"total_ms,omitempty"`
+	FirstMs float64 `json:"first_ms"`
+	BestMs  float64 `json:"best_ms"`
+	AvgMs   float64 `json:"avg_ms"`
+	P95Ms   float64 `json:"p95_ms,omitempty"`
+	FirstNs int64   `json:"first_ns,omitempty"`
+	BestNs  int64   `json:"best_ns,omitempty"`
+	AvgNs   int64   `json:"avg_ns,omitempty"`
+	P95Ns   int64   `json:"p95_ns,omitempty"`
+	Samples int     `json:"samples"`
 }
 
-// TableReport captures the table-level Storage section of the bench report.
-type TableReport struct {
-	Table              string         `json:"table"`
-	Rows               uint64         `json:"rows"`
-	Segments           int            `json:"segments"`
-	TableBytes         int64          `json:"table_bytes"`
-	ColumnPayloadBytes int64          `json:"column_payload_bytes"`
-	StorageOverhead    int64          `json:"storage_overhead_bytes"`
-	PlainEstimate      int64          `json:"plain_estimate_bytes"`
-	TableCompression   float64        `json:"table_compression"`
-	BytesPerRow        float64        `json:"bytes_per_row"`
-	Columns            []ColumnReport `json:"columns"`
+func ReductionFromStats(stats storage.ExecStats) Reduction {
+	return Reduction{
+		Segments: NewCounter(stats.SegmentsTotal, stats.SegmentsCandidate),
+		Pages:    NewCounter(stats.PagesTotal, stats.PagesCandidate),
+		Rows:     RowReduction{Scanned: stats.RowsTotal, Candidate: stats.RowsCandidate, Matched: stats.RowsMatched},
+	}
 }
 
-// ColumnReport is one row of the per-column Columns table. Encoding,
-// Compression, and Metadata are human-readable summaries; the bench renderer
-// uses them as-is.
-type ColumnReport struct {
-	Name        string  `json:"name"`
-	Type        string  `json:"type"`
-	Encoding    string  `json:"encoding"`
-	Compression string  `json:"compression"`
-	PlainBytes  int64   `json:"plain_bytes"`
-	StoredBytes int64   `json:"stored_bytes"`
-	Ratio       float64 `json:"ratio"`
-	Metadata    string  `json:"metadata"`
+func NewCounter(scanned, candidate int64) Counter {
+	pruned := scanned - candidate
+	if pruned < 0 {
+		pruned = 0
+	}
+	counter := Counter{Scanned: scanned, Candidate: candidate, Pruned: pruned}
+	if scanned > 0 {
+		counter.PrunedPct = float64(pruned) * 100 / float64(scanned)
+	}
+	return counter
 }
 
-// Findings is the cross-query summary printed at the bottom of a benchmark
-// report. Regressions only appear when a baseline was supplied.
-type Findings struct {
-	Slowest         string   `json:"slowest,omitempty"`
-	BestCompression string   `json:"best_compression,omitempty"`
-	Regressions     []string `json:"regressions,omitempty"`
-	Notes           []string `json:"notes,omitempty"`
+func (r *Report) Finalize() {
+	r.Reduction.Segments = NewCounter(r.Reduction.Segments.Scanned, r.Reduction.Segments.Candidate)
+	r.Reduction.Pages = NewCounter(r.Reduction.Pages.Scanned, r.Reduction.Pages.Candidate)
+	if r.Reduction.Rows.Scanned > 0 {
+		r.Selectivity = Selectivity{
+			Matched: r.Reduction.Rows.Matched,
+			Total:   r.Reduction.Rows.Scanned,
+			Percent: float64(r.Reduction.Rows.Matched) * 100 / float64(r.Reduction.Rows.Scanned),
+			Valid:   true,
+		}
+	}
+	if r.Reduction.Rows.Matched > 0 {
+		r.BytesPerMatch = BytesPerMatch{
+			Bytes: r.Read.PayloadBytes,
+			Rows:  r.Reduction.Rows.Matched,
+			Value: float64(r.Read.PayloadBytes) / float64(r.Reduction.Rows.Matched),
+			Valid: true,
+		}
+	}
+}
+
+func (r Report) Table() ([]string, [][]any) {
+	rows := [][]any{{"Plan", "plan", r.Plan}}
+	rows = append(rows, []any{"Output", "rows", r.Output.Kept})
+	if r.Selectivity.Valid {
+		rows = append(rows, []any{"Selectivity", "rows", fmt.Sprintf("%.3f%% (%d / %d)", r.Selectivity.Percent, r.Selectivity.Matched, r.Selectivity.Total)})
+	} else {
+		rows = append(rows, []any{"Selectivity", "rows", "-"})
+	}
+	if r.BytesPerMatch.Valid {
+		rows = append(rows, []any{"Bytes / match", "payload", fmt.Sprintf("%s (%s read, %d rows kept)", formatBytesFloat(r.BytesPerMatch.Value), formatBytes(r.BytesPerMatch.Bytes), r.BytesPerMatch.Rows)})
+	} else {
+		rows = append(rows, []any{"Bytes / match", "payload", "-"})
+	}
+	rows = append(rows,
+		[]any{"Reduction", "segments", counterString(r.Reduction.Segments)},
+		[]any{"Reduction", "pages", counterString(r.Reduction.Pages)},
+		[]any{"Reduction", "rows", fmt.Sprintf("%d scanned -> %d candidate -> %d matched", r.Reduction.Rows.Scanned, r.Reduction.Rows.Candidate, r.Reduction.Rows.Matched)},
+	)
+	for _, access := range r.Access {
+		value := access.Strategy
+		if access.Effect != "" {
+			value += " (" + access.Effect + ")"
+		}
+		rows = append(rows, []any{"Access", access.Name, value})
+	}
+	rows = append(rows, []any{"Read", "payload", formatBytes(r.Read.PayloadBytes)})
+	if r.Read.PredicatePayloadBytes > 0 {
+		rows = append(rows, []any{"Read", "predicate payload", formatBytes(r.Read.PredicatePayloadBytes)})
+	}
+	if r.Read.AggregatePayloadBytes > 0 {
+		rows = append(rows, []any{"Read", "aggregate payload", formatBytes(r.Read.AggregatePayloadBytes)})
+	}
+	if r.Timing.Samples > 0 {
+		rows = append(rows,
+			[]any{"Timing", "first", r.Timing.FormatFirst()},
+			[]any{"Timing", "best", r.Timing.FormatBest()},
+			[]any{"Timing", "avg", r.Timing.FormatAvg()},
+		)
+		if r.Timing.HasP95() {
+			rows = append(rows, []any{"Timing", "p95", r.Timing.FormatP95()})
+		}
+		rows = append(rows, []any{"Timing", "samples", r.Timing.Samples})
+	}
+	return []string{"section", "metric", "value"}, rows
+}
+
+func RenderText(w io.Writer, r Report, indent string) {
+	fprintf(w, "%sPlan\n", indent)
+	for i, line := range planTreeLines(r.Plan) {
+		fprintf(w, "%s  %s%s\n", indent, strings.Repeat("  ", i), line)
+	}
+
+	fprintf(w, "%sOutput rows:    %d\n", indent, r.Output.Kept)
+	if r.Selectivity.Valid {
+		fprintf(w, "%sSelectivity:    %s of %s rows matched (%.3f%%)\n", indent, formatCount(r.Selectivity.Matched), formatCount(r.Selectivity.Total), r.Selectivity.Percent)
+	} else {
+		fprintf(w, "%sSelectivity:    -\n", indent)
+	}
+	if r.BytesPerMatch.Valid {
+		fprintf(w, "%sBytes / match:  %s per matched row (%s read for %s rows)\n", indent, formatBytesFloat(r.BytesPerMatch.Value), formatBytes(r.BytesPerMatch.Bytes), formatCount(r.BytesPerMatch.Rows))
+	} else {
+		fprintf(w, "%sBytes / match:  -\n", indent)
+	}
+
+	fprintf(w, "%sReduction:\n", indent)
+	fprintf(w, "%s  segments:  %s\n", indent, readLine(r.Reduction.Segments))
+	fprintf(w, "%s  pages:     %s\n", indent, readLine(r.Reduction.Pages))
+	fprintf(w, "%s  rows:      %s in → %s matched\n", indent, formatCount(r.Reduction.Rows.Scanned), formatCount(r.Reduction.Rows.Matched))
+
+	fprintf(w, "%sStrategy:\n", indent)
+	if len(r.Access) == 0 {
+		fprintf(w, "%s  -\n", indent)
+	} else {
+		for _, access := range r.Access {
+			effect := ""
+			if access.Effect != "" {
+				effect = " (" + access.Effect + ")"
+			}
+			fprintf(w, "%s  %s: %s%s\n", indent, access.Name, access.Strategy, effect)
+		}
+	}
+
+	fprintf(w, "%sRead:\n", indent)
+	fprintf(w, "%s  payload:            %s\n", indent, formatBytes(r.Read.PayloadBytes))
+	fprintf(w, "%s  predicate payload:  %s\n", indent, formatOptionalBytes(r.Read.PredicatePayloadBytes))
+	fprintf(w, "%s  aggregate payload:  %s\n", indent, formatOptionalBytes(r.Read.AggregatePayloadBytes))
+	if r.Timing.Samples > 0 {
+		fprintf(w, "%sTiming:\n", indent)
+		fprintf(w, "%s  first:    %s\n", indent, r.Timing.FormatFirst())
+		fprintf(w, "%s  best:     %s\n", indent, r.Timing.FormatBest())
+		fprintf(w, "%s  avg:      %s\n", indent, r.Timing.FormatAvg())
+		if r.Timing.HasP95() {
+			fprintf(w, "%s  p95:      %s\n", indent, r.Timing.FormatP95())
+		}
+		fprintf(w, "%s  samples:  %d\n", indent, r.Timing.Samples)
+	}
+}
+
+// planTreeLines parses a "A(args) -> B(args) -> C(args)" plan string into
+// indented lines so the pipeline reads top-to-bottom.
+func planTreeLines(plan string) []string {
+	if plan == "" {
+		return []string{"-"}
+	}
+	parts := strings.Split(plan, " -> ")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, formatPlanNode(p))
+	}
+	return out
+}
+
+func formatPlanNode(node string) string {
+	open := strings.IndexByte(node, '(')
+	if open < 0 || !strings.HasSuffix(node, ")") {
+		return node
+	}
+	name := node[:open]
+	args := node[open+1 : len(node)-1]
+	if args == "" {
+		return name
+	}
+	return name + "  " + args
+}
+
+// readLine renders a Counter as "X/Y read, Z pruned" — tight and readable.
+func readLine(c Counter) string {
+	pruned := c.Pruned
+	if pruned <= 0 {
+		return fmt.Sprintf("%s/%s read, none pruned", formatCount(c.Candidate), formatCount(c.Scanned))
+	}
+	return fmt.Sprintf("%s/%s read, %s pruned (%.1f%%)", formatCount(c.Candidate), formatCount(c.Scanned), formatCount(pruned), c.PrunedPct)
+}
+
+// formatCount adds thousands separators to make 6-digit row counts readable
+// at a glance.
+func formatCount(n int64) string {
+	negative := n < 0
+	if negative {
+		n = -n
+	}
+	if n < 1000 {
+		s := strconv.FormatInt(n, 10)
+		if negative {
+			return "-" + s
+		}
+		return s
+	}
+	digits := strconv.FormatInt(n, 10)
+	out := make([]byte, 0, len(digits)+len(digits)/3)
+	rem := len(digits) % 3
+	if rem > 0 {
+		out = append(out, digits[:rem]...)
+	}
+	for i := rem; i < len(digits); i += 3 {
+		if len(out) > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, digits[i:i+3]...)
+	}
+	if negative {
+		return "-" + string(out)
+	}
+	return string(out)
+}
+
+func fprintf(w io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(w, format, args...)
+}
+
+func counterString(counter Counter) string {
+	return fmt.Sprintf("%d scanned -> %d candidate (%.1f%% pruned)", counter.Scanned, counter.Candidate, counter.PrunedPct)
+}
+
+func formatOptionalBytes(n int64) string {
+	if n <= 0 {
+		return "-"
+	}
+	return formatBytes(n)
+}
+
+func formatBytes(n int64) string {
+	if n < 0 {
+		return "-" + formatBytes(-n)
+	}
+	const unit = 1024
+	if n < unit {
+		return strconv.FormatInt(n, 10) + " B"
+	}
+	value := float64(n)
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	for i, suffix := range units {
+		value /= unit
+		if value < unit || i == len(units)-1 {
+			return strconv.FormatFloat(value, 'f', 2, 64) + " " + suffix
+		}
+	}
+	return strconv.FormatInt(n, 10) + " B"
+}
+
+func formatBytesFloat(n float64) string {
+	if n < 0 {
+		return "-" + formatBytesFloat(-n)
+	}
+	const unit = 1024
+	if n < unit {
+		if n == float64(int64(n)) {
+			return strconv.FormatInt(int64(n), 10) + " B"
+		}
+		return strconv.FormatFloat(n, 'f', 2, 64) + " B"
+	}
+	value := n
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	for i, suffix := range units {
+		value /= unit
+		if value < unit || i == len(units)-1 {
+			return strconv.FormatFloat(value, 'f', 2, 64) + " " + suffix
+		}
+	}
+	return strconv.FormatFloat(n, 'f', 2, 64) + " B"
+}
+
+func (t Timing) FormatFirst() string {
+	return formatTiming(t.FirstNs, t.FirstMs)
+}
+
+func (t Timing) FormatBest() string {
+	return formatTiming(t.BestNs, t.BestMs)
+}
+
+func (t Timing) FormatAvg() string {
+	return formatTiming(t.AvgNs, t.AvgMs)
+}
+
+func (t Timing) FormatP95() string {
+	return formatTiming(t.P95Ns, t.P95Ms)
+}
+
+func (t Timing) HasP95() bool {
+	return t.P95Ns != 0 || t.P95Ms != 0
+}
+
+func formatTiming(ns int64, ms float64) string {
+	if ns != 0 {
+		return humanfmt.Duration(time.Duration(ns))
+	}
+	return humanfmt.Milliseconds(ms)
 }
