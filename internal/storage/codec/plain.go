@@ -20,7 +20,7 @@ func (Plain) Encode(v types.Vec) (Page, error) {
 		}
 		return Page{}, fmt.Errorf("plain codec unsupported kind %s", v.Kind)
 	}
-	return prepared.Encode()
+	return prepared.EncodeInto(nil)
 }
 
 func (Plain) Prepare(v types.Vec) (PreparedEncoding, bool) {
@@ -42,8 +42,6 @@ type preparedPlain struct {
 func (p preparedPlain) Encoding() types.Encoding { return types.EncodingFlat }
 
 func (p preparedPlain) Size() int { return p.size }
-
-func (p preparedPlain) Encode() (Page, error) { return p.EncodeInto(nil) }
 
 func (p preparedPlain) EncodeInto(scratch []byte) (Page, error) {
 	payload := preparedPayload(scratch, p.size)

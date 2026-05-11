@@ -110,8 +110,8 @@ func applyPageStats(page *PageMeta, v types.Vec) {
 	case types.VecBool:
 		page.Bool = boolStats(v.BoolBits, v.Len, v.Valid)
 	case types.VecInt16:
-		page.Int32 = int16Stats(v.I16[:v.Len], v.Valid)
-		page.Int32Values = int16ValueStats(v.I16[:v.Len], v.Valid)
+		page.Int32 = int32Stats(v.I16[:v.Len], v.Valid)
+		page.Int32Values = int32ValueStats(v.I16[:v.Len], v.Valid)
 	case types.VecInt32, types.VecDate:
 		page.Int32 = int32Stats(v.I32[:v.Len], v.Valid)
 		page.Int32Values = int32ValueStats(v.I32[:v.Len], v.Valid)
@@ -146,7 +146,7 @@ func boolStats(values []uint64, rows int, valid types.Validity) *BoolStats {
 	return &out
 }
 
-func int16Stats(values []int16, valid types.Validity) *Int32Stats {
+func int32Stats[T ~int16 | ~int32](values []T, valid types.Validity) *Int32Stats {
 	out := Int32Stats{SumValid: true}
 	ok := false
 	for row, value := range values {
@@ -164,31 +164,6 @@ func int16Stats(values []int16, valid types.Validity) *Int32Stats {
 		}
 		if v > out.Max {
 			out.Max = v
-		}
-	}
-	if !ok {
-		return nil
-	}
-	return &out
-}
-
-func int32Stats(values []int32, valid types.Validity) *Int32Stats {
-	out := Int32Stats{SumValid: true}
-	ok := false
-	for row, value := range values {
-		if !types.IsValid(valid, row) {
-			continue
-		}
-		out.Sum += int64(value)
-		if !ok {
-			out.Min, out.Max, ok = value, value, true
-			continue
-		}
-		if value < out.Min {
-			out.Min = value
-		}
-		if value > out.Max {
-			out.Max = value
 		}
 	}
 	if !ok {
@@ -228,7 +203,7 @@ func int64Stats(values []int64, valid types.Validity) *Int64Stats {
 	return &out
 }
 
-func int16ValueStats(values []int16, valid types.Validity) *Int32ValueStats {
+func int32ValueStats[T ~int16 | ~int32](values []T, valid types.Validity) *Int32ValueStats {
 	out := &Int32ValueStats{Values: make([]int32, 0, min(len(values), ValueStatsMaxValues))}
 	seen := make(map[int32]struct{}, min(len(values), ValueStatsMaxValues))
 	ok := false
@@ -237,24 +212,7 @@ func int16ValueStats(values []int16, valid types.Validity) *Int32ValueStats {
 			continue
 		}
 		ok = true
-		addInt32ValueStat(out, seen, int32(value))
-	}
-	if !ok {
-		return nil
-	}
-	return out
-}
-
-func int32ValueStats(values []int32, valid types.Validity) *Int32ValueStats {
-	out := &Int32ValueStats{Values: make([]int32, 0, min(len(values), ValueStatsMaxValues))}
-	seen := make(map[int32]struct{}, min(len(values), ValueStatsMaxValues))
-	ok := false
-	for row, value := range values {
-		if !types.IsValid(valid, row) {
-			continue
-		}
-		ok = true
-		addInt32ValueStat(out, seen, value)
+		addValueStat(out, seen, int32(value))
 	}
 	if !ok {
 		return nil
@@ -271,7 +229,7 @@ func int64ValueStats(values []int64, valid types.Validity) *Int64ValueStats {
 			continue
 		}
 		ok = true
-		addInt64ValueStat(out, seen, value)
+		addValueStat(out, seen, value)
 	}
 	if !ok {
 		return nil
@@ -279,23 +237,7 @@ func int64ValueStats(values []int64, valid types.Validity) *Int64ValueStats {
 	return out
 }
 
-func addInt32ValueStat(out *Int32ValueStats, seen map[int32]struct{}, value int32) {
-	if out.Truncated {
-		return
-	}
-	if _, ok := seen[value]; ok {
-		return
-	}
-	if len(out.Values) >= ValueStatsMaxValues {
-		out.Truncated = true
-		out.Values = nil
-		return
-	}
-	seen[value] = struct{}{}
-	out.Values = append(out.Values, value)
-}
-
-func addInt64ValueStat(out *Int64ValueStats, seen map[int64]struct{}, value int64) {
+func addValueStat[T int32 | int64](out *ValueStats[T], seen map[T]struct{}, value T) {
 	if out.Truncated {
 		return
 	}

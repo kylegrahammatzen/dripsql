@@ -20,7 +20,7 @@ func (FORBitPack) Encode(v types.Vec) (Page, error) {
 	if !ok {
 		return Page{}, fmt.Errorf("for+bitpack cannot encode %s/%s", v.Kind, v.Encoding)
 	}
-	return prepared.Encode()
+	return prepared.EncodeInto(nil)
 }
 
 func (FORBitPack) Prepare(v types.Vec) (PreparedEncoding, bool) {
@@ -45,8 +45,6 @@ type preparedFORBitPack struct {
 func (p preparedFORBitPack) Encoding() types.Encoding { return types.EncodingFORBitPack }
 
 func (p preparedFORBitPack) Size() int { return p.size }
-
-func (p preparedFORBitPack) Encode() (Page, error) { return p.EncodeInto(nil) }
 
 func (p preparedFORBitPack) EncodeInto(scratch []byte) (Page, error) {
 	payload := preparedPayload(scratch, p.size)

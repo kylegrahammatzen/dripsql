@@ -18,7 +18,7 @@ func (Dictionary) Encode(v types.Vec) (Page, error) {
 	if !ok {
 		return Page{}, fmt.Errorf("dictionary codec requires flat text vector with <= %d distinct values", DictMaxValues)
 	}
-	return prepared.Encode()
+	return prepared.EncodeInto(nil)
 }
 
 func (Dictionary) Prepare(v types.Vec) (PreparedEncoding, bool) {
@@ -43,8 +43,6 @@ type preparedDictionary struct {
 func (p preparedDictionary) Encoding() types.Encoding { return types.EncodingDictionary }
 
 func (p preparedDictionary) Size() int { return p.size }
-
-func (p preparedDictionary) Encode() (Page, error) { return p.EncodeInto(nil) }
 
 func (p preparedDictionary) EncodeInto(scratch []byte) (Page, error) {
 	dataLen := len(p.values.Data)

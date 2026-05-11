@@ -558,29 +558,44 @@ func (r *segmentMetaReader) readInt64Stats() *Int64Stats {
 }
 
 func (r *segmentMetaReader) readInt32ValueStats() *Int32ValueStats {
-	return readValueStats[int32](r, 4, func(r *segmentMetaReader) int32 { return int32(r.readU32()) })
-}
-
-func (r *segmentMetaReader) readInt64ValueStats() *Int64ValueStats {
-	return readValueStats[int64](r, 8, func(r *segmentMetaReader) int64 { return int64(r.readU64()) })
-}
-
-func readValueStats[T int32 | int64](r *segmentMetaReader, bytesPerValue int, readValue func(*segmentMetaReader) T) *ValueStats[T] {
 	if !r.readBool() {
 		return nil
 	}
-	out := &ValueStats[T]{Truncated: r.readBool()}
+	out := &Int32ValueStats{Truncated: r.readBool()}
 	count := r.readU32()
 	if r.err != nil {
 		return nil
 	}
-	if uint64(count) > uint64(r.r.Len()/bytesPerValue) {
+	if uint64(count) > uint64(r.r.Len()/4) {
 		r.err = io.ErrUnexpectedEOF
 		return nil
 	}
-	out.Values = make([]T, 0, int(count))
+	out.Values = make([]int32, 0, int(count))
 	for i := uint32(0); i < count; i++ {
-		out.Values = append(out.Values, readValue(r))
+		out.Values = append(out.Values, int32(r.readU32()))
+	}
+	if r.err != nil {
+		return nil
+	}
+	return out
+}
+
+func (r *segmentMetaReader) readInt64ValueStats() *Int64ValueStats {
+	if !r.readBool() {
+		return nil
+	}
+	out := &Int64ValueStats{Truncated: r.readBool()}
+	count := r.readU32()
+	if r.err != nil {
+		return nil
+	}
+	if uint64(count) > uint64(r.r.Len()/8) {
+		r.err = io.ErrUnexpectedEOF
+		return nil
+	}
+	out.Values = make([]int64, 0, int(count))
+	for i := uint32(0); i < count; i++ {
+		out.Values = append(out.Values, int64(r.readU64()))
 	}
 	if r.err != nil {
 		return nil
@@ -784,14 +799,6 @@ func writeInt64Stats(w *segmentMetaWriter, stats *Int64Stats) {
 }
 
 func writeInt32ValueStats(w *segmentMetaWriter, stats *Int32ValueStats) {
-	writeValueStats[int32](w, stats, func(w *segmentMetaWriter, value int32) { writeU32(w, uint32(value)) })
-}
-
-func writeInt64ValueStats(w *segmentMetaWriter, stats *Int64ValueStats) {
-	writeValueStats[int64](w, stats, func(w *segmentMetaWriter, value int64) { writeU64(w, uint64(value)) })
-}
-
-func writeValueStats[T int32 | int64](w *segmentMetaWriter, stats *ValueStats[T], writeValue func(*segmentMetaWriter, T)) {
 	writeBool(w, stats != nil)
 	if stats == nil {
 		return
@@ -799,7 +806,19 @@ func writeValueStats[T int32 | int64](w *segmentMetaWriter, stats *ValueStats[T]
 	writeBool(w, stats.Truncated)
 	writeU32(w, uint32(len(stats.Values)))
 	for _, value := range stats.Values {
-		writeValue(w, value)
+		writeU32(w, uint32(value))
+	}
+}
+
+func writeInt64ValueStats(w *segmentMetaWriter, stats *Int64ValueStats) {
+	writeBool(w, stats != nil)
+	if stats == nil {
+		return
+	}
+	writeBool(w, stats.Truncated)
+	writeU32(w, uint32(len(stats.Values)))
+	for _, value := range stats.Values {
+		writeU64(w, uint64(value))
 	}
 }
 

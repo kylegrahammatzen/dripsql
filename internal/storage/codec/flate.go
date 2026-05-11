@@ -27,7 +27,7 @@ func (Flate) Encode(v types.Vec) (Page, error) {
 		}
 		return Page{}, fmt.Errorf("flate codec requires compressible varbytes vector")
 	}
-	return prepared.Encode()
+	return prepared.EncodeInto(nil)
 }
 
 func (Flate) Prepare(v types.Vec) (PreparedEncoding, bool) {
@@ -38,7 +38,7 @@ func (Flate) Prepare(v types.Vec) (PreparedEncoding, bool) {
 	if !ok {
 		return nil, false
 	}
-	plainPage, err := plain.Encode()
+	plainPage, err := plain.EncodeInto(nil)
 	if err != nil {
 		return nil, false
 	}
@@ -59,8 +59,6 @@ type preparedFlate struct {
 func (p preparedFlate) Encoding() types.Encoding { return types.EncodingFlate }
 
 func (p preparedFlate) Size() int { return len(p.payload) }
-
-func (p preparedFlate) Encode() (Page, error) { return p.EncodeInto(nil) }
 
 func (p preparedFlate) EncodeInto(_ []byte) (Page, error) {
 	return Page{Kind: p.kind, Encoding: types.EncodingFlate, Rows: p.rows, NullCount: p.nullCount, Payload: p.payload}, nil

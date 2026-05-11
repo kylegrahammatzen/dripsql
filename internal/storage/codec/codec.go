@@ -25,7 +25,6 @@ type Codec interface {
 type PreparedEncoding interface {
 	Encoding() types.Encoding
 	Size() int
-	Encode() (Page, error)
 	EncodeInto(scratch []byte) (Page, error)
 }
 
@@ -136,9 +135,7 @@ func (e estimatedEncoding) Encoding() types.Encoding { return e.codec.Encoding()
 
 func (e estimatedEncoding) Size() int { return e.size }
 
-func (e estimatedEncoding) Encode() (Page, error) { return e.codec.Encode(e.vec) }
-
-func (e estimatedEncoding) EncodeInto(_ []byte) (Page, error) { return e.Encode() }
+func (e estimatedEncoding) EncodeInto(_ []byte) (Page, error) { return e.codec.Encode(e.vec) }
 
 func preparedPayload(scratch []byte, size int) []byte {
 	if cap(scratch) < size {
