@@ -8,36 +8,41 @@ const (
 )
 
 type PredicatePrunePlan struct {
+	meta SegmentMeta
 	root boundNode
 }
 
+type pruneStatsScope struct {
+	allNull    bool
+	boolStats  *BoolStats
+	int64Stats *Int64Stats
+	int32Stats *Int32Stats
+	int64Vals  *Int64ValueStats
+	int32Vals  *Int32ValueStats
+	textStats  *TextStats
+	uuidStats  *UUIDStats
+	pruneText  func(TextStats, boundNode) bool
+	pruneUUID  func(UUIDStats, boundNode) bool
+}
+
 func BindPrunePredicate(pred Predicate, meta SegmentMeta) PredicatePrunePlan {
-	return PredicatePrunePlan{root: bindPruneNode(pred, meta)}
+	return PredicatePrunePlan{meta: meta, root: bindPruneNode(pred, meta)}
 }
 
-func (p PredicatePrunePlan) PageCandidate(meta SegmentMeta, pageIndex int) bool {
-	return prunePageCandidate(meta, pageIndex, p.root)
+func (p PredicatePrunePlan) PageCandidate(pageIndex int) bool {
+	return pruneCandidate(p.root, func(pred boundNode) bool {
+		return prunePageLeafCandidate(p.meta, pageIndex, pred)
+	})
 }
 
-func (p PredicatePrunePlan) SegmentCandidate(meta SegmentMeta) bool {
-	return pruneSegmentCandidate(meta, p.root)
+func (p PredicatePrunePlan) SegmentCandidate() bool {
+	return pruneCandidate(p.root, func(pred boundNode) bool {
+		return pruneSegmentLeafCandidate(p.meta, pred)
+	})
 }
 
 func bindPruneNode(pred Predicate, meta SegmentMeta) boundNode {
-	node := boundNode{
-		op:         pred.Op,
-		colIndex:   -1,
-		boolValue:  pred.Bool,
-		int64Value: pred.Int64,
-		lo:         pred.Lo,
-		hi:         pred.Hi,
-		textValue:  pred.Text,
-		uuidValue:  pred.UUID,
-		boolSet:    newBoolMatcher(pred.Bools),
-		intSet:     newInt64Matcher(pred.Int64s),
-		textSet:    newTextMatcher(pred.Texts),
-		uuidSet:    newUUIDMatcher(pred.UUIDs),
-	}
+	node := newBoundNode(pred)
 	switch pred.Op {
 	case PredicateNone:
 		return node
@@ -58,13 +63,13 @@ func bindPruneNode(pred Predicate, meta SegmentMeta) boundNode {
 	}
 }
 
-func prunePageCandidate(meta SegmentMeta, pageIndex int, pred boundNode) bool {
+func pruneCandidate(pred boundNode, leaf func(boundNode) bool) bool {
 	switch pred.op {
 	case PredicateNone:
 		return true
 	case PredicateAnd:
 		for _, child := range pred.children {
-			if !prunePageCandidate(meta, pageIndex, child) {
+			if !pruneCandidate(child, leaf) {
 				return false
 			}
 		}
@@ -74,7 +79,7 @@ func prunePageCandidate(meta SegmentMeta, pageIndex int, pred boundNode) bool {
 			return true
 		}
 		for _, child := range pred.children {
-			if prunePageCandidate(meta, pageIndex, child) {
+			if pruneCandidate(child, leaf) {
 				return true
 			}
 		}
@@ -82,35 +87,7 @@ func prunePageCandidate(meta SegmentMeta, pageIndex int, pred boundNode) bool {
 	case PredicateNot:
 		return true
 	default:
-		return prunePageLeafCandidate(meta, pageIndex, pred)
-	}
-}
-
-func pruneSegmentCandidate(meta SegmentMeta, pred boundNode) bool {
-	switch pred.op {
-	case PredicateNone:
-		return true
-	case PredicateAnd:
-		for _, child := range pred.children {
-			if !pruneSegmentCandidate(meta, child) {
-				return false
-			}
-		}
-		return true
-	case PredicateOr:
-		if len(pred.children) == 0 {
-			return true
-		}
-		for _, child := range pred.children {
-			if pruneSegmentCandidate(meta, child) {
-				return true
-			}
-		}
-		return false
-	case PredicateNot:
-		return true
-	default:
-		return pruneSegmentLeafCandidate(meta, pred)
+		return leaf(pred)
 	}
 }
 
@@ -119,25 +96,16 @@ func pruneSegmentLeafCandidate(meta SegmentMeta, pred boundNode) bool {
 		return true
 	}
 	col := meta.Columns[pred.colIndex]
-	if col.AllNull {
-		return false
-	}
-	if col.Bool != nil && !pruneBoolCandidate(*col.Bool, pred) {
-		return false
-	}
-	if col.Int64 != nil && !pruneInt64RangeCandidate(*col.Int64, pred) {
-		return false
-	}
-	if col.Int32 != nil && !pruneInt64RangeCandidate(Int64Stats{Min: int64(col.Int32.Min), Max: int64(col.Int32.Max)}, pred) {
-		return false
-	}
-	if col.Text != nil && !pruneTextSegmentCandidate(*col.Text, pred) {
-		return false
-	}
-	if col.UUID != nil && !pruneUUIDSegmentCandidate(*col.UUID, pred) {
-		return false
-	}
-	return true
+	return pruneStatsCandidate(pruneStatsScope{
+		allNull:    col.AllNull,
+		boolStats:  col.Bool,
+		int64Stats: col.Int64,
+		int32Stats: col.Int32,
+		textStats:  col.Text,
+		uuidStats:  col.UUID,
+		pruneText:  pruneTextSegmentCandidate,
+		pruneUUID:  pruneUUIDSegmentCandidate,
+	}, pred)
 }
 
 func prunePageLeafCandidate(meta SegmentMeta, pageIndex int, pred boundNode) bool {
@@ -149,28 +117,43 @@ func prunePageLeafCandidate(meta SegmentMeta, pageIndex int, pred boundNode) boo
 		return true
 	}
 	page := col.Pages[pageIndex]
-	if page.AllNull {
+	return pruneStatsCandidate(pruneStatsScope{
+		allNull:    page.AllNull,
+		boolStats:  page.Bool,
+		int64Stats: page.Int64,
+		int32Stats: page.Int32,
+		int64Vals:  page.Int64Values,
+		int32Vals:  page.Int32Values,
+		textStats:  page.Text,
+		uuidStats:  page.UUID,
+		pruneText:  pruneTextPageCandidate,
+		pruneUUID:  pruneUUIDPageCandidate,
+	}, pred)
+}
+
+func pruneStatsCandidate(stats pruneStatsScope, pred boundNode) bool {
+	if stats.allNull {
 		return false
 	}
-	if page.Bool != nil && !pruneBoolCandidate(*page.Bool, pred) {
+	if stats.boolStats != nil && !pruneBoolCandidate(*stats.boolStats, pred) {
 		return false
 	}
-	if page.Int64 != nil && !pruneInt64RangeCandidate(*page.Int64, pred) {
+	if stats.int64Stats != nil && !pruneInt64RangeCandidate(*stats.int64Stats, pred) {
 		return false
 	}
-	if page.Int64Values != nil && !pruneInt64ValueCandidate(*page.Int64Values, pred) {
+	if stats.int64Vals != nil && !pruneInt64ValueCandidate(*stats.int64Vals, pred) {
 		return false
 	}
-	if page.Int32 != nil && !pruneInt64RangeCandidate(Int64Stats{Min: int64(page.Int32.Min), Max: int64(page.Int32.Max)}, pred) {
+	if stats.int32Stats != nil && !pruneInt64RangeCandidate(Int64Stats{Min: int64(stats.int32Stats.Min), Max: int64(stats.int32Stats.Max)}, pred) {
 		return false
 	}
-	if page.Int32Values != nil && !pruneInt32ValueCandidate(*page.Int32Values, pred) {
+	if stats.int32Vals != nil && !pruneInt32ValueCandidate(*stats.int32Vals, pred) {
 		return false
 	}
-	if page.Text != nil && !pruneTextPageCandidate(*page.Text, pred) {
+	if stats.textStats != nil && !stats.pruneText(*stats.textStats, pred) {
 		return false
 	}
-	if page.UUID != nil && !pruneUUIDPageCandidate(*page.UUID, pred) {
+	if stats.uuidStats != nil && !stats.pruneUUID(*stats.uuidStats, pred) {
 		return false
 	}
 	return true

@@ -7,42 +7,29 @@ import (
 )
 
 func evalLeafInto(batch types.Batch, pred boundNode, mask *types.SelectionMask) (int, error) {
-	col := batch.Columns[pred.colIndex]
-	mask.Resize(batch.Len)
-	switch col.V.Kind {
-	case types.VecBool:
-		return evalBoolLeafBound(col.V, pred, nil, mask), nil
-	case types.VecInt16:
-		return evalIntLeafBound(col.V, col.V.I16, pred, nil, mask), nil
-	case types.VecInt32, types.VecDate:
-		return evalIntLeafBound(col.V, col.V.I32, pred, nil, mask), nil
-	case types.VecInt64, types.VecTimestamp, types.VecTime:
-		return evalIntLeafBound(col.V, col.V.I64, pred, nil, mask), nil
-	case types.VecText, types.VecBytes:
-		return evalTextLeafBound(col.V, pred, nil, mask)
-	case types.VecUUID:
-		return evalUUIDLeafBound(col.V, pred, nil, mask), nil
-	default:
-		return 0, fmt.Errorf("predicate unsupported vector kind %s", col.V.Kind)
-	}
+	return evalLeafWithInput(batch, pred, nil, mask)
 }
 
 func evalLeafSelectedInto(batch types.Batch, pred boundNode, input types.SelectionMask, mask *types.SelectionMask) (int, error) {
+	return evalLeafWithInput(batch, pred, &input, mask)
+}
+
+func evalLeafWithInput(batch types.Batch, pred boundNode, input *types.SelectionMask, mask *types.SelectionMask) (int, error) {
 	col := batch.Columns[pred.colIndex]
 	mask.Resize(batch.Len)
 	switch col.V.Kind {
 	case types.VecBool:
-		return evalBoolLeafBound(col.V, pred, &input, mask), nil
+		return evalBoolLeafBound(col.V, pred, input, mask), nil
 	case types.VecInt16:
-		return evalIntLeafBound(col.V, col.V.I16, pred, &input, mask), nil
+		return evalIntLeafBound(col.V, col.V.I16, pred, input, mask), nil
 	case types.VecInt32, types.VecDate:
-		return evalIntLeafBound(col.V, col.V.I32, pred, &input, mask), nil
+		return evalIntLeafBound(col.V, col.V.I32, pred, input, mask), nil
 	case types.VecInt64, types.VecTimestamp, types.VecTime:
-		return evalIntLeafBound(col.V, col.V.I64, pred, &input, mask), nil
+		return evalIntLeafBound(col.V, col.V.I64, pred, input, mask), nil
 	case types.VecText, types.VecBytes:
-		return evalTextLeafBound(col.V, pred, &input, mask)
+		return evalTextLeafBound(col.V, pred, input, mask)
 	case types.VecUUID:
-		return evalUUIDLeafBound(col.V, pred, &input, mask), nil
+		return evalUUIDLeafBound(col.V, pred, input, mask), nil
 	default:
 		return 0, fmt.Errorf("predicate unsupported vector kind %s", col.V.Kind)
 	}
@@ -51,9 +38,9 @@ func evalLeafSelectedInto(batch types.Batch, pred boundNode, input types.Selecti
 func evalUUIDLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) int {
 	switch pred.op {
 	case PredicateOpEq:
-		return evalUUIDEq(v.UUID, v.Valid, v.Len, pred.uuidValue, input, out)
+		return evalUUIDEq(v.UUID, v.Valid, v.Len, pred.uuidValue, false, input, out)
 	case PredicateOpNotEq:
-		return evalUUIDNotEq(v.UUID, v.Valid, v.Len, pred.uuidValue, input, out)
+		return evalUUIDEq(v.UUID, v.Valid, v.Len, pred.uuidValue, true, input, out)
 	case PredicateOpIn:
 		return evalUUIDIn(v.UUID, v.Valid, v.Len, pred.uuidSet, false, input, out)
 	case PredicateOpNotIn:
@@ -63,11 +50,11 @@ func evalUUIDLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, 
 	}
 }
 
-func evalUUIDEq(values []types.UUID16, valid types.Validity, rows int, want types.UUID16, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalUUIDEq(values []types.UUID16, valid types.Validity, rows int, want types.UUID16, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
 		for row := 0; row < rows; row++ {
-			if types.IsValid(valid, row) && values[row] == want {
+			if types.IsValid(valid, row) && (values[row] == want) != invert {
 				out.SetUnsafe(row)
 				matched++
 			}
@@ -75,27 +62,7 @@ func evalUUIDEq(values []types.UUID16, valid types.Validity, rows int, want type
 		return matched
 	}
 	input.IterSet(func(row int) {
-		if types.IsValid(valid, row) && values[row] == want {
-			out.SetUnsafe(row)
-			matched++
-		}
-	})
-	return matched
-}
-
-func evalUUIDNotEq(values []types.UUID16, valid types.Validity, rows int, want types.UUID16, input *types.SelectionMask, out *types.SelectionMask) int {
-	matched := 0
-	if input == nil {
-		for row := 0; row < rows; row++ {
-			if types.IsValid(valid, row) && values[row] != want {
-				out.SetUnsafe(row)
-				matched++
-			}
-		}
-		return matched
-	}
-	input.IterSet(func(row int) {
-		if types.IsValid(valid, row) && values[row] != want {
+		if types.IsValid(valid, row) && (values[row] == want) != invert {
 			out.SetUnsafe(row)
 			matched++
 		}

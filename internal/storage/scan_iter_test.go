@@ -771,7 +771,7 @@ func TestSegmentScanIteratorPrunesTruncatedTextStatsWithBloom(t *testing.T) {
 func TestPredicatePruneTextStats(t *testing.T) {
 	assertPruneCandidate := func(t *testing.T, meta SegmentMeta, pred Predicate, want bool) {
 		t.Helper()
-		if got := BindPrunePredicate(pred, meta).PageCandidate(meta, 0); got != want {
+		if got := BindPrunePredicate(pred, meta).PageCandidate(0); got != want {
 			t.Fatalf("PageCandidate(%#v) = %v, want %v", pred, got, want)
 		}
 	}
@@ -818,19 +818,19 @@ func TestPredicatePruneSegmentTextHashStats(t *testing.T) {
 	}
 
 	pred := Predicate{Column: "event_type", Op: PredicateOpEq, Text: eventsB[len(eventsB)/2]}
-	if got := BindPrunePredicate(pred, metaA).SegmentCandidate(metaA); got {
+	if got := BindPrunePredicate(pred, metaA).SegmentCandidate(); got {
 		t.Fatalf("segment A candidate for segment B value = true")
 	}
-	if got := BindPrunePredicate(pred, metaB).SegmentCandidate(metaB); !got {
+	if got := BindPrunePredicate(pred, metaB).SegmentCandidate(); !got {
 		t.Fatalf("segment B candidate for segment B value = false")
 	}
 
 	absent := missingTextBloomValueAcross(textSegmentBloomProbes, metaA.Columns[1].Text.HashBloom, metaB.Columns[1].Text.HashBloom)
 	pred = Predicate{Column: "event_type", Op: PredicateOpEq, Text: absent}
-	if got := BindPrunePredicate(pred, metaA).SegmentCandidate(metaA); got {
+	if got := BindPrunePredicate(pred, metaA).SegmentCandidate(); got {
 		t.Fatalf("segment A candidate for absent value %q = true", absent)
 	}
-	if got := BindPrunePredicate(pred, metaB).SegmentCandidate(metaB); got {
+	if got := BindPrunePredicate(pred, metaB).SegmentCandidate(); got {
 		t.Fatalf("segment B candidate for absent value %q = true", absent)
 	}
 }
@@ -933,7 +933,7 @@ func TestPredicatePruneValueStatsCompoundSafety(t *testing.T) {
 	eq3 := Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 3}
 	assertPruneCandidate := func(pred Predicate, want bool) {
 		t.Helper()
-		if got := BindPrunePredicate(pred, meta).PageCandidate(meta, 0); got != want {
+		if got := BindPrunePredicate(pred, meta).PageCandidate(0); got != want {
 			t.Fatalf("PageCandidate(%#v) = %v, want %v", pred, got, want)
 		}
 	}

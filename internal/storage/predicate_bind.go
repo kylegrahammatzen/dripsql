@@ -157,20 +157,7 @@ func (e BoundPredicateEvaluator) EvalSelected(batch types.Batch, input types.Sel
 }
 
 func bindEvalNode(pred Predicate, batch types.Batch) (boundNode, error) {
-	node := boundNode{
-		op:         pred.Op,
-		colIndex:   -1,
-		boolValue:  pred.Bool,
-		int64Value: pred.Int64,
-		lo:         pred.Lo,
-		hi:         pred.Hi,
-		textValue:  pred.Text,
-		uuidValue:  pred.UUID,
-		boolSet:    newBoolMatcher(pred.Bools),
-		intSet:     newInt64Matcher(pred.Int64s),
-		textSet:    newTextMatcher(pred.Texts),
-		uuidSet:    newUUIDMatcher(pred.UUIDs),
-	}
+	node := newBoundNode(pred)
 	switch pred.Op {
 	case PredicateNone:
 		return node, nil
@@ -191,6 +178,23 @@ func bindEvalNode(pred Predicate, batch types.Batch) (boundNode, error) {
 		}
 		node.colIndex = colIndex
 		return node, nil
+	}
+}
+
+func newBoundNode(pred Predicate) boundNode {
+	return boundNode{
+		op:         pred.Op,
+		colIndex:   -1,
+		boolValue:  pred.Bool,
+		int64Value: pred.Int64,
+		lo:         pred.Lo,
+		hi:         pred.Hi,
+		textValue:  pred.Text,
+		uuidValue:  pred.UUID,
+		boolSet:    newBoolMatcher(pred.Bools),
+		intSet:     newInt64Matcher(pred.Int64s),
+		textSet:    newTextMatcher(pred.Texts),
+		uuidSet:    newUUIDMatcher(pred.UUIDs),
 	}
 }
 

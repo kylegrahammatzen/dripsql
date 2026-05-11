@@ -229,7 +229,7 @@ func BenchmarkPredicatePruneBound(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for page := range meta.Columns[0].Pages {
-			if plan.PageCandidate(meta, page) {
+			if plan.PageCandidate(page) {
 				sink++
 			}
 		}

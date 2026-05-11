@@ -819,14 +819,14 @@ func segmentsContainBuffer(segments []storage.ScanSegment) bool {
 func metadataPruneAllPages(segments []storage.ScanSegment, pred storage.Predicate, stats *storage.ExecStats) bool {
 	for _, segment := range segments {
 		prune := storage.BindPrunePredicate(pred, segment.Meta)
-		if !prune.SegmentCandidate(segment.Meta) {
+		if !prune.SegmentCandidate() {
 			stats.ObserveSegment(false)
 			observeMetadataSkippedPages(stats, segment.PageInfos)
 			continue
 		}
 		stats.ObserveSegment(true)
 		for pageIndex, info := range segment.PageInfos {
-			if prune.PageCandidate(segment.Meta, pageIndex) {
+			if prune.PageCandidate(pageIndex) {
 				return false
 			}
 			stats.ObservePage(int(info.Rows), 0, 0, false)

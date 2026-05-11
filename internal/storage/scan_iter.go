@@ -37,13 +37,13 @@ type SegmentScanIterator struct {
 
 	// Derived metadata cached on first ForEach so the per-page hot paths
 	// don't reallocate column slices/maps each iteration.
-	metaReady          bool
-	late               bool
-	predicateColumns   []string
-	missingOutputCols  []string
-	readColumns        []string
-	encodedReadCols    map[string]struct{}
-	encodedPredCols    map[string]struct{}
+	metaReady         bool
+	late              bool
+	predicateColumns  []string
+	missingOutputCols []string
+	readColumns       []string
+	encodedReadCols   map[string]struct{}
+	encodedPredCols   map[string]struct{}
 }
 
 func (it *SegmentScanIterator) ForEach(visit func(types.Batch, types.SelectionMask) error) error {
@@ -91,7 +91,7 @@ func (it *SegmentScanIterator) ForEach(visit func(types.Batch, types.SelectionMa
 			continue
 		}
 		prunePlan := it.segmentPrunePlan(segmentIndex, segment.Meta)
-		if !prunePlan.SegmentCandidate(segment.Meta) {
+		if !prunePlan.SegmentCandidate() {
 			// Skip page-level accounting entirely when stats are off — the whole
 			// point of segment pruning is to bail before touching pages.
 			if stats != nil {
@@ -119,7 +119,7 @@ func (it *SegmentScanIterator) ForEach(visit func(types.Batch, types.SelectionMa
 					return err
 				}
 			}
-			if !prunePlan.PageCandidate(segment.Meta, pageIndex) {
+			if !prunePlan.PageCandidate(pageIndex) {
 				stats.ObservePage(int(info.Rows), 0, 0, false)
 				continue
 			}
@@ -162,7 +162,7 @@ func (it *SegmentScanIterator) forEachLateMaterialized(ctx context.Context, segm
 				return err
 			}
 		}
-		if !prunePlan.PageCandidate(segment.Meta, pageIndex) {
+		if !prunePlan.PageCandidate(pageIndex) {
 			stats.ObservePage(int(info.Rows), 0, 0, false)
 			continue
 		}
@@ -282,55 +282,34 @@ func (it *SegmentScanIterator) ensureMeta() {
 }
 
 func (it *SegmentScanIterator) segmentReadPlan(segmentIndex int, segment *ScanSegment) (*SegmentReadPlan, error) {
-	if len(it.readPlans) != len(it.Segments) {
-		it.readPlans = make([]*SegmentReadPlan, len(it.Segments))
-	}
-	if plan := it.readPlans[segmentIndex]; plan != nil {
-		return plan, nil
-	}
-	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, it.readColumns, segment.Size, segment.PageInfos, it.fileCache)
-	if err != nil {
-		return nil, err
-	}
-	plan.Encoded = it.encodedReadCols
-	plan.EncodedConstants = it.Predicate == nil && len(it.EncodedOutputColumns) != 0
-	it.readPlans[segmentIndex] = plan
-	return plan, nil
+	return it.cachedSegmentReadPlan(segmentIndex, segment, &it.readPlans, it.readColumns, it.encodedReadCols, it.Predicate == nil && len(it.EncodedOutputColumns) != 0)
 }
 
 func (it *SegmentScanIterator) segmentPredicateReadPlan(segmentIndex int, segment *ScanSegment) (*SegmentReadPlan, error) {
-	if len(it.predPlans) != len(it.Segments) {
-		it.predPlans = make([]*SegmentReadPlan, len(it.Segments))
-	}
-	if plan := it.predPlans[segmentIndex]; plan != nil {
-		return plan, nil
-	}
-	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, it.predicateColumns, segment.Size, segment.PageInfos, it.fileCache)
-	if err != nil {
-		return nil, err
-	}
-	plan.Encoded = it.encodedPredCols
-	it.predPlans[segmentIndex] = plan
-	return plan, nil
+	return it.cachedSegmentReadPlan(segmentIndex, segment, &it.predPlans, it.predicateColumns, it.encodedPredCols, false)
 }
 
 func (it *SegmentScanIterator) segmentOutputReadPlan(segmentIndex int, segment *ScanSegment) (*SegmentReadPlan, error) {
 	if len(it.missingOutputCols) == 0 {
 		return nil, nil
 	}
-	if len(it.outputPlans) != len(it.Segments) {
-		it.outputPlans = make([]*SegmentReadPlan, len(it.Segments))
+	return it.cachedSegmentReadPlan(segmentIndex, segment, &it.outputPlans, it.missingOutputCols, it.EncodedOutputColumns, len(it.EncodedOutputColumns) != 0)
+}
+
+func (it *SegmentScanIterator) cachedSegmentReadPlan(segmentIndex int, segment *ScanSegment, plans *[]*SegmentReadPlan, columns []string, encoded map[string]struct{}, encodedConstants bool) (*SegmentReadPlan, error) {
+	if len(*plans) != len(it.Segments) {
+		*plans = make([]*SegmentReadPlan, len(it.Segments))
 	}
-	if plan := it.outputPlans[segmentIndex]; plan != nil {
+	if plan := (*plans)[segmentIndex]; plan != nil {
 		return plan, nil
 	}
-	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, it.missingOutputCols, segment.Size, segment.PageInfos, it.fileCache)
+	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, columns, segment.Size, segment.PageInfos, it.fileCache)
 	if err != nil {
 		return nil, err
 	}
-	plan.Encoded = it.EncodedOutputColumns
-	plan.EncodedConstants = len(it.EncodedOutputColumns) != 0
-	it.outputPlans[segmentIndex] = plan
+	plan.Encoded = encoded
+	plan.EncodedConstants = encodedConstants
+	(*plans)[segmentIndex] = plan
 	return plan, nil
 }
 
