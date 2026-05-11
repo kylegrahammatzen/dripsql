@@ -719,7 +719,7 @@ func TestSegmentScanIteratorPrunesPersistedInt64ValuePages(t *testing.T) {
 	}
 }
 
-func TestSegmentScanIteratorPrunesTruncatedTextStatsWithHashes(t *testing.T) {
+func TestSegmentScanIteratorPrunesTruncatedTextStatsWithBloom(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "segment.dsv3")
 	ids := make([]int64, TextStatsMaxValues+1)
 	for i := range ids {
@@ -731,12 +731,12 @@ func TestSegmentScanIteratorPrunesTruncatedTextStatsWithHashes(t *testing.T) {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	textStats := meta.Columns[1].Pages[0].Text
-	if textStats == nil || !textStats.Truncated || len(textStats.Hashes) == 0 {
+	if textStats == nil || !textStats.Truncated || len(textStats.hashes) != 0 || len(textStats.HashBloom) == 0 {
 		t.Fatalf("text stats = %#v", textStats)
 	}
 
 	stats := &ExecStats{}
-	pred := Predicate{Column: "event_type", Op: PredicateOpEq, Text: missingTextHashValue(textStats.Hashes)}
+	pred := Predicate{Column: "event_type", Op: PredicateOpEq, Text: missingTextBloomValueAcross(textPageBloomProbes, textStats.HashBloom)}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 
 	visits := 0
@@ -782,30 +782,15 @@ func TestPredicatePruneTextStats(t *testing.T) {
 	assertPruneCandidate(t, exactMeta, Predicate{Column: "event_type", Op: PredicateOpIn, Texts: []string{"missing", "absent"}}, false)
 	assertPruneCandidate(t, exactMeta, Predicate{Column: "event_type", Op: PredicateOpIn, Texts: []string{"missing", "login"}}, true)
 
-	checkoutHash := textHash32String("checkout")
-	loginHash := textHash32String("login")
-	if checkoutHash > loginHash {
-		checkoutHash, loginHash = loginHash, checkoutHash
-	}
-	truncatedMeta := SegmentMeta{Columns: []ColumnMeta{{Name: "event_type", Pages: []PageMeta{{Rows: 3, Text: &TextStats{Hashes: compactSortedUint32([]uint32{checkoutHash, loginHash}), Truncated: true}}}}}}
-	absent := missingTextHashValue(truncatedMeta.Columns[0].Pages[0].Text.Hashes)
+	bloom := newTextPageHashBloom(2)
+	hashBloomAdd(bloom, textHash32String("checkout"), textPageBloomProbes)
+	hashBloomAdd(bloom, textHash32String("login"), textPageBloomProbes)
+	truncatedMeta := SegmentMeta{Columns: []ColumnMeta{{Name: "event_type", Pages: []PageMeta{{Rows: 3, Text: &TextStats{HashBloom: bloom, Truncated: true}}}}}}
+	absent := missingTextBloomValueAcross(textPageBloomProbes, truncatedMeta.Columns[0].Pages[0].Text.HashBloom)
 	assertPruneCandidate(t, truncatedMeta, Predicate{Column: "event_type", Op: PredicateOpEq, Text: absent}, false)
 	assertPruneCandidate(t, truncatedMeta, Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}, true)
 	assertPruneCandidate(t, truncatedMeta, Predicate{Column: "event_type", Op: PredicateOpIn, Texts: []string{absent, absent}}, false)
 	assertPruneCandidate(t, truncatedMeta, Predicate{Column: "event_type", Op: PredicateOpIn, Texts: []string{absent, "login"}}, true)
-}
-
-func TestPredicatePruneTextHashAvoidsLow16FalsePositive(t *testing.T) {
-	value := "event_uuid_page_value"
-	collision := sameLegacyLow16TextHashValue(t, value)
-	if textHash32String(value) == textHash32String(collision) {
-		t.Fatalf("test collision must differ in 32-bit hash: %q %q", value, collision)
-	}
-	meta := SegmentMeta{Columns: []ColumnMeta{{Name: "event_uuid", Pages: []PageMeta{{Rows: 2048, Text: &TextStats{Hashes: []uint32{textHash32String(value)}, Truncated: true}}}}}}
-	pred := Predicate{Column: "event_uuid", Op: PredicateOpEq, Text: collision}
-	if got := BindPrunePredicate(pred, meta).PageCandidate(meta, 0); got {
-		t.Fatalf("PageCandidate = true for legacy 16-bit hash collision %q", collision)
-	}
 }
 
 func TestPredicatePruneSegmentTextHashStats(t *testing.T) {
@@ -825,10 +810,10 @@ func TestPredicatePruneSegmentTextHashStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment B: %v", err)
 	}
-	if metaA.Columns[1].Text == nil || !metaA.Columns[1].Text.Truncated || len(metaA.Columns[1].Text.Hashes) != 0 || len(metaA.Columns[1].Text.HashBloom) == 0 {
+	if metaA.Columns[1].Text == nil || !metaA.Columns[1].Text.Truncated || len(metaA.Columns[1].Text.hashes) != 0 || len(metaA.Columns[1].Text.HashBloom) == 0 {
 		t.Fatalf("segment A text stats = %#v", metaA.Columns[1].Text)
 	}
-	if metaB.Columns[1].Text == nil || !metaB.Columns[1].Text.Truncated || len(metaB.Columns[1].Text.Hashes) != 0 || len(metaB.Columns[1].Text.HashBloom) == 0 {
+	if metaB.Columns[1].Text == nil || !metaB.Columns[1].Text.Truncated || len(metaB.Columns[1].Text.hashes) != 0 || len(metaB.Columns[1].Text.HashBloom) == 0 {
 		t.Fatalf("segment B text stats = %#v", metaB.Columns[1].Text)
 	}
 
@@ -840,7 +825,7 @@ func TestPredicatePruneSegmentTextHashStats(t *testing.T) {
 		t.Fatalf("segment B candidate for segment B value = false")
 	}
 
-	absent := missingTextBloomValueAcross(metaA.Columns[1].Text.HashBloom, metaB.Columns[1].Text.HashBloom)
+	absent := missingTextBloomValueAcross(textSegmentBloomProbes, metaA.Columns[1].Text.HashBloom, metaB.Columns[1].Text.HashBloom)
 	pred = Predicate{Column: "event_type", Op: PredicateOpEq, Text: absent}
 	if got := BindPrunePredicate(pred, metaA).SegmentCandidate(metaA); got {
 		t.Fatalf("segment A candidate for absent value %q = true", absent)
@@ -850,7 +835,58 @@ func TestPredicatePruneSegmentTextHashStats(t *testing.T) {
 	}
 }
 
+func TestSegmentScanIteratorPrunesUUIDStatsWithBloom(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "segment.dsv3")
+	values := make([]types.UUID16, TextStatsMaxValues+1)
+	for i := range values {
+		values[i] = testUUID16(i + 1)
+	}
+	meta, err := WriteSegment(path, 391, []types.Batch{uuidBatch(t, values)})
+	if err != nil {
+		t.Fatalf("WriteSegment: %v", err)
+	}
+	uuidStats := meta.Columns[0].Pages[0].UUID
+	if uuidStats == nil || len(uuidStats.hashes) != 0 || len(uuidStats.HashBloom) == 0 {
+		t.Fatalf("uuid stats = %#v", uuidStats)
+	}
+
+	stats := &ExecStats{}
+	absent := missingUUIDBloomValueAcross(textPageBloomProbes, uuidStats.HashBloom)
+	pred := Predicate{Column: "event_uuid", Op: PredicateOpEq, UUID: absent}
+	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	visits := 0
+	if err := it.ForEach(func(types.Batch, types.SelectionMask) error {
+		visits++
+		return nil
+	}); err != nil {
+		t.Fatalf("ForEach absent: %v", err)
+	}
+	if visits != 0 || stats.PagesTotal != 1 || stats.PagesCandidate != 0 || stats.PayloadBytesRead != 0 {
+		t.Fatalf("absent visits = %d stats = %#v", visits, stats)
+	}
+
+	stats = &ExecStats{}
+	pred = Predicate{Column: "event_uuid", Op: PredicateOpEq, UUID: values[len(values)-1]}
+	it = SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	visits = 0
+	if err := it.ForEach(func(_ types.Batch, sel types.SelectionMask) error {
+		visits++
+		if sel.PopCount() != 1 || !sel.IsSet(len(values)-1) {
+			t.Fatalf("selection = %#v", sel)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("ForEach present: %v", err)
+	}
+	if visits != 1 || stats.PagesCandidate != 1 || stats.RowsMatched != 1 || stats.PayloadBytesRead == 0 {
+		t.Fatalf("present visits = %d stats = %#v", visits, stats)
+	}
+}
+
 func TestTextSegmentBloomSizing(t *testing.T) {
+	if got := textPageBloomWordsFor(types.StandardBatchRows); got != 512 {
+		t.Fatalf("page bloom words = %d, want %d", got, 512)
+	}
 	if got := textSegmentBloomWordsFor(TextStatsMaxValues + 1); got != textSegmentBloomMinWords {
 		t.Fatalf("small bloom words = %d, want %d", got, textSegmentBloomMinWords)
 	}
@@ -925,6 +961,15 @@ func floatOutputBatch(t *testing.T, ids []int64, scores []float64) types.Batch {
 	return batch
 }
 
+func uuidBatch(t *testing.T, values []types.UUID16) types.Batch {
+	t.Helper()
+	batch, err := types.NewBatch([]types.Column{{Name: "event_uuid", Type: types.UUID, V: types.Vec{Kind: types.VecUUID, Encoding: types.EncodingFlat, Len: len(values), UUID: append([]types.UUID16(nil), values...)}}})
+	if err != nil {
+		t.Fatalf("NewBatch: %v", err)
+	}
+	return batch
+}
+
 func segmentPayloadBytes(meta SegmentMeta) int {
 	total := 0
 	for _, col := range meta.Columns {
@@ -935,33 +980,12 @@ func segmentPayloadBytes(meta SegmentMeta) int {
 	return total
 }
 
-func missingTextHashValue(hashes []uint32) string {
-	return missingTextHashValueAcross(hashes)
-}
-
-func missingTextHashValueAcross(hashSets ...[]uint32) string {
-	for i := 0; i < 1_000_000; i++ {
-		value := fmt.Sprintf("missing_%d", i)
-		found := false
-		for _, hashes := range hashSets {
-			if textHashSetHas(hashes, value) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return value
-		}
-	}
-	panic("could not find missing text hash value")
-}
-
-func missingTextBloomValueAcross(blooms ...[]uint64) string {
+func missingTextBloomValueAcross(probes uint64, blooms ...[]uint64) string {
 	for i := 0; i < 1_000_000; i++ {
 		value := fmt.Sprintf("missing_%d", i)
 		found := false
 		for _, bloom := range blooms {
-			if textHashBloomHas(bloom, value) {
+			if hashBloomHas(bloom, textHash32String(value), probes) {
 				found = true
 				break
 			}
@@ -973,36 +997,36 @@ func missingTextBloomValueAcross(blooms ...[]uint64) string {
 	panic("could not find missing text bloom value")
 }
 
+func missingUUIDBloomValueAcross(probes uint64, blooms ...[]uint64) types.UUID16 {
+	for i := 0; i < 1_000_000; i++ {
+		value := testUUID16(i + 1)
+		found := false
+		for _, bloom := range blooms {
+			if hashBloomHas(bloom, uuidHash32(value), probes) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return value
+		}
+	}
+	panic("could not find missing uuid bloom value")
+}
+
+func testUUID16(value int) types.UUID16 {
+	var out types.UUID16
+	out[12] = byte(value >> 24)
+	out[13] = byte(value >> 16)
+	out[14] = byte(value >> 8)
+	out[15] = byte(value)
+	return out
+}
+
 func uniqueEventsWithPrefix(prefix string, n int) []string {
 	events := make([]string, n)
 	for i := range events {
 		events[i] = fmt.Sprintf("%s%04d", prefix, i)
 	}
 	return events
-}
-
-func sameLegacyLow16TextHashValue(t *testing.T, value string) string {
-	t.Helper()
-	want := legacyTextHash16(value)
-	for i := 0; i < 1_000_000; i++ {
-		candidate := fmt.Sprintf("legacy_collision_%d", i)
-		if candidate != value && legacyTextHash16(candidate) == want && textHash32String(candidate) != textHash32String(value) {
-			return candidate
-		}
-	}
-	t.Fatalf("could not find legacy 16-bit text hash collision for %q", value)
-	return ""
-}
-
-func legacyTextHash16(value string) uint16 {
-	const (
-		offset64 = 14695981039346656037
-		prime64  = 1099511628211
-	)
-	hash := uint64(offset64)
-	for i := 0; i < len(value); i++ {
-		hash ^= uint64(value[i])
-		hash *= prime64
-	}
-	return uint16(hash ^ (hash >> 32) ^ (hash >> 16))
 }

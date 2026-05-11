@@ -21,10 +21,12 @@ type boundNode struct {
 	lo         int64
 	hi         int64
 	textValue  string
+	uuidValue  types.UUID16
 
 	boolSet boolMatcher
 	intSet  int64Matcher
 	textSet textMatcher
+	uuidSet uuidMatcher
 
 	children []boundNode
 }
@@ -42,6 +44,11 @@ type int64Matcher struct {
 type textMatcher struct {
 	small []string
 	large map[string]struct{}
+}
+
+type uuidMatcher struct {
+	small []types.UUID16
+	large map[types.UUID16]struct{}
 }
 
 type PredicateEvaluator interface {
@@ -158,9 +165,11 @@ func bindEvalNode(pred Predicate, batch types.Batch) (boundNode, error) {
 		lo:         pred.Lo,
 		hi:         pred.Hi,
 		textValue:  pred.Text,
+		uuidValue:  pred.UUID,
 		boolSet:    newBoolMatcher(pred.Bools),
 		intSet:     newInt64Matcher(pred.Int64s),
 		textSet:    newTextMatcher(pred.Texts),
+		uuidSet:    newUUIDMatcher(pred.UUIDs),
 	}
 	switch pred.Op {
 	case PredicateNone:
@@ -385,40 +394,64 @@ func (m textMatcher) Has(value string) bool {
 	return false
 }
 
-func (m textMatcher) AnyHashIn(hashes []uint32) bool {
-	if len(hashes) == 0 {
+func (m textMatcher) AnyInBloom(bloom []uint64, probes uint64) bool {
+	if len(bloom) == 0 {
 		return true
 	}
 	if m.large != nil {
 		for value := range m.large {
-			if _, ok := slices.BinarySearch(hashes, textHash32String(value)); ok {
+			if hashBloomHas(bloom, textHash32String(value), probes) {
 				return true
 			}
 		}
 		return false
 	}
 	for _, value := range m.small {
-		if _, ok := slices.BinarySearch(hashes, textHash32String(value)); ok {
+		if hashBloomHas(bloom, textHash32String(value), probes) {
 			return true
 		}
 	}
 	return false
 }
 
-func (m textMatcher) AnyInBloom(bloom []uint64) bool {
+func newUUIDMatcher(values []types.UUID16) uuidMatcher {
+	if len(values) <= 8 {
+		return uuidMatcher{small: slices.Clone(values)}
+	}
+	large := make(map[types.UUID16]struct{}, len(values))
+	for _, value := range values {
+		large[value] = struct{}{}
+	}
+	return uuidMatcher{large: large}
+}
+
+func (m uuidMatcher) Has(value types.UUID16) bool {
+	if m.large != nil {
+		_, ok := m.large[value]
+		return ok
+	}
+	for _, candidate := range m.small {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
+func (m uuidMatcher) AnyInBloom(bloom []uint64, probes uint64) bool {
 	if len(bloom) == 0 {
 		return true
 	}
 	if m.large != nil {
 		for value := range m.large {
-			if textHashBloomHas(bloom, value) {
+			if hashBloomHas(bloom, uuidHash32(value), probes) {
 				return true
 			}
 		}
 		return false
 	}
 	for _, value := range m.small {
-		if textHashBloomHas(bloom, value) {
+		if hashBloomHas(bloom, uuidHash32(value), probes) {
 			return true
 		}
 	}

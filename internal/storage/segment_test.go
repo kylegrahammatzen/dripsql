@@ -2,9 +2,11 @@ package storage
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -49,6 +51,31 @@ func TestReadColumnPageRoundTrip(t *testing.T) {
 	}
 	if types.IsValid(col.V.Valid, 1) {
 		t.Fatal("row 1 should be invalid")
+	}
+}
+
+func TestWriteSegmentUsesFlateForCompressibleHighCardinalityText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "segment.dsv3")
+	batch := compressibleTextBatch(t, types.StandardBatchRows)
+	meta, err := WriteSegment(path, 12, []types.Batch{batch})
+	if err != nil {
+		t.Fatalf("WriteSegment: %v", err)
+	}
+	page := meta.Columns[0].Pages[0]
+	if page.Encoding != types.EncodingFlate {
+		t.Fatalf("encoding = %s, want flate", page.Encoding)
+	}
+	plainBytes := int64(page.Text.DataBytes) + int64(page.Rows)*4 + 4
+	if int64(page.Length) >= plainBytes {
+		t.Fatalf("stored length = %d, plain = %d", page.Length, plainBytes)
+	}
+
+	col, err := ReadColumnPage(path, meta, 0, 0)
+	if err != nil {
+		t.Fatalf("ReadColumnPage: %v", err)
+	}
+	if got, want := col.V.Var.String(77), batch.Columns[0].V.Var.String(77); got != want {
+		t.Fatalf("row 77 = %q, want %q", got, want)
 	}
 }
 
@@ -325,6 +352,24 @@ func TestWriteSegmentStoresSummaryStats(t *testing.T) {
 	}
 }
 
+func TestWriteSegmentDropsTruncatedValueStatsPayload(t *testing.T) {
+	ids := make([]int64, ValueStatsMaxValues+1)
+	events := make([]string, len(ids))
+	for i := range ids {
+		ids[i] = int64(i)
+		events[i] = "checkout"
+	}
+	path := filepath.Join(t.TempDir(), "segment.dsv3")
+	meta, err := WriteSegment(path, 21, []types.Batch{segmentBatch(t, ids, events)})
+	if err != nil {
+		t.Fatalf("WriteSegment: %v", err)
+	}
+	stats := meta.Columns[0].Pages[0].Int64Values
+	if stats == nil || !stats.Truncated || len(stats.Values) != 0 {
+		t.Fatalf("value stats = %#v, want truncated with no values", stats)
+	}
+}
+
 func TestWriteSegmentPicksConstantTextPage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "segment.dsv3")
 	batches := []types.Batch{segmentBatch(t, []int64{1, 2, 3, 4}, []string{"checkout", "checkout", "checkout", "checkout"})}
@@ -482,6 +527,20 @@ func segmentBatch(t *testing.T, ids []int64, events []string, invalidRows ...int
 		{Name: "tenant_id", Type: types.Int64, V: types.Vec{Kind: types.VecInt64, Encoding: types.EncodingFlat, Len: len(ids), Valid: valid, I64: append([]int64(nil), ids...)}},
 		{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingFlat, Len: len(events), Var: varText}},
 	})
+	if err != nil {
+		t.Fatalf("NewBatch: %v", err)
+	}
+	return batch
+}
+
+func compressibleTextBatch(t *testing.T, rows int) types.Batch {
+	t.Helper()
+	varText := types.NewVarBytes(rows, rows*128)
+	for row := 0; row < rows; row++ {
+		value := fmt.Sprintf("%s/%08d/%s", strings.Repeat("/users/events", 8), row, strings.Repeat("x", 32))
+		varText.AppendString(row, value)
+	}
+	batch, err := types.NewBatch([]types.Column{{Name: "url", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingFlat, Len: rows, Var: varText}}})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}

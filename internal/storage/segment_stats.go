@@ -2,7 +2,6 @@ package storage
 
 import (
 	"math"
-	"slices"
 	"strconv"
 
 	"github.com/kylegrahammatzen/dripsql/internal/types"
@@ -17,9 +16,11 @@ const (
 
 const (
 	textSegmentBloomBitsPerValue = 16
+	textPageBloomBitsPerValue    = 16
 	textSegmentBloomMinWords     = 1024
 	textSegmentBloomMaxWords     = 128 * 1024
 	textSegmentBloomProbes       = 3
+	textPageBloomProbes          = 5
 )
 
 type Int32Stats struct {
@@ -54,11 +55,17 @@ type Int32ValueStats = ValueStats[int32]
 type Int64ValueStats = ValueStats[int64]
 
 type TextStats struct {
+	DataBytes uint64
 	Values    []string
 	Counts    []uint32
-	Hashes    []uint32
 	HashBloom []uint64
 	Truncated bool
+	hashes    []uint32
+}
+
+type UUIDStats struct {
+	HashBloom []uint64
+	hashes    []uint32
 }
 
 type ExecStats struct {
@@ -113,6 +120,8 @@ func applyPageStats(page *PageMeta, v types.Vec) {
 		page.Int64Values = int64ValueStats(v.I64[:v.Len], v.Valid)
 	case types.VecText, types.VecBytes, types.VecJSON:
 		page.Text = textStats(v.Var, v.Valid)
+	case types.VecUUID:
+		page.UUID = uuidStats(v.UUID[:v.Len], v.Valid)
 	}
 }
 
@@ -271,11 +280,15 @@ func int64ValueStats(values []int64, valid types.Validity) *Int64ValueStats {
 }
 
 func addInt32ValueStat(out *Int32ValueStats, seen map[int32]struct{}, value int32) {
+	if out.Truncated {
+		return
+	}
 	if _, ok := seen[value]; ok {
 		return
 	}
 	if len(out.Values) >= ValueStatsMaxValues {
 		out.Truncated = true
+		out.Values = nil
 		return
 	}
 	seen[value] = struct{}{}
@@ -283,11 +296,15 @@ func addInt32ValueStat(out *Int32ValueStats, seen map[int32]struct{}, value int3
 }
 
 func addInt64ValueStat(out *Int64ValueStats, seen map[int64]struct{}, value int64) {
+	if out.Truncated {
+		return
+	}
 	if _, ok := seen[value]; ok {
 		return
 	}
 	if len(out.Values) >= ValueStatsMaxValues {
 		out.Truncated = true
+		out.Values = nil
 		return
 	}
 	seen[value] = struct{}{}
@@ -302,14 +319,19 @@ func addInt64Stat(left int64, right int64) (int64, bool) {
 }
 
 func textStats(values types.VarBytes, valid types.Validity) *TextStats {
-	out := &TextStats{Values: make([]string, 0, min(values.Rows(), TextStatsMaxValues)), Counts: make([]uint32, 0, min(values.Rows(), TextStatsMaxValues))}
+	out := &TextStats{DataBytes: uint64(len(values.Data)), Values: make([]string, 0, min(values.Rows(), TextStatsMaxValues)), Counts: make([]uint32, 0, min(values.Rows(), TextStatsMaxValues))}
 	seen := make(map[string]int, min(values.Rows(), TextStatsMaxValues))
-	hashes := make([]uint32, 0, values.Rows())
+	var hashes []uint32
+	ok := false
 	for row := 0; row < values.Rows(); row++ {
 		if !types.IsValid(valid, row) {
 			continue
 		}
-		hashes = append(hashes, textHash32Bytes(values.Bytes(row)))
+		ok = true
+		if out.Truncated {
+			hashes = append(hashes, textHash32Bytes(values.Bytes(row)))
+			continue
+		}
 		value := values.String(row)
 		if index, ok := seen[value]; ok {
 			out.Counts[index]++
@@ -317,18 +339,25 @@ func textStats(values types.VarBytes, valid types.Validity) *TextStats {
 		}
 		if len(out.Values) >= TextStatsMaxValues {
 			out.Truncated = true
+			hashes = make([]uint32, 0, values.Rows())
+			for _, existing := range out.Values {
+				hashes = append(hashes, textHash32String(existing))
+			}
+			hashes = append(hashes, textHash32Bytes(values.Bytes(row)))
+			out.Values = nil
+			out.Counts = nil
+			seen = nil
 			continue
 		}
 		seen[value] = len(out.Values)
 		out.Values = append(out.Values, values.StringCopy(row))
 		out.Counts = append(out.Counts, 1)
 	}
-	if len(out.Values) == 0 {
+	if !ok {
 		return nil
 	}
 	if out.Truncated {
-		slices.Sort(hashes)
-		out.Hashes = compactSortedUint32(hashes)
+		out.hashes = hashes
 	}
 	return out
 }
@@ -360,6 +389,33 @@ func textHash32String(value string) uint32 {
 }
 
 func textHash32Bytes(value []byte) uint32 {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	hash := uint64(offset64)
+	for _, b := range value {
+		hash ^= uint64(b)
+		hash *= prime64
+	}
+	return uint32(hash ^ (hash >> 32))
+}
+
+func uuidStats(values []types.UUID16, valid types.Validity) *UUIDStats {
+	hashes := make([]uint32, 0, len(values))
+	for row, value := range values {
+		if !types.IsValid(valid, row) {
+			continue
+		}
+		hashes = append(hashes, uuidHash32(value))
+	}
+	if len(hashes) == 0 {
+		return nil
+	}
+	return &UUIDStats{hashes: hashes}
+}
+
+func uuidHash32(value types.UUID16) uint32 {
 	const (
 		offset64 = 14695981039346656037
 		prime64  = 1099511628211
@@ -438,8 +494,9 @@ func mergeTextStats(left *TextStats, right *TextStats) *TextStats {
 		return left
 	}
 	if left == nil {
-		return &TextStats{Values: append([]string(nil), right.Values...), Counts: append([]uint32(nil), right.Counts...), Truncated: right.Truncated || len(right.Counts) != len(right.Values)}
+		return &TextStats{DataBytes: right.DataBytes, Values: append([]string(nil), right.Values...), Counts: append([]uint32(nil), right.Counts...), Truncated: right.Truncated || len(right.Counts) != len(right.Values)}
 	}
+	left.DataBytes += right.DataBytes
 	if len(left.Counts) != len(left.Values) || len(right.Counts) != len(right.Values) {
 		left.Truncated = true
 	}
@@ -468,11 +525,62 @@ func mergeTextStats(left *TextStats, right *TextStats) *TextStats {
 		}
 	}
 	left.Truncated = left.Truncated || right.Truncated
-	left.Hashes = nil
+	left.hashes = nil
 	return left
 }
 
-func finalizeColumnTextHashes(col *ColumnMeta) {
+func mergeUUIDStats(left *UUIDStats, right *UUIDStats) *UUIDStats {
+	if right == nil {
+		return left
+	}
+	if left == nil {
+		return &UUIDStats{hashes: append([]uint32(nil), right.hashes...)}
+	}
+	left.hashes = append(left.hashes, right.hashes...)
+	return left
+}
+
+func finalizeColumnUUIDBlooms(col *ColumnMeta) {
+	if col.UUID == nil {
+		return
+	}
+	valueCount := 0
+	for _, page := range col.Pages {
+		if page.UUID == nil {
+			continue
+		}
+		if len(page.UUID.hashes) == 0 {
+			col.UUID.HashBloom = nil
+			return
+		}
+		valueCount += len(page.UUID.hashes)
+	}
+	if valueCount == 0 {
+		return
+	}
+	bloom := newTextHashBloom(valueCount)
+	for i := range col.Pages {
+		page := &col.Pages[i]
+		if page.UUID == nil {
+			continue
+		}
+		if len(page.UUID.hashes) == 0 {
+			col.UUID.HashBloom = nil
+			return
+		}
+		pageBloom := newTextPageHashBloom(len(page.UUID.hashes))
+		for _, hash := range page.UUID.hashes {
+			hashBloomAdd(bloom, hash, textSegmentBloomProbes)
+			hashBloomAdd(pageBloom, hash, textPageBloomProbes)
+		}
+		page.UUID.hashes = nil
+		page.UUID.HashBloom = pageBloom
+	}
+	col.UUID.hashes = nil
+	col.UUID.HashBloom = bloom
+}
+
+func finalizeColumnTextBlooms(col *ColumnMeta) {
 	if col.Text == nil || !col.Text.Truncated {
 		return
 	}
@@ -482,11 +590,11 @@ func finalizeColumnTextHashes(col *ColumnMeta) {
 			continue
 		}
 		if page.Text.Truncated {
-			if len(page.Text.Hashes) == 0 {
+			if len(page.Text.hashes) == 0 {
 				col.Text.HashBloom = nil
 				return
 			}
-			valueCount += len(page.Text.Hashes)
+			valueCount += len(page.Text.hashes)
 			continue
 		}
 		valueCount += len(page.Text.Values)
@@ -496,31 +604,44 @@ func finalizeColumnTextHashes(col *ColumnMeta) {
 	}
 	bloom := newTextHashBloom(valueCount)
 	hasValue := false
-	for _, page := range col.Pages {
+	for i := range col.Pages {
+		page := &col.Pages[i]
 		if page.Text == nil {
 			continue
 		}
 		if page.Text.Truncated {
-			if len(page.Text.Hashes) == 0 {
+			if len(page.Text.hashes) == 0 {
 				col.Text.HashBloom = nil
 				return
 			}
-			for _, hash := range page.Text.Hashes {
-				textHashBloomAdd(bloom, hash)
+			pageBloom := newTextPageHashBloom(len(page.Text.hashes))
+			for _, hash := range page.Text.hashes {
+				hashBloomAdd(bloom, hash, textSegmentBloomProbes)
+				hashBloomAdd(pageBloom, hash, textPageBloomProbes)
 			}
+			page.Text.hashes = nil
+			page.Text.HashBloom = pageBloom
 			hasValue = true
 			continue
 		}
 		for _, value := range page.Text.Values {
-			textHashBloomAdd(bloom, textHash32String(value))
+			hashBloomAdd(bloom, textHash32String(value), textSegmentBloomProbes)
 		}
 		hasValue = hasValue || len(page.Text.Values) != 0
 	}
 	if !hasValue {
 		return
 	}
-	col.Text.Hashes = nil
+	col.Text.hashes = nil
 	col.Text.HashBloom = bloom
+}
+
+func newTextPageHashBloom(valueCount int) []uint64 {
+	words := textPageBloomWordsFor(valueCount)
+	if words == 0 {
+		return nil
+	}
+	return make([]uint64, words)
 }
 
 func newTextHashBloom(valueCount int) []uint64 {
@@ -531,28 +652,62 @@ func newTextHashBloom(valueCount int) []uint64 {
 	return make([]uint64, words)
 }
 
-func textHashBloomAdd(bloom []uint64, hash uint32) {
+func hashBloomAdd(bloom []uint64, hash uint32, probes uint64) {
 	if len(bloom) == 0 {
 		return
 	}
-	for probe := uint64(0); probe < textSegmentBloomProbes; probe++ {
+	for probe := uint64(0); probe < probes; probe++ {
 		bit := textHashBloomBit(hash, probe, len(bloom))
 		bloom[bit>>6] |= uint64(1) << (bit & 63)
 	}
 }
 
-func textHashBloomHas(bloom []uint64, value string) bool {
+func textPageHashBloomHas(bloom []uint64, value string) bool {
 	if len(bloom) == 0 {
 		return true
 	}
 	hash := textHash32String(value)
-	for probe := uint64(0); probe < textSegmentBloomProbes; probe++ {
+	return hashBloomHas(bloom, hash, textPageBloomProbes)
+}
+
+func textSegmentHashBloomHas(bloom []uint64, value string) bool {
+	if len(bloom) == 0 {
+		return true
+	}
+	hash := textHash32String(value)
+	return hashBloomHas(bloom, hash, textSegmentBloomProbes)
+}
+
+func uuidPageHashBloomHas(bloom []uint64, value types.UUID16) bool {
+	if len(bloom) == 0 {
+		return true
+	}
+	return hashBloomHas(bloom, uuidHash32(value), textPageBloomProbes)
+}
+
+func uuidSegmentHashBloomHas(bloom []uint64, value types.UUID16) bool {
+	if len(bloom) == 0 {
+		return true
+	}
+	return hashBloomHas(bloom, uuidHash32(value), textSegmentBloomProbes)
+}
+
+func hashBloomHas(bloom []uint64, hash uint32, probes uint64) bool {
+	for probe := uint64(0); probe < probes; probe++ {
 		bit := textHashBloomBit(hash, probe, len(bloom))
 		if bloom[bit>>6]&(uint64(1)<<(bit&63)) == 0 {
 			return false
 		}
 	}
 	return true
+}
+
+func textPageBloomWordsFor(valueCount int) int {
+	if valueCount <= 0 {
+		return 0
+	}
+	bits := valueCount * textPageBloomBitsPerValue
+	return nextPowerOfTwo((bits + 63) / 64)
 }
 
 func textSegmentBloomWordsFor(valueCount int) int {

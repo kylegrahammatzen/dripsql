@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/kylegrahammatzen/dripsql/internal/explain"
+	v3sql "github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
@@ -674,6 +675,26 @@ func TestEngineExplainAnalyzeReportsExecutionStats(t *testing.T) {
 		if !hasExplainSection(explained, section) {
 			t.Fatalf("missing section %q in %#v", section, explained.Values)
 		}
+	}
+}
+
+func TestEngineExplainReportsUUIDSummaryPrune(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		expr     v3sql.BoundExpr
+		eligible bool
+	}{
+		{name: "equal", expr: v3sql.BoundExpr{Kind: v3sql.BoundExprBinary, Op: v3sql.BoundOpEqual}, eligible: true},
+		{name: "not equal", expr: v3sql.BoundExpr{Kind: v3sql.BoundExprBinary, Op: v3sql.BoundOpNotEqual}},
+		{name: "in", expr: v3sql.BoundExpr{Kind: v3sql.BoundExprIn}, eligible: true},
+		{name: "not in", expr: v3sql.BoundExpr{Kind: v3sql.BoundExprIn, Not: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			strategy, eligible := pruneStrategy(tc.expr, types.KindUUID)
+			if strategy != "uuid summary prune" || eligible != tc.eligible {
+				t.Fatalf("pruneStrategy = %q, %v; want uuid summary prune, %v", strategy, eligible, tc.eligible)
+			}
+		})
 	}
 }
 

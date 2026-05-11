@@ -35,6 +35,9 @@ type Predicate struct {
 	Text  string
 	Texts []string
 
+	UUID  types.UUID16
+	UUIDs []types.UUID16
+
 	Children []Predicate
 }
 

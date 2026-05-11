@@ -1,6 +1,9 @@
 package types
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 type Vec struct {
 	Kind     VecKind
@@ -43,6 +46,43 @@ type Run struct {
 	Bool   bool
 	U32    uint32
 	Bytes  []byte
+}
+
+func (v Vec) Clone() Vec {
+	out := v
+	out.Valid = slices.Clone(v.Valid)
+	out.BoolBits = slices.Clone(v.BoolBits)
+	out.I16 = slices.Clone(v.I16)
+	out.I32 = slices.Clone(v.I32)
+	out.I64 = slices.Clone(v.I64)
+	out.F32 = slices.Clone(v.F32)
+	out.F64 = slices.Clone(v.F64)
+	out.UUID = slices.Clone(v.UUID)
+	out.U32 = slices.Clone(v.U32)
+	out.Var = v.Var.Clone()
+	out.DictIDs = slices.Clone(v.DictIDs)
+	out.DictValues = v.DictValues.Clone()
+	out.ConstantBytes = slices.Clone(v.ConstantBytes)
+	out.FORData = slices.Clone(v.FORData)
+	out.Runs = cloneRuns(v.Runs)
+	return out
+}
+
+func (r Run) Clone() Run {
+	out := r
+	out.Bytes = slices.Clone(r.Bytes)
+	return out
+}
+
+func cloneRuns(runs []Run) []Run {
+	if len(runs) == 0 {
+		return nil
+	}
+	out := make([]Run, len(runs))
+	for i, run := range runs {
+		out[i] = run.Clone()
+	}
+	return out
 }
 
 func (v Vec) validate() error {
@@ -118,7 +158,7 @@ func (v Vec) validateFlat() error {
 
 func (v Vec) validateNonFlat() error {
 	switch v.Encoding {
-	case EncodingDictionary, EncodingConstant, EncodingSequence, EncodingFORBitPack:
+	case EncodingDictionary, EncodingConstant, EncodingSequence, EncodingFORBitPack, EncodingFlate:
 		return nil
 	default:
 		return fmt.Errorf("invalid vector encoding %s", v.Encoding)

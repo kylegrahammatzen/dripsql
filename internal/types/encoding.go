@@ -10,6 +10,7 @@ const (
 	EncodingConstant
 	EncodingSequence
 	EncodingFORBitPack
+	EncodingFlate
 )
 
 func (e Encoding) String() string {
@@ -24,6 +25,8 @@ func (e Encoding) String() string {
 		return "sequence"
 	case EncodingFORBitPack:
 		return "for+bitpack"
+	case EncodingFlate:
+		return "flate"
 	default:
 		return fmt.Sprintf("encoding(%d)", e)
 	}

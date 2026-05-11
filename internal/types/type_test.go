@@ -99,6 +99,8 @@ func TestEncodingStringForAllEncodings(t *testing.T) {
 		EncodingDictionary: "dictionary",
 		EncodingConstant:   "constant",
 		EncodingSequence:   "sequence",
+		EncodingFORBitPack: "for+bitpack",
+		EncodingFlate:      "flate",
 	}
 	for e, name := range want {
 		if got := e.String(); got != name {

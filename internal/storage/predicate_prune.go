@@ -32,9 +32,11 @@ func bindPruneNode(pred Predicate, meta SegmentMeta) boundNode {
 		lo:         pred.Lo,
 		hi:         pred.Hi,
 		textValue:  pred.Text,
+		uuidValue:  pred.UUID,
 		boolSet:    newBoolMatcher(pred.Bools),
 		intSet:     newInt64Matcher(pred.Int64s),
 		textSet:    newTextMatcher(pred.Texts),
+		uuidSet:    newUUIDMatcher(pred.UUIDs),
 	}
 	switch pred.Op {
 	case PredicateNone:
@@ -132,6 +134,9 @@ func pruneSegmentLeafCandidate(meta SegmentMeta, pred boundNode) bool {
 	if col.Text != nil && !pruneTextSegmentCandidate(*col.Text, pred) {
 		return false
 	}
+	if col.UUID != nil && !pruneUUIDSegmentCandidate(*col.UUID, pred) {
+		return false
+	}
 	return true
 }
 
@@ -163,6 +168,9 @@ func prunePageLeafCandidate(meta SegmentMeta, pageIndex int, pred boundNode) boo
 		return false
 	}
 	if page.Text != nil && !pruneTextPageCandidate(*page.Text, pred) {
+		return false
+	}
+	if page.UUID != nil && !pruneUUIDPageCandidate(*page.UUID, pred) {
 		return false
 	}
 	return true
@@ -247,9 +255,15 @@ func pruneTextPageCandidate(stats TextStats, pred boundNode) bool {
 	if stats.Truncated {
 		switch pred.op {
 		case PredicateOpEq:
-			return textHashSetHas(stats.Hashes, pred.textValue)
+			if len(stats.HashBloom) != 0 {
+				return textPageHashBloomHas(stats.HashBloom, pred.textValue)
+			}
+			return true
 		case PredicateOpIn:
-			return pred.textSet.AnyHashIn(stats.Hashes)
+			if len(stats.HashBloom) != 0 {
+				return pred.textSet.AnyInBloom(stats.HashBloom, textPageBloomProbes)
+			}
+			return true
 		default:
 			return true
 		}
@@ -273,9 +287,9 @@ func pruneTextSegmentCandidate(stats TextStats, pred boundNode) bool {
 	if stats.Truncated && len(stats.HashBloom) != 0 {
 		switch pred.op {
 		case PredicateOpEq:
-			return textHashBloomHas(stats.HashBloom, pred.textValue)
+			return textSegmentHashBloomHas(stats.HashBloom, pred.textValue)
 		case PredicateOpIn:
-			return pred.textSet.AnyInBloom(stats.HashBloom)
+			return pred.textSet.AnyInBloom(stats.HashBloom, textSegmentBloomProbes)
 		default:
 			return true
 		}
@@ -283,19 +297,33 @@ func pruneTextSegmentCandidate(stats TextStats, pred boundNode) bool {
 	return pruneTextPageCandidate(stats, pred)
 }
 
+func pruneUUIDPageCandidate(stats UUIDStats, pred boundNode) bool {
+	switch pred.op {
+	case PredicateOpEq:
+		return uuidPageHashBloomHas(stats.HashBloom, pred.uuidValue)
+	case PredicateOpIn:
+		return pred.uuidSet.AnyInBloom(stats.HashBloom, textPageBloomProbes)
+	default:
+		return true
+	}
+}
+
+func pruneUUIDSegmentCandidate(stats UUIDStats, pred boundNode) bool {
+	switch pred.op {
+	case PredicateOpEq:
+		return uuidSegmentHashBloomHas(stats.HashBloom, pred.uuidValue)
+	case PredicateOpIn:
+		return pred.uuidSet.AnyInBloom(stats.HashBloom, textSegmentBloomProbes)
+	default:
+		return true
+	}
+}
+
 func boolStatsHas(stats BoolStats, value bool) bool {
 	if value {
 		return stats.HasTrue
 	}
 	return stats.HasFalse
-}
-
-func textHashSetHas(hashes []uint32, value string) bool {
-	if len(hashes) == 0 {
-		return true
-	}
-	_, ok := slices.BinarySearch(hashes, textHash32String(value))
-	return ok
 }
 
 func int64ToInt32Value(value int64) (int32, bool) {

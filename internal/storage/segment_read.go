@@ -475,6 +475,8 @@ func pageCodec(enc types.Encoding) (codec.Codec, error) {
 		return codec.Constant{}, nil
 	case types.EncodingFORBitPack:
 		return codec.FORBitPack{}, nil
+	case types.EncodingFlate:
+		return codec.Flate{}, nil
 	default:
 		return nil, fmt.Errorf("missing codec %s", enc)
 	}

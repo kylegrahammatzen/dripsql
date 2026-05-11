@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"bufio"
 	"bytes"
+	"compress/flate"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -15,7 +17,17 @@ import (
 
 const segmentMagic = "DRIPV3S1"
 
-const segmentPageMetaFooterBytes = 4 + 4 + 4 + 8 + 8 + 1 + 1 + 2 + 6
+const segmentWriteBufferBytes = 4 << 20
+
+const (
+	segmentFooterPlainMagic = "DRIPFTR0"
+	segmentFooterFlateMagic = "DRIPFTZ1"
+)
+
+// Minimum encoded bytes for a PageMeta before optional stats payloads:
+// rowStart(4), rows(4), nullCount(4), offset(8), length(8), kind(1),
+// encoding(1), allValid/allNull(2), and seven stats presence flags.
+const segmentPageMetaFooterBytes = 4 + 4 + 4 + 8 + 8 + 1 + 1 + 2 + 7
 
 type SegmentID uint64
 
@@ -34,6 +46,7 @@ type PageMeta struct {
 	Int64       *Int64Stats
 	Int32Values *Int32ValueStats
 	Int64Values *Int64ValueStats
+	UUID        *UUIDStats
 	Text        *TextStats
 }
 
@@ -48,6 +61,7 @@ type ColumnMeta struct {
 	Bool       *BoolStats
 	Int32      *Int32Stats
 	Int64      *Int64Stats
+	UUID       *UUIDStats
 	Text       *TextStats
 	Pages      []PageMeta
 }
@@ -77,7 +91,8 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 			_ = os.Remove(path)
 		}
 	}()
-	if _, err := file.WriteString(segmentMagic); err != nil {
+	writer := bufio.NewWriterSize(file, segmentWriteBufferBytes)
+	if _, err := writer.WriteString(segmentMagic); err != nil {
 		return SegmentMeta{}, err
 	}
 	offset := uint64(len(segmentMagic))
@@ -94,7 +109,7 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 		}
 		for colIndex, page := range pages {
 			page.meta.Offset = offset
-			if _, err := file.Write(page.payload); err != nil {
+			if _, err := writer.Write(page.payload); err != nil {
 				return SegmentMeta{}, err
 			}
 			offset += uint64(len(page.payload))
@@ -105,6 +120,7 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 			colMeta.Bool = mergeBoolStats(colMeta.Bool, page.meta.Bool)
 			colMeta.Int32 = mergeInt32Stats(colMeta.Int32, page.meta.Int32)
 			colMeta.Int64 = mergeInt64Stats(colMeta.Int64, page.meta.Int64)
+			colMeta.UUID = mergeUUIDStats(colMeta.UUID, page.meta.UUID)
 			colMeta.Text = mergeTextStats(colMeta.Text, page.meta.Text)
 			colMeta.Pages = append(colMeta.Pages, page.meta)
 		}
@@ -114,21 +130,25 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 		colMeta := &meta.Columns[i]
 		colMeta.AllValid = colMeta.NullCount == 0
 		colMeta.AllNull = colMeta.NullCount == colMeta.Rows
-		finalizeColumnTextHashes(colMeta)
+		finalizeColumnTextBlooms(colMeta)
+		finalizeColumnUUIDBlooms(colMeta)
 	}
 	footer, err := marshalSegmentMeta(meta)
 	if err != nil {
 		return SegmentMeta{}, err
 	}
-	if _, err := file.Write(footer); err != nil {
+	if _, err := writer.Write(footer); err != nil {
 		return SegmentMeta{}, err
 	}
 	var tail [8]byte
 	binary.LittleEndian.PutUint64(tail[:], uint64(len(footer)))
-	if _, err := file.Write(tail[:]); err != nil {
+	if _, err := writer.Write(tail[:]); err != nil {
 		return SegmentMeta{}, err
 	}
-	if _, err := file.WriteString(segmentMagic); err != nil {
+	if _, err := writer.WriteString(segmentMagic); err != nil {
+		return SegmentMeta{}, err
+	}
+	if err := writer.Flush(); err != nil {
 		return SegmentMeta{}, err
 	}
 	if err := file.Sync(); err != nil {
@@ -226,6 +246,11 @@ func ReadSegmentFooter(path string) (SegmentMeta, error) {
 func encodeSegmentPageInto(v types.Vec, scratch []byte) (codec.Page, []byte, error) {
 	if v.Kind == types.VecText {
 		if best, ok := codec.PickSmallestPrepared(v, codec.Plain{}, codec.Dictionary{}, codec.Constant{}); ok {
+			if best.Encoding() == types.EncodingFlat {
+				if flate, ok := (codec.Flate{}).Prepare(v); ok && flate.Size() < best.Size() {
+					best = flate
+				}
+			}
 			page, err := best.EncodeInto(scratch)
 			return page, nextPageScratch(scratch, page.Payload), err
 		}
@@ -275,49 +300,138 @@ func totalBatchRows(batches []types.Batch) int {
 }
 
 func marshalSegmentMeta(meta SegmentMeta) ([]byte, error) {
-	var buf bytes.Buffer
-	writeU64(&buf, uint64(meta.ID))
-	writeU32(&buf, meta.Rows)
-	writeU32(&buf, meta.PageRows)
-	writeU32(&buf, uint32(len(meta.Columns)))
+	raw, err := marshalSegmentMetaRaw(meta)
+	if err != nil {
+		return nil, err
+	}
+	return encodeSegmentFooter(raw)
+}
+
+func marshalSegmentMetaRaw(meta SegmentMeta) ([]byte, error) {
+	w := segmentMetaWriter{}
+	writeU64(&w, uint64(meta.ID))
+	writeU32(&w, meta.Rows)
+	writeU32(&w, meta.PageRows)
+	writeU32(&w, uint32(len(meta.Columns)))
 	for _, col := range meta.Columns {
-		writeString(&buf, col.Name)
-		writeType(&buf, col.Type)
-		writeU32(&buf, uint32(len(col.EnumLabels)))
+		writeString(&w, col.Name)
+		writeType(&w, col.Type)
+		writeU32(&w, uint32(len(col.EnumLabels)))
 		for _, label := range col.EnumLabels {
-			writeString(&buf, label)
+			writeString(&w, label)
 		}
-		writeU32(&buf, col.Rows)
-		writeU32(&buf, col.NullCount)
-		writeBool(&buf, col.AllValid)
-		writeBool(&buf, col.AllNull)
-		writeBoolStats(&buf, col.Bool)
-		writeInt32Stats(&buf, col.Int32)
-		writeInt64Stats(&buf, col.Int64)
-		writeTextStats(&buf, col.Text)
-		writeU32(&buf, uint32(len(col.Pages)))
+		writeU32(&w, col.Rows)
+		writeU32(&w, col.NullCount)
+		writeBool(&w, col.AllValid)
+		writeBool(&w, col.AllNull)
+		writeBoolStats(&w, col.Bool)
+		writeInt32Stats(&w, col.Int32)
+		writeInt64Stats(&w, col.Int64)
+		writeUUIDStats(&w, col.UUID)
+		writeTextStats(&w, col.Text)
+		writeU32(&w, uint32(len(col.Pages)))
 		for _, page := range col.Pages {
-			writeU32(&buf, page.RowStart)
-			writeU32(&buf, page.Rows)
-			writeU32(&buf, page.NullCount)
-			writeU64(&buf, page.Offset)
-			writeU64(&buf, page.Length)
-			buf.WriteByte(byte(page.Kind))
-			buf.WriteByte(byte(page.Encoding))
-			writeBool(&buf, page.AllValid)
-			writeBool(&buf, page.AllNull)
-			writeBoolStats(&buf, page.Bool)
-			writeInt32Stats(&buf, page.Int32)
-			writeInt64Stats(&buf, page.Int64)
-			writeInt32ValueStats(&buf, page.Int32Values)
-			writeInt64ValueStats(&buf, page.Int64Values)
-			writeTextStats(&buf, page.Text)
+			writeU32(&w, page.RowStart)
+			writeU32(&w, page.Rows)
+			writeU32(&w, page.NullCount)
+			writeU64(&w, page.Offset)
+			writeU64(&w, page.Length)
+			w.writeByte(byte(page.Kind))
+			w.writeByte(byte(page.Encoding))
+			writeBool(&w, page.AllValid)
+			writeBool(&w, page.AllNull)
+			writeBoolStats(&w, page.Bool)
+			writeInt32Stats(&w, page.Int32)
+			writeInt64Stats(&w, page.Int64)
+			writeInt32ValueStats(&w, page.Int32Values)
+			writeInt64ValueStats(&w, page.Int64Values)
+			writeUUIDStats(&w, page.UUID)
+			writeTextStats(&w, page.Text)
 		}
+	}
+	return w.bytes()
+}
+
+func encodeSegmentFooter(raw []byte) ([]byte, error) {
+	compressed, err := compressSegmentFooter(raw)
+	if err == nil && len(compressed) < len(raw) {
+		return segmentFooterEnvelope(segmentFooterFlateMagic, uint64(len(raw)), compressed), nil
+	}
+	return segmentFooterEnvelope(segmentFooterPlainMagic, uint64(len(raw)), raw), nil
+}
+
+func decodeSegmentFooter(data []byte) ([]byte, error) {
+	if len(data) < len(segmentFooterPlainMagic)+8 {
+		return nil, fmt.Errorf("segment footer missing encoding header")
+	}
+	magic := string(data[:len(segmentFooterPlainMagic)])
+	rawLen := binary.LittleEndian.Uint64(data[len(segmentFooterPlainMagic) : len(segmentFooterPlainMagic)+8])
+	body := data[len(segmentFooterPlainMagic)+8:]
+	if rawLen > uint64(math.MaxInt) {
+		return nil, fmt.Errorf("segment footer raw length exceeds int capacity")
+	}
+	switch magic {
+	case segmentFooterPlainMagic:
+		if uint64(len(body)) != rawLen {
+			return nil, fmt.Errorf("segment footer raw length %d does not match body length %d", rawLen, len(body))
+		}
+		return body, nil
+	case segmentFooterFlateMagic:
+		raw, err := decompressSegmentFooter(body)
+		if err != nil {
+			return nil, err
+		}
+		if len(raw) != int(rawLen) {
+			return nil, fmt.Errorf("segment footer expanded to %d bytes, want %d", len(raw), rawLen)
+		}
+		return raw, nil
+	default:
+		return nil, fmt.Errorf("segment footer has unknown encoding %q", magic)
+	}
+}
+
+func segmentFooterEnvelope(magic string, rawLen uint64, body []byte) []byte {
+	out := make([]byte, 0, len(magic)+8+len(body))
+	out = append(out, magic...)
+	out = binary.LittleEndian.AppendUint64(out, rawLen)
+	out = append(out, body...)
+	return out
+}
+
+func compressSegmentFooter(raw []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw, err := flate.NewWriter(&buf, flate.BestSpeed)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := zw.Write(raw); err != nil {
+		_ = zw.Close()
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
 	}
 	return buf.Bytes(), nil
 }
 
+func decompressSegmentFooter(body []byte) ([]byte, error) {
+	zr := flate.NewReader(bytes.NewReader(body))
+	raw, err := io.ReadAll(zr)
+	closeErr := zr.Close()
+	if err != nil {
+		return nil, err
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return raw, nil
+}
+
 func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
+	data, err := decodeSegmentFooter(data)
+	if err != nil {
+		return SegmentMeta{}, err
+	}
 	r := segmentMetaReader{r: bytes.NewReader(data)}
 	meta := SegmentMeta{ID: SegmentID(r.readU64()), Rows: r.readU32(), PageRows: r.readU32()}
 	cols := r.readU32()
@@ -350,6 +464,7 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 		col.Bool = r.readBoolStats()
 		col.Int32 = r.readInt32Stats()
 		col.Int64 = r.readInt64Stats()
+		col.UUID = r.readUUIDStats()
 		col.Text = r.readTextStats()
 		pages := r.readU32()
 		if r.err != nil {
@@ -375,6 +490,7 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 			page.Int64 = r.readInt64Stats()
 			page.Int32Values = r.readInt32ValueStats()
 			page.Int64Values = r.readInt64ValueStats()
+			page.UUID = r.readUUIDStats()
 			page.Text = r.readTextStats()
 			if r.err != nil {
 				return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
@@ -447,21 +563,29 @@ func (r *segmentMetaReader) readInt64Stats() *Int64Stats {
 }
 
 func (r *segmentMetaReader) readInt32ValueStats() *Int32ValueStats {
+	return readValueStats[int32](r, 4, func(r *segmentMetaReader) int32 { return int32(r.readU32()) })
+}
+
+func (r *segmentMetaReader) readInt64ValueStats() *Int64ValueStats {
+	return readValueStats[int64](r, 8, func(r *segmentMetaReader) int64 { return int64(r.readU64()) })
+}
+
+func readValueStats[T int32 | int64](r *segmentMetaReader, bytesPerValue int, readValue func(*segmentMetaReader) T) *ValueStats[T] {
 	if !r.readBool() {
 		return nil
 	}
-	out := &Int32ValueStats{Truncated: r.readBool()}
+	out := &ValueStats[T]{Truncated: r.readBool()}
 	count := r.readU32()
 	if r.err != nil {
 		return nil
 	}
-	if uint64(count) > uint64(r.r.Len()/4) {
+	if uint64(count) > uint64(r.r.Len()/bytesPerValue) {
 		r.err = io.ErrUnexpectedEOF
 		return nil
 	}
-	out.Values = make([]int32, 0, int(count))
+	out.Values = make([]T, 0, int(count))
 	for i := uint32(0); i < count; i++ {
-		out.Values = append(out.Values, int32(r.readU32()))
+		out.Values = append(out.Values, readValue(r))
 	}
 	if r.err != nil {
 		return nil
@@ -469,22 +593,24 @@ func (r *segmentMetaReader) readInt32ValueStats() *Int32ValueStats {
 	return out
 }
 
-func (r *segmentMetaReader) readInt64ValueStats() *Int64ValueStats {
+func (r *segmentMetaReader) readUUIDStats() *UUIDStats {
 	if !r.readBool() {
 		return nil
 	}
-	out := &Int64ValueStats{Truncated: r.readBool()}
-	count := r.readU32()
+	bloomCount := r.readU32()
 	if r.err != nil {
 		return nil
 	}
-	if uint64(count) > uint64(r.r.Len()/8) {
+	if uint64(bloomCount) > uint64(r.r.Len()/8) {
 		r.err = io.ErrUnexpectedEOF
 		return nil
 	}
-	out.Values = make([]int64, 0, int(count))
-	for i := uint32(0); i < count; i++ {
-		out.Values = append(out.Values, int64(r.readU64()))
+	out := &UUIDStats{}
+	if bloomCount != 0 {
+		out.HashBloom = make([]uint64, 0, int(bloomCount))
+		for i := uint32(0); i < bloomCount; i++ {
+			out.HashBloom = append(out.HashBloom, r.readU64())
+		}
 	}
 	if r.err != nil {
 		return nil
@@ -496,7 +622,7 @@ func (r *segmentMetaReader) readTextStats() *TextStats {
 	if !r.readBool() {
 		return nil
 	}
-	out := &TextStats{Truncated: r.readBool()}
+	out := &TextStats{DataBytes: r.readU64(), Truncated: r.readBool()}
 	count := r.readU32()
 	if r.err != nil {
 		return nil
@@ -510,20 +636,6 @@ func (r *segmentMetaReader) readTextStats() *TextStats {
 	for i := uint32(0); i < count; i++ {
 		out.Values = append(out.Values, r.readString())
 		out.Counts = append(out.Counts, r.readU32())
-	}
-	hashCount := r.readU32()
-	if r.err != nil {
-		return nil
-	}
-	if uint64(hashCount) > uint64(r.r.Len()/4) {
-		r.err = io.ErrUnexpectedEOF
-		return nil
-	}
-	if hashCount != 0 {
-		out.Hashes = make([]uint32, 0, int(hashCount))
-	}
-	for i := uint32(0); i < hashCount; i++ {
-		out.Hashes = append(out.Hashes, r.readU32())
 	}
 	bloomCount := r.readU32()
 	if r.err != nil {
@@ -598,20 +710,54 @@ func (r *segmentMetaReader) readU64() uint64 {
 	return binary.LittleEndian.Uint64(buf[:])
 }
 
-func writeType(w io.Writer, typ types.Type) {
-	_, _ = w.Write([]byte{byte(typ.Kind)})
+type segmentMetaWriter struct {
+	buf     bytes.Buffer
+	scratch []byte
+	err     error
+}
+
+func (w *segmentMetaWriter) bytes() ([]byte, error) {
+	if w.err != nil {
+		return nil, w.err
+	}
+	return w.buf.Bytes(), nil
+}
+
+func (w *segmentMetaWriter) write(data []byte) {
+	if w.err != nil {
+		return
+	}
+	_, w.err = w.buf.Write(data)
+}
+
+func (w *segmentMetaWriter) writeByte(value byte) {
+	if w.err != nil {
+		return
+	}
+	w.err = w.buf.WriteByte(value)
+}
+
+func (w *segmentMetaWriter) writeString(value string) {
+	if w.err != nil {
+		return
+	}
+	_, w.err = w.buf.WriteString(value)
+}
+
+func writeType(w *segmentMetaWriter, typ types.Type) {
+	w.writeByte(byte(typ.Kind))
 	writeString(w, typ.Name)
 }
 
-func writeBool(w io.Writer, value bool) {
+func writeBool(w *segmentMetaWriter, value bool) {
 	if value {
-		_, _ = w.Write([]byte{1})
+		w.writeByte(1)
 		return
 	}
-	_, _ = w.Write([]byte{0})
+	w.writeByte(0)
 }
 
-func writeBoolStats(w io.Writer, stats *BoolStats) {
+func writeBoolStats(w *segmentMetaWriter, stats *BoolStats) {
 	writeBool(w, stats != nil)
 	if stats == nil {
 		return
@@ -620,7 +766,7 @@ func writeBoolStats(w io.Writer, stats *BoolStats) {
 	writeBool(w, stats.HasFalse)
 }
 
-func writeInt32Stats(w io.Writer, stats *Int32Stats) {
+func writeInt32Stats(w *segmentMetaWriter, stats *Int32Stats) {
 	writeBool(w, stats != nil)
 	if stats == nil {
 		return
@@ -631,7 +777,7 @@ func writeInt32Stats(w io.Writer, stats *Int32Stats) {
 	writeBool(w, stats.SumValid)
 }
 
-func writeInt64Stats(w io.Writer, stats *Int64Stats) {
+func writeInt64Stats(w *segmentMetaWriter, stats *Int64Stats) {
 	writeBool(w, stats != nil)
 	if stats == nil {
 		return
@@ -642,7 +788,15 @@ func writeInt64Stats(w io.Writer, stats *Int64Stats) {
 	writeBool(w, stats.SumValid)
 }
 
-func writeInt32ValueStats(w io.Writer, stats *Int32ValueStats) {
+func writeInt32ValueStats(w *segmentMetaWriter, stats *Int32ValueStats) {
+	writeValueStats[int32](w, stats, func(w *segmentMetaWriter, value int32) { writeU32(w, uint32(value)) })
+}
+
+func writeInt64ValueStats(w *segmentMetaWriter, stats *Int64ValueStats) {
+	writeValueStats[int64](w, stats, func(w *segmentMetaWriter, value int64) { writeU64(w, uint64(value)) })
+}
+
+func writeValueStats[T int32 | int64](w *segmentMetaWriter, stats *ValueStats[T], writeValue func(*segmentMetaWriter, T)) {
 	writeBool(w, stats != nil)
 	if stats == nil {
 		return
@@ -650,27 +804,27 @@ func writeInt32ValueStats(w io.Writer, stats *Int32ValueStats) {
 	writeBool(w, stats.Truncated)
 	writeU32(w, uint32(len(stats.Values)))
 	for _, value := range stats.Values {
-		writeU32(w, uint32(value))
+		writeValue(w, value)
 	}
 }
 
-func writeInt64ValueStats(w io.Writer, stats *Int64ValueStats) {
+func writeUUIDStats(w *segmentMetaWriter, stats *UUIDStats) {
 	writeBool(w, stats != nil)
 	if stats == nil {
 		return
 	}
-	writeBool(w, stats.Truncated)
-	writeU32(w, uint32(len(stats.Values)))
-	for _, value := range stats.Values {
-		writeU64(w, uint64(value))
+	writeU32(w, uint32(len(stats.HashBloom)))
+	for _, word := range stats.HashBloom {
+		writeU64(w, word)
 	}
 }
 
-func writeTextStats(w io.Writer, stats *TextStats) {
+func writeTextStats(w *segmentMetaWriter, stats *TextStats) {
 	writeBool(w, stats != nil)
 	if stats == nil {
 		return
 	}
+	writeU64(w, stats.DataBytes)
 	writeBool(w, stats.Truncated)
 	writeU32(w, uint32(len(stats.Values)))
 	for i, value := range stats.Values {
@@ -681,30 +835,23 @@ func writeTextStats(w io.Writer, stats *TextStats) {
 		}
 		writeU32(w, count)
 	}
-	writeU32(w, uint32(len(stats.Hashes)))
-	for _, hash := range stats.Hashes {
-		writeU32(w, hash)
-	}
 	writeU32(w, uint32(len(stats.HashBloom)))
 	for _, word := range stats.HashBloom {
 		writeU64(w, word)
 	}
 }
 
-func writeString(w io.Writer, value string) {
+func writeString(w *segmentMetaWriter, value string) {
 	writeU32(w, uint32(len(value)))
-	_, _ = w.Write([]byte(value))
+	w.writeString(value)
 }
 
-func writeU32(w io.Writer, value uint32) {
-	var buf [4]byte
-	binary.LittleEndian.PutUint32(buf[:], value)
-	_, _ = w.Write(buf[:])
+func writeU32(w *segmentMetaWriter, value uint32) {
+	w.scratch = binary.LittleEndian.AppendUint32(w.scratch[:0], value)
+	w.write(w.scratch)
 }
 
-func writeU64(w io.Writer, value uint64) {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], value)
-	_, _ = w.Write(buf[:])
+func writeU64(w *segmentMetaWriter, value uint64) {
+	w.scratch = binary.LittleEndian.AppendUint64(w.scratch[:0], value)
+	w.write(w.scratch)
 }
-

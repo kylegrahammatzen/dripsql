@@ -419,6 +419,8 @@ func pruneStrategy(expr v3sql.BoundExpr, kind types.Kind) (string, bool) {
 			return "min/max prune", isComparisonOp(expr.Op)
 		case types.KindText, types.KindBytes:
 			return "text summary prune", expr.Op == v3sql.BoundOpEqual
+		case types.KindUUID:
+			return "uuid summary prune", expr.Op == v3sql.BoundOpEqual
 		}
 	case v3sql.BoundExprBetween:
 		if intPruneKind(kind) {
@@ -432,6 +434,8 @@ func pruneStrategy(expr v3sql.BoundExpr, kind types.Kind) (string, bool) {
 			return "min/max prune", true
 		case types.KindText, types.KindBytes:
 			return "text summary prune", !expr.Not
+		case types.KindUUID:
+			return "uuid summary prune", !expr.Not
 		}
 	}
 	return "metadata prune", false

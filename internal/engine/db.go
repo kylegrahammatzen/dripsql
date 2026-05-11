@@ -355,26 +355,22 @@ func (db *DB) StorageStats(ctx context.Context, tableName string) (StorageStats,
 }
 
 // plainBytesForPage returns the bytes a page would have taken under plain
-// encoding. For fixed-width kinds it's rows × element bytes. For varlen text
-// the only honest baseline is per-page content length: a Flat page already is
-// plain, dictionary pages get rows × avg(dict value) + offset overhead, and
-// constant pages get rows × constant length. Falls back to a rough 20-byte
-// per row only when no page-level signal exists.
+// encoding. Varlen pages carry original data-byte stats so compressed and
+// dictionary pages can still report an honest plain baseline.
 func plainBytesForPage(typ types.Type, page storage.PageMeta) int64 {
 	rows := int64(page.Rows)
 	if typ.Kind != types.KindText && typ.Kind != types.KindBytes && typ.Kind != types.KindJSON {
 		return rows * plainColumnBytes(typ)
 	}
+	if page.Text != nil {
+		validityBytes := int64(0)
+		if page.NullCount != 0 {
+			validityBytes = int64(types.ValidityWords(int(page.Rows)) * 8)
+		}
+		return int64(page.Text.DataBytes) + rows*4 + 4 + validityBytes
+	}
 	if page.Encoding == types.EncodingFlat {
 		return int64(page.Length)
-	}
-	if page.Text != nil && len(page.Text.Values) > 0 {
-		var total int64
-		for _, v := range page.Text.Values {
-			total += int64(len(v))
-		}
-		avg := total / int64(len(page.Text.Values))
-		return rows*(avg+4) + 4
 	}
 	return rows * 20
 }

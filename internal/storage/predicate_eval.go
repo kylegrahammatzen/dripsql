@@ -20,6 +20,8 @@ func evalLeafInto(batch types.Batch, pred boundNode, mask *types.SelectionMask) 
 		return evalIntLeafBound(col.V, col.V.I64, pred, nil, mask), nil
 	case types.VecText, types.VecBytes:
 		return evalTextLeafBound(col.V, pred, nil, mask)
+	case types.VecUUID:
+		return evalUUIDLeafBound(col.V, pred, nil, mask), nil
 	default:
 		return 0, fmt.Errorf("predicate unsupported vector kind %s", col.V.Kind)
 	}
@@ -39,9 +41,92 @@ func evalLeafSelectedInto(batch types.Batch, pred boundNode, input types.Selecti
 		return evalIntLeafBound(col.V, col.V.I64, pred, &input, mask), nil
 	case types.VecText, types.VecBytes:
 		return evalTextLeafBound(col.V, pred, &input, mask)
+	case types.VecUUID:
+		return evalUUIDLeafBound(col.V, pred, &input, mask), nil
 	default:
 		return 0, fmt.Errorf("predicate unsupported vector kind %s", col.V.Kind)
 	}
+}
+
+func evalUUIDLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) int {
+	switch pred.op {
+	case PredicateOpEq:
+		return evalUUIDEq(v.UUID, v.Valid, v.Len, pred.uuidValue, input, out)
+	case PredicateOpNotEq:
+		return evalUUIDNotEq(v.UUID, v.Valid, v.Len, pred.uuidValue, input, out)
+	case PredicateOpIn:
+		return evalUUIDIn(v.UUID, v.Valid, v.Len, pred.uuidSet, false, input, out)
+	case PredicateOpNotIn:
+		return evalUUIDIn(v.UUID, v.Valid, v.Len, pred.uuidSet, true, input, out)
+	default:
+		return 0
+	}
+}
+
+func evalUUIDEq(values []types.UUID16, valid types.Validity, rows int, want types.UUID16, input *types.SelectionMask, out *types.SelectionMask) int {
+	matched := 0
+	if input == nil {
+		for row := 0; row < rows; row++ {
+			if types.IsValid(valid, row) && values[row] == want {
+				out.SetUnsafe(row)
+				matched++
+			}
+		}
+		return matched
+	}
+	input.IterSet(func(row int) {
+		if types.IsValid(valid, row) && values[row] == want {
+			out.SetUnsafe(row)
+			matched++
+		}
+	})
+	return matched
+}
+
+func evalUUIDNotEq(values []types.UUID16, valid types.Validity, rows int, want types.UUID16, input *types.SelectionMask, out *types.SelectionMask) int {
+	matched := 0
+	if input == nil {
+		for row := 0; row < rows; row++ {
+			if types.IsValid(valid, row) && values[row] != want {
+				out.SetUnsafe(row)
+				matched++
+			}
+		}
+		return matched
+	}
+	input.IterSet(func(row int) {
+		if types.IsValid(valid, row) && values[row] != want {
+			out.SetUnsafe(row)
+			matched++
+		}
+	})
+	return matched
+}
+
+func evalUUIDIn(values []types.UUID16, valid types.Validity, rows int, matcher uuidMatcher, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
+	matched := 0
+	if input == nil {
+		for row := 0; row < rows; row++ {
+			if !types.IsValid(valid, row) {
+				continue
+			}
+			if matcher.Has(values[row]) != invert {
+				out.SetUnsafe(row)
+				matched++
+			}
+		}
+		return matched
+	}
+	input.IterSet(func(row int) {
+		if !types.IsValid(valid, row) {
+			return
+		}
+		if matcher.Has(values[row]) != invert {
+			out.SetUnsafe(row)
+			matched++
+		}
+	})
+	return matched
 }
 
 func evalBoolLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) int {

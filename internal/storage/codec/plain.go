@@ -13,11 +13,42 @@ type Plain struct{}
 func (Plain) Encoding() types.Encoding { return types.EncodingFlat }
 
 func (Plain) Encode(v types.Vec) (Page, error) {
-	if v.Encoding != types.EncodingFlat {
-		return Page{}, fmt.Errorf("plain codec requires flat vector, got %s", v.Encoding)
+	prepared, ok := (Plain{}).Prepare(v)
+	if !ok {
+		if v.Encoding != types.EncodingFlat {
+			return Page{}, fmt.Errorf("plain codec requires flat vector, got %s", v.Encoding)
+		}
+		return Page{}, fmt.Errorf("plain codec unsupported kind %s", v.Kind)
 	}
-	payload := make([]byte, validityBytes(v.Valid)+plainValuesSize(v))
-	pos := writeValidity(payload, v.Valid)
+	return prepared.Encode()
+}
+
+func (Plain) Prepare(v types.Vec) (PreparedEncoding, bool) {
+	if v.Encoding != types.EncodingFlat {
+		return nil, false
+	}
+	valuesSize, ok := plainValuesSize(v)
+	if !ok {
+		return nil, false
+	}
+	return preparedPlain{vec: v, size: validityBytes(v.Valid) + valuesSize}, true
+}
+
+type preparedPlain struct {
+	vec  types.Vec
+	size int
+}
+
+func (p preparedPlain) Encoding() types.Encoding { return types.EncodingFlat }
+
+func (p preparedPlain) Size() int { return p.size }
+
+func (p preparedPlain) Encode() (Page, error) { return p.EncodeInto(nil) }
+
+func (p preparedPlain) EncodeInto(scratch []byte) (Page, error) {
+	payload := preparedPayload(scratch, p.size)
+	pos := writeValidity(payload, p.vec.Valid)
+	v := p.vec
 	switch v.Kind {
 	case types.VecBool:
 		for i := 0; i < types.ValidityWords(v.Len); i++ {
@@ -305,20 +336,24 @@ func (Plain) Estimate(v types.Vec) (int, bool) {
 	if v.Encoding != types.EncodingFlat {
 		return 0, false
 	}
-	return validityBytes(v.Valid) + plainValuesSize(v), true
+	valuesSize, ok := plainValuesSize(v)
+	if !ok {
+		return 0, false
+	}
+	return validityBytes(v.Valid) + valuesSize, true
 }
 
-func plainValuesSize(v types.Vec) int {
+func plainValuesSize(v types.Vec) (int, bool) {
 	if size, ok := fixedKindBytes(v.Kind); ok {
-		return v.Len * size
+		return v.Len * size, true
 	}
 	switch v.Kind {
 	case types.VecBool:
-		return types.ValidityWords(v.Len) * 8
+		return types.ValidityWords(v.Len) * 8, true
 	case types.VecText, types.VecBytes, types.VecJSON:
-		return (v.Len+1)*4 + len(v.Var.Data)
+		return (v.Len+1)*4 + len(v.Var.Data), true
 	}
-	return 0
+	return 0, false
 }
 
 func plainDecodeSelectedVarBytes(payload []byte, rows int, valid types.Validity, sel types.SelectionMask) (types.VarBytes, error) {

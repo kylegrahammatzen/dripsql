@@ -2,6 +2,7 @@ package types
 
 import (
 	"math"
+	"slices"
 	"unsafe"
 )
 
@@ -49,6 +50,10 @@ func (v VarBytes) String(row int) string {
 
 func (v VarBytes) StringCopy(row int) string {
 	return string(v.Bytes(row))
+}
+
+func (v VarBytes) Clone() VarBytes {
+	return VarBytes{Offsets: slices.Clone(v.Offsets), Data: slices.Clone(v.Data)}
 }
 
 func (v *VarBytes) AppendBytes(row int, b []byte) {

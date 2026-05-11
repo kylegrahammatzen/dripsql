@@ -16,44 +16,44 @@ type manifestSegment struct {
 	Meta SegmentMeta `json:"meta"`
 }
 
-func appendManifest(dir string, segment storedSegment) error {
+func appendManifest(dir string, segment storedSegment) (err error) {
 	path := filepath.Join(dir, manifestFileName)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		closeErr := file.Close()
+		if err == nil {
+			err = closeErr
+		}
+		if err == nil {
+			err = syncDir(dir)
+		}
+	}()
 	if err := truncatePartialManifestTail(file); err != nil {
-		_ = file.Close()
 		return err
 	}
 	relPath, err := filepath.Rel(dir, segment.path)
 	if err != nil {
-		_ = file.Close()
 		return err
 	}
 	record := manifestSegment{Path: filepath.ToSlash(relPath), Meta: segment.meta}
 	data, err := json.Marshal(record)
 	if err != nil {
-		_ = file.Close()
 		return err
 	}
 	data = append(data, '\n')
 	if _, err := file.Seek(0, io.SeekEnd); err != nil {
-		_ = file.Close()
 		return err
 	}
 	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
 		return err
 	}
 	if err := file.Sync(); err != nil {
-		_ = file.Close()
 		return err
 	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return syncDir(dir)
+	return nil
 }
 
 func readManifest(dir string) ([]storedSegment, error) {
@@ -89,44 +89,50 @@ func readManifest(dir string) ([]storedSegment, error) {
 		if err != nil {
 			return nil, err
 		}
-		if footer.ID != record.Meta.ID || footer.Rows != record.Meta.Rows || len(footer.Columns) != len(record.Meta.Columns) {
-			return nil, fmt.Errorf("manifest line %d does not match segment footer", i+1)
+		if err := validateManifestSegmentMeta(i+1, record.Meta, footer); err != nil {
+			return nil, err
 		}
 		segments = append(segments, storedSegment{path: path, meta: footer})
 	}
 	return segments, nil
 }
 
+func validateManifestSegmentMeta(line int, manifest SegmentMeta, footer SegmentMeta) error {
+	if footer.ID != manifest.ID {
+		return fmt.Errorf("manifest line %d segment id %d does not match footer id %d", line, manifest.ID, footer.ID)
+	}
+	if footer.Rows != manifest.Rows {
+		return fmt.Errorf("manifest line %d segment rows %d does not match footer rows %d", line, manifest.Rows, footer.Rows)
+	}
+	if footer.PageRows != manifest.PageRows {
+		return fmt.Errorf("manifest line %d segment page rows %d does not match footer page rows %d", line, manifest.PageRows, footer.PageRows)
+	}
+	if len(footer.Columns) != len(manifest.Columns) {
+		return fmt.Errorf("manifest line %d has %d columns, footer has %d", line, len(manifest.Columns), len(footer.Columns))
+	}
+	for i := range footer.Columns {
+		manifestCol := manifest.Columns[i]
+		footerCol := footer.Columns[i]
+		if footerCol.Name != manifestCol.Name {
+			return fmt.Errorf("manifest line %d column %d name %q does not match footer name %q", line, i, manifestCol.Name, footerCol.Name)
+		}
+		if footerCol.Type != manifestCol.Type {
+			return fmt.Errorf("manifest line %d column %q type %s does not match footer type %s", line, manifestCol.Name, manifestCol.Type, footerCol.Type)
+		}
+	}
+	return nil
+}
+
 func truncatePartialManifestTail(file *os.File) error {
-	info, err := file.Stat()
+	data, err := os.ReadFile(file.Name())
 	if err != nil {
 		return err
 	}
-	if info.Size() == 0 {
+	if len(data) == 0 || data[len(data)-1] == '\n' {
 		return nil
 	}
-	var last [1]byte
-	if _, err := file.ReadAt(last[:], info.Size()-1); err != nil {
-		return err
-	}
-	if last[0] == '\n' {
-		return nil
-	}
-	const chunkSize = 4096
-	buf := make([]byte, chunkSize)
-	for offset := info.Size(); offset > 0; {
-		start := offset - chunkSize
-		if start < 0 {
-			start = 0
-		}
-		n := int(offset - start)
-		if _, err := file.ReadAt(buf[:n], start); err != nil {
-			return err
-		}
-		if idx := bytes.LastIndexByte(buf[:n], '\n'); idx >= 0 {
-			return file.Truncate(start + int64(idx) + 1)
-		}
-		offset = start
+	if idx := bytes.LastIndexByte(data, '\n'); idx >= 0 {
+		return file.Truncate(int64(idx + 1))
 	}
 	return file.Truncate(0)
 }

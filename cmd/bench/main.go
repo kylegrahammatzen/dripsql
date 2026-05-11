@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -189,10 +190,15 @@ type queryReport struct {
 }
 
 type loadStats struct {
-	Rows       int64         `json:"rows"`
-	Elapsed    time.Duration `json:"elapsed"`
-	GenerateNs int64         `json:"generate_ns"`
-	AppendNs   int64         `json:"append_ns"`
+	Rows           int64         `json:"rows"`
+	ExistingRows   int64         `json:"existing_rows"`
+	TargetRows     int64         `json:"target_rows"`
+	Elapsed        time.Duration `json:"elapsed"`
+	GenerateNs     int64         `json:"generate_ns"`
+	GenerateWaitNs int64         `json:"generate_wait_ns"`
+	AppendNs       int64         `json:"append_ns"`
+	AppendCallNs   int64         `json:"append_call_ns"`
+	FlushNs        int64         `json:"flush_ns"`
 }
 
 type envInfo struct {
@@ -215,8 +221,8 @@ func parseOptions(args []string) (options, error) {
 	opts := options{rows: append(rowsList(nil), defaultBenchmarkRows...), runs: 5, profile: "all", mode: benchModeSameProcess}
 	fs := flag.NewFlagSet("bench", flag.ContinueOnError)
 	fs.Var(&opts.rows, "rows", "comma-separated row counts to benchmark (defaults: "+fmt.Sprintf("%v", defaultBenchmarkRows)+")")
-	fs.StringVar(&opts.dir, "dir", "", "database directory (default: tempdir)")
-	fs.BoolVar(&opts.keep, "keep", false, "keep the database directory after exit")
+	fs.StringVar(&opts.dir, "dir", "", "benchmark database root (default: db/bench; reused across runs)")
+	fs.BoolVar(&opts.keep, "keep", true, "deprecated no-op; benchmark databases are always reused")
 	fs.IntVar(&opts.runs, "runs", opts.runs, "number of timing samples per query")
 	fs.StringVar(&opts.profile, "profile", opts.profile, "data profile (structured|random|skewed|wide-text|sorted|all; all runs structured,random,skewed)")
 	fs.StringVar(&opts.mode, "mode", opts.mode, "query mode (same-process|warm-reopen|cold-ish|all)")
@@ -269,9 +275,6 @@ func run(args []string, out io.Writer) error {
 				runOpts := opts
 				runOpts.profile = profile.name
 				runOpts.mode = mode
-				if opts.dir != "" && total > 1 {
-					runOpts.dir = filepath.Join(opts.dir, fmt.Sprintf("%d-%s-%s", rows, profile.name, mode))
-				}
 				report, err := runOne(runOpts, rows, profile)
 				if err != nil {
 					return err
@@ -311,19 +314,7 @@ func profileNames(profiles []profileSpec) []string {
 }
 
 func runOne(opts options, rows int64, profile profileSpec) (benchReport, error) {
-	dir := opts.dir
-	cleanup := func() error { return nil }
-	if dir == "" {
-		tmp, err := os.MkdirTemp("", "dripsql-v3-bench-*")
-		if err != nil {
-			return benchReport{}, err
-		}
-		dir = tmp
-		if !opts.keep {
-			cleanup = func() error { return os.RemoveAll(tmp) }
-		}
-	}
-	defer func() { _ = cleanup() }()
+	dir := benchmarkDBDir(opts, profile)
 
 	ctx := context.Background()
 	db, err := engine.Open(ctx, dir, engine.Options{})
@@ -338,18 +329,31 @@ func runOne(opts options, rows int64, profile profileSpec) (benchReport, error) 
 	if err := createBenchTable(ctx, db, profile, opts.segmentRows); err != nil {
 		return benchReport{}, fmt.Errorf("create schema: %w", err)
 	}
-	loadStart := time.Now()
-	load, err := loadRows(ctx, db, rows, profile)
+	existingRows, err := benchmarkTableRows(ctx, db)
 	if err != nil {
 		return benchReport{}, err
 	}
-	load.Elapsed = time.Since(loadStart)
+	load := loadStats{ExistingRows: existingRows, TargetRows: rows, Rows: 0}
+	loadStart := time.Now()
+	if existingRows < rows {
+		load, err = loadRows(ctx, db, existingRows, rows, profile)
+		if err != nil {
+			return benchReport{}, err
+		}
+		load.Elapsed = time.Since(loadStart)
+	} else {
+		load.Elapsed = 0
+	}
+	actualRows := rows
+	if existingRows > actualRows {
+		actualRows = existingRows
+	}
 	modeNote, err := prepareQueryMode(ctx, &db, dir, opts.mode)
 	if err != nil {
 		return benchReport{}, err
 	}
 
-	benchQueries := buildBenchmarkQueries(profile, rows)
+	benchQueries := buildBenchmarkQueries(profile, actualRows)
 	queries, err := runQuerySet(ctx, db, benchQueries, opts.runs, opts.query)
 	if err != nil {
 		return benchReport{}, err
@@ -358,7 +362,30 @@ func runOne(opts options, rows int64, profile profileSpec) (benchReport, error) 
 	if err != nil {
 		return benchReport{}, err
 	}
-	return benchReport{Env: captureEnv(), Dir: dir, Profile: opts.profile, Mode: opts.mode, ModeNote: modeNote, Rows: rows, Runs: opts.runs, Load: load, Storage: storageStats, Queries: queries}, nil
+	return benchReport{Env: captureEnv(), Dir: dir, Profile: opts.profile, Mode: opts.mode, ModeNote: modeNote, Rows: storageStats.Rows, Runs: opts.runs, Load: load, Storage: storageStats, Queries: queries}, nil
+}
+
+func benchmarkDBDir(opts options, profile profileSpec) string {
+	root := opts.dir
+	if root == "" {
+		root = filepath.Join("db", "bench")
+	}
+	return filepath.Join(root, profile.name, segmentRowsDir(opts.segmentRows))
+}
+
+func segmentRowsDir(segmentRows int) string {
+	if segmentRows <= 0 {
+		return "seg-default"
+	}
+	return "seg-" + strconv.Itoa(segmentRows)
+}
+
+func benchmarkTableRows(ctx context.Context, db *engine.DB) (int64, error) {
+	stats, err := db.StorageStats(ctx, "events")
+	if err != nil {
+		return 0, err
+	}
+	return stats.Rows, nil
 }
 
 func prepareQueryMode(ctx context.Context, db **engine.DB, dir string, mode string) (string, error) {
@@ -393,15 +420,22 @@ func reopenBenchDB(ctx context.Context, db **engine.DB, dir string) error {
 // Worker w handles batch indices w, w+W, w+2W, ... so the consumer can
 // round-robin across worker channels and naturally read batches in
 // sequential order — no reorder buffer, all workers stay fed.
-func loadRows(ctx context.Context, db *engine.DB, rows int64, profile profileSpec) (loadStats, error) {
-	stats := loadStats{Rows: rows}
+func loadRows(ctx context.Context, db *engine.DB, startRows int64, targetRows int64, profile profileSpec) (loadStats, error) {
+	rows := targetRows - startRows
+	stats := loadStats{Rows: rows, ExistingRows: startRows, TargetRows: targetRows}
+	if rows < 0 {
+		rows = 0
+		stats.Rows = 0
+	}
 	batchSize := int64(types.StandardBatchRows)
 	batchCount := int((rows + batchSize - 1) / batchSize)
 
 	flushFinal := func() error {
 		appendStart := time.Now()
 		err := db.FlushBuffered(ctx, "events")
-		stats.AppendNs += time.Since(appendStart).Nanoseconds()
+		elapsed := elapsedNanoseconds(appendStart)
+		stats.FlushNs += elapsed
+		stats.AppendNs += elapsed
 		if err != nil {
 			return fmt.Errorf("flush rows: %w", err)
 		}
@@ -424,14 +458,14 @@ func loadRows(ctx context.Context, db *engine.DB, rows int64, profile profileSpe
 		go func(start int, ch chan<- job) {
 			defer close(ch)
 			for i := start; i < batchCount; i += workers {
-				pos := int64(i) * batchSize
+				pos := startRows + int64(i)*batchSize
 				n := batchSize
-				if pos+n > rows {
-					n = rows - pos
+				if pos+n > targetRows {
+					n = targetRows - pos
 				}
 				t := time.Now()
 				batch, err := profile.buildBatch(pos, int(n))
-				ch <- job{batch: batch, ns: time.Since(t).Nanoseconds(), err: err}
+				ch <- job{batch: batch, ns: elapsedNanoseconds(t), err: err}
 				if err != nil {
 					return
 				}
@@ -440,7 +474,9 @@ func loadRows(ctx context.Context, db *engine.DB, rows int64, profile profileSpe
 	}
 
 	for i := 0; i < batchCount; i++ {
+		waitStart := time.Now()
 		j, ok := <-chans[i%workers]
+		stats.GenerateWaitNs += time.Since(waitStart).Nanoseconds()
 		if !ok {
 			return loadStats{}, fmt.Errorf("worker %d closed early at batch %d", i%workers, i)
 		}
@@ -452,9 +488,19 @@ func loadRows(ctx context.Context, db *engine.DB, rows int64, profile profileSpe
 		if err := db.AppendBufferedOwned(ctx, "events", j.batch); err != nil {
 			return loadStats{}, fmt.Errorf("append batch: %w", err)
 		}
-		stats.AppendNs += time.Since(appendStart).Nanoseconds()
+		elapsed := elapsedNanoseconds(appendStart)
+		stats.AppendCallNs += elapsed
+		stats.AppendNs += elapsed
 	}
 	return stats, flushFinal()
+}
+
+func elapsedNanoseconds(start time.Time) int64 {
+	elapsed := time.Since(start).Nanoseconds()
+	if elapsed <= 0 {
+		return 1
+	}
+	return elapsed
 }
 
 func runQuerySet(ctx context.Context, db *engine.DB, queries []query, runs int, queryFilter string) ([]queryReport, error) {
@@ -583,18 +629,21 @@ func emitText(w io.Writer, report benchReport) {
 	}
 	fmt.Fprintf(w, "Rows:         %d\n", report.Rows)
 	fmt.Fprintf(w, "Query runs:   %d\n\n", report.Runs)
-	fmt.Fprintf(w, "Load Benchmark\n")
-	fmt.Fprintf(w, "Elapsed:      %s\n", humanfmt.Duration(report.Load.Elapsed))
-	fmt.Fprintf(w, "Generate:     %s\n", humanfmt.Duration(time.Duration(report.Load.GenerateNs)))
-	fmt.Fprintf(w, "Append:       %s\n\n", humanfmt.Duration(time.Duration(report.Load.AppendNs)))
+	fmt.Fprintf(w, "Setup\n")
+	fmt.Fprintf(w, "Existing rows:     %d\n", report.Load.ExistingRows)
+	fmt.Fprintf(w, "Target rows:       %d\n", report.Load.TargetRows)
+	fmt.Fprintf(w, "Appended rows:     %d\n", report.Load.Rows)
+	fmt.Fprintf(w, "Wall:              %s\n", humanfmt.Duration(report.Load.Elapsed))
+	fmt.Fprintf(w, "Generate workers:  %s total (parallel, overlaps wall)\n", humanfmt.Duration(time.Duration(report.Load.GenerateNs)))
+	fmt.Fprintf(w, "Generate wait:     %s\n", humanfmt.Duration(time.Duration(report.Load.GenerateWaitNs)))
+	fmt.Fprintf(w, "Append calls:      %s\n", humanfmt.Duration(time.Duration(report.Load.AppendCallNs)))
+	fmt.Fprintf(w, "Flush/seal wait:   %s\n\n", humanfmt.Duration(time.Duration(report.Load.FlushNs)))
 	fmt.Fprintf(w, "Storage\n")
-	fmt.Fprintf(w, "Table size:        %s\n", formatBytes(report.Storage.TableBytes))
-	fmt.Fprintf(w, "Column payload:    %s\n", formatBytes(report.Storage.ColumnPayloadBytes))
-	fmt.Fprintf(w, "Storage overhead:  %s\n", formatBytes(report.Storage.StorageOverhead))
-	fmt.Fprintf(w, "Plain estimate:    %s\n", formatBytes(report.Storage.PlainEstimate))
-	fmt.Fprintf(w, "Column compression: %.2fx\n", report.Storage.ColumnCompression)
-	fmt.Fprintf(w, "Table compression: %.2fx\n", report.Storage.TableCompression)
-	fmt.Fprintf(w, "Bytes / row:       %.2f\n", report.Storage.BytesPerRow)
+	fmt.Fprintf(w, "Original:          %s\n", formatBytes(report.Storage.PlainEstimate))
+	fmt.Fprintf(w, "Compressed:        %s (%.2fx, %s of original)\n", formatBytes(report.Storage.TableBytes), report.Storage.TableCompression, formatPercent(report.Storage.TableBytes, report.Storage.PlainEstimate))
+	fmt.Fprintf(w, "  Column data:     %s\n", formatBytes(report.Storage.ColumnPayloadBytes))
+	fmt.Fprintf(w, "  Pruning metadata:%s\n", formatBytes(report.Storage.StorageOverhead))
+	fmt.Fprintf(w, "Per row:           %s original -> %s compressed\n", formatBytesPerRow(report.Storage.PlainEstimate, report.Rows), formatBytesPerRow(report.Storage.TableBytes, report.Rows))
 	if len(report.Storage.Columns) > 0 {
 		fmt.Fprintln(w)
 		writeColumnsTable(w, report.Storage.Columns)
@@ -611,7 +660,7 @@ func emitText(w io.Writer, report benchReport) {
 func writeColumnsTable(w io.Writer, cols []engine.ColumnStats) {
 	fmt.Fprintln(w, "Columns")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "  Column\tType\tPlain\tStored\tRatio\tEncoding")
+	fmt.Fprintln(tw, "  Column\tType\tOriginal\tStored\tRatio\tEncoding")
 	for _, c := range cols {
 		ratio := "—"
 		if c.Compression > 0 {
@@ -666,6 +715,20 @@ func formatBytes(n int64) string {
 	return strconv.FormatInt(n, 10) + " B"
 }
 
+func formatBytesPerRow(bytes int64, rows int64) string {
+	if rows <= 0 {
+		return "n/a"
+	}
+	return strconv.FormatFloat(float64(bytes)/float64(rows), 'f', 2, 64) + " B"
+}
+
+func formatPercent(part int64, total int64) string {
+	if total <= 0 {
+		return "n/a"
+	}
+	return strconv.FormatFloat(float64(part)*100/float64(total), 'f', 1, 64) + "%"
+}
+
 type profileSpec struct {
 	name    string
 	columns []columnSpec
@@ -678,23 +741,16 @@ type columnSpec struct {
 	fill func(start int64, n int) types.Column
 }
 
-// createBenchTable goes through SQL when segmentRows is 0 (use storage default)
-// or builds a TableSpec directly when a custom segment size is requested,
-// since SQL CREATE TABLE doesn't expose physical options today.
 func createBenchTable(ctx context.Context, db *engine.DB, profile profileSpec, segmentRows int) error {
-	if segmentRows <= 0 {
-		_, err := db.Exec(ctx, profile.createTableSQL("events"))
-		return err
-	}
 	cols := make([]types.ColumnSpec, len(profile.columns))
 	for i, c := range profile.columns {
 		cols[i] = types.ColumnSpec{Name: c.name, Type: c.typ}
 	}
-	return db.CreateTable(ctx, types.TableSpec{
-		Name:    "events",
-		Columns: cols,
-		Options: types.TableOptions{SegmentRows: types.SegmentRows(segmentRows)},
-	})
+	spec := types.TableSpec{Name: "events", IfNotExists: true, Columns: cols}
+	if segmentRows > 0 {
+		spec.Options.SegmentRows = types.SegmentRows(segmentRows)
+	}
+	return db.CreateTable(ctx, spec)
 }
 
 func (p profileSpec) createTableSQL(table string) string {
@@ -740,7 +796,7 @@ func profileSpecFor(profile string) (profileSpec, error) {
 		return profileSpec{name: "skewed", columns: baseProfileColumns(skewedValues), userFor: skewedValues.user}, nil
 	case "wide-text":
 		base := baseProfileColumns(randomValues)
-		base = append(base, textColumnSpec("referrer_url", func(row int64) string { return urlForRow(row + 10_000_000) }))
+		base = append(base, urlColumnSpec("referrer_url", 10_000_000))
 		return profileSpec{name: "wide-text", columns: base, userFor: randomValues.user}, nil
 	case "sorted":
 		base := baseProfileColumns(structuredValues)
@@ -781,10 +837,10 @@ func baseProfileColumns(values profileValues) []columnSpec {
 		int64ColumnSpec("tenant_id", values.tenant),
 		int64ColumnSpec("user_id", values.user),
 		int64ColumnSpec("created_at", createdAtForRow),
-		textColumnSpec("event_uuid", uuidForRow),
+		uuidColumnSpec("event_uuid"),
 		textColumnSpec("status", values.status),
 		textColumnSpec("path", values.path),
-		textColumnSpec("url", urlForRow),
+		urlColumnSpec("url", 0),
 		int64ColumnSpec("amount", values.amount),
 		textColumnSpec("event_type", values.event),
 		textColumnSpec("country", values.country),
@@ -815,6 +871,33 @@ func textColumnSpec(name string, value func(row int64) string) columnSpec {
 		}
 		return types.Column{Name: name, Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingFlat, Len: n, Var: varbytes}}
 	}}
+}
+
+func uuidColumnSpec(name string) columnSpec {
+	return columnSpec{name: name, typ: types.UUID, fill: func(start int64, n int) types.Column {
+		values := make([]types.UUID16, n)
+		for i := range n {
+			values[i] = uuid16ForRow(start + int64(i))
+		}
+		return types.Column{Name: name, Type: types.UUID, V: types.Vec{Kind: types.VecUUID, Encoding: types.EncodingFlat, Len: n, UUID: values}}
+	}}
+}
+
+func urlColumnSpec(name string, rowOffset int64) columnSpec {
+	return columnSpec{name: name, typ: types.Text, fill: func(start int64, n int) types.Column {
+		varbytes := types.NewVarBytes(n, n*64)
+		for i := range n {
+			appendVarBytesGenerated(&varbytes, i, func(dst []byte) []byte {
+				return appendURLForRow(dst, start+int64(i)+rowOffset)
+			})
+		}
+		return types.Column{Name: name, Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingFlat, Len: n, Var: varbytes}}
+	}}
+}
+
+func appendVarBytesGenerated(varbytes *types.VarBytes, row int, appendValue func([]byte) []byte) {
+	varbytes.Data = appendValue(varbytes.Data)
+	varbytes.Offsets[row+1] = uint32(len(varbytes.Data))
 }
 
 var structuredValues = profileValues{
@@ -863,30 +946,30 @@ func createdAtForRow(row int64) int64 {
 }
 
 func urlForRow(row int64) string {
-	return "/users/" + strconv.FormatInt(row%100_000, 10) + "/events/" + strconv.FormatInt(row, 10) + "/" + strconv.FormatUint(mix64(row, saltURL), 36)
+	return string(appendURLForRow(make([]byte, 0, 64), row))
 }
 
 func uuidForRow(row int64) string {
+	return types.FormatUUID(uuid16ForRow(row))
+}
+
+func appendURLForRow(dst []byte, row int64) []byte {
+	dst = append(dst, "/users/"...)
+	dst = strconv.AppendInt(dst, row%100_000, 10)
+	dst = append(dst, "/events/"...)
+	dst = strconv.AppendInt(dst, row, 10)
+	dst = append(dst, '/')
+	dst = strconv.AppendUint(dst, mix64(row, saltURL), 36)
+	return dst
+}
+
+func uuid16ForRow(row int64) types.UUID16 {
 	left := mix64(row, saltUUID)
 	right := mix64(row, saltUUID+1)
-	const hex = "0123456789abcdef"
-	var b [36]byte
-	put := func(off int, v uint64, n int) {
-		for i := n - 1; i >= 0; i-- {
-			b[off+i] = hex[v&0xf]
-			v >>= 4
-		}
-	}
-	put(0, left>>32, 8)
-	b[8] = '-'
-	put(9, left>>16, 4)
-	b[13] = '-'
-	put(14, left, 4)
-	b[18] = '-'
-	put(19, right>>48, 4)
-	b[23] = '-'
-	put(24, right&0xffffffffffff, 12)
-	return string(b[:])
+	var out types.UUID16
+	binary.BigEndian.PutUint64(out[:8], left)
+	binary.BigEndian.PutUint64(out[8:], right)
+	return out
 }
 
 func pickWeighted(row int64, salt uint64, weighted []weightedString) string {

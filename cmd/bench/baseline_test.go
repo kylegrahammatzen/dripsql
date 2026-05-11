@@ -83,7 +83,7 @@ func TestWriteComparisonPrintsCompactSummary(t *testing.T) {
 		t.Fatalf("writeComparison: %v", err)
 	}
 	out := buf.String()
-	for _, want := range []string{"DripSQL v3 Benchmark Comparison", "Load", "Queries", "structured", "regress", "regression"} {
+	for _, want := range []string{"DripSQL v3 Benchmark Comparison", "Setup", "Queries", "structured", "regress", "regression"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output:\n%s", want, out)
 		}

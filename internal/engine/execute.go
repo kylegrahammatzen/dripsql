@@ -529,7 +529,7 @@ func comparisonPredicate(expr v3sql.BoundExpr) (storage.Predicate, bool, error) 
 		return storage.Predicate{}, false, nil
 	}
 	pred := storage.Predicate{Column: left.Column, Op: predOp}
-	if ok := setPredicateLiteral(&pred, right.Literal); !ok {
+	if ok := setPredicateLiteral(&pred, left.Type.Kind, right.Literal); !ok {
 		return storage.Predicate{}, false, nil
 	}
 	return pred, true, nil
@@ -578,27 +578,38 @@ func inPredicate(expr v3sql.BoundExpr) (storage.Predicate, bool, error) {
 		}
 		switch value := arg.Literal.(type) {
 		case bool:
-			if len(pred.Int64s) != 0 || len(pred.Texts) != 0 {
+			if len(pred.Int64s) != 0 || len(pred.Texts) != 0 || len(pred.UUIDs) != 0 {
 				return storage.Predicate{}, false, nil
 			}
 			pred.Bools = append(pred.Bools, value)
 		case int16:
-			if len(pred.Bools) != 0 || len(pred.Texts) != 0 {
+			if len(pred.Bools) != 0 || len(pred.Texts) != 0 || len(pred.UUIDs) != 0 {
 				return storage.Predicate{}, false, nil
 			}
 			pred.Int64s = append(pred.Int64s, int64(value))
 		case int32:
-			if len(pred.Bools) != 0 || len(pred.Texts) != 0 {
+			if len(pred.Bools) != 0 || len(pred.Texts) != 0 || len(pred.UUIDs) != 0 {
 				return storage.Predicate{}, false, nil
 			}
 			pred.Int64s = append(pred.Int64s, int64(value))
 		case int64:
-			if len(pred.Bools) != 0 || len(pred.Texts) != 0 {
+			if len(pred.Bools) != 0 || len(pred.Texts) != 0 || len(pred.UUIDs) != 0 {
 				return storage.Predicate{}, false, nil
 			}
 			pred.Int64s = append(pred.Int64s, value)
 		case string:
 			if len(pred.Bools) != 0 || len(pred.Int64s) != 0 {
+				return storage.Predicate{}, false, nil
+			}
+			if expr.Left.Type.Kind == types.KindUUID {
+				parsed, err := types.ParseUUID(value)
+				if err != nil {
+					return storage.Predicate{}, false, nil
+				}
+				pred.UUIDs = append(pred.UUIDs, parsed)
+				continue
+			}
+			if len(pred.UUIDs) != 0 {
 				return storage.Predicate{}, false, nil
 			}
 			pred.Texts = append(pred.Texts, value)
@@ -643,7 +654,7 @@ func invertComparisonOp(op v3sql.BoundOp) v3sql.BoundOp {
 	}
 }
 
-func setPredicateLiteral(pred *storage.Predicate, value any) bool {
+func setPredicateLiteral(pred *storage.Predicate, columnKind types.Kind, value any) bool {
 	switch value := value.(type) {
 	case bool:
 		pred.Bool = value
@@ -658,6 +669,14 @@ func setPredicateLiteral(pred *storage.Predicate, value any) bool {
 		pred.Int64 = value
 		return true
 	case string:
+		if columnKind == types.KindUUID {
+			parsed, err := types.ParseUUID(value)
+			if err != nil {
+				return false
+			}
+			pred.UUID = parsed
+			return true
+		}
 		pred.Text = value
 		return true
 	default:
@@ -698,7 +717,7 @@ func predicateLiteralCompatible(column types.Kind, literal predicateLiteralKind)
 			return false
 		}
 	case predicateLiteralText:
-		return column == types.KindText || column == types.KindBytes
+		return column == types.KindText || column == types.KindBytes || column == types.KindUUID
 	default:
 		return false
 	}

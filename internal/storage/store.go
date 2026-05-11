@@ -275,14 +275,8 @@ func (s *Store) appendBuffered(ctx context.Context, table types.TableSpec, batch
 		}
 		state.buffer = buffer
 	}
-	if clone {
-		if err := state.buffer.appendCloned(batch); err != nil {
-			return err
-		}
-	} else {
-		if err := state.buffer.appendBorrowed(batch); err != nil {
-			return err
-		}
+	if err := state.buffer.appendInternal(batch, clone); err != nil {
+		return err
 	}
 	if state.buffer.BufferedRows() < state.buffer.targetRows {
 		return nil

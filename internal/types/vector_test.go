@@ -92,7 +92,7 @@ func TestVecEncodingFlatIsDefault(t *testing.T) {
 }
 
 func TestVecEncodingNonFlatPermissivelyValid(t *testing.T) {
-	for _, enc := range []Encoding{EncodingDictionary, EncodingConstant, EncodingSequence} {
+	for _, enc := range []Encoding{EncodingDictionary, EncodingConstant, EncodingSequence, EncodingFORBitPack, EncodingFlate} {
 		v := Vec{Kind: VecText, Encoding: enc, Len: 0}
 		if err := v.validate(); err != nil {
 			t.Errorf("non-flat encoding %v should validate empty Vec: %v", enc, err)

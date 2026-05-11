@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,12 +12,12 @@ import (
 
 func TestBenchSmokeProducesQueryResults(t *testing.T) {
 	var buf bytes.Buffer
-	args := []string{"-rows", "2000", "-runs", "2", "-keep=false"}
+	args := []string{"-rows", "2000", "-runs", "2", "-dir", t.TempDir()}
 	if err := run(args, &buf); err != nil {
 		t.Fatalf("run: %v\n%s", err, buf.String())
 	}
 	out := buf.String()
-	for _, want := range []string{"DripSQL v3 Benchmark", "Load Benchmark", "Storage", "Query Benchmark", "event checkout for tenant", "user id lookup", "uuid lookup"} {
+	for _, want := range []string{"DripSQL v3 Benchmark", "Setup", "Existing rows:", "Target rows:", "Appended rows:", "Wall:", "Generate workers:", "Append calls:", "Flush/seal wait:", "Storage", "Query Benchmark", "event checkout for tenant", "user id lookup", "uuid lookup"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in output\n%s", want, out)
 		}
@@ -50,7 +51,7 @@ func TestParseOptionsDefaultsToBenchmarkRows(t *testing.T) {
 
 func TestBenchWarmReopenMode(t *testing.T) {
 	var buf bytes.Buffer
-	args := []string{"-rows", "1000", "-runs", "1", "-mode", "warm-reopen"}
+	args := []string{"-rows", "1000", "-runs", "1", "-mode", "warm-reopen", "-dir", t.TempDir()}
 	if err := run(args, &buf); err != nil {
 		t.Fatalf("run: %v\n%s", err, buf.String())
 	}
@@ -109,7 +110,7 @@ func TestQueryMatchesFilterChecksNameAndSQL(t *testing.T) {
 
 func TestLookupQueryFilterRunsSingleQuery(t *testing.T) {
 	var buf bytes.Buffer
-	args := []string{"-rows", "1", "-runs", "1", "-query", "uuid lookup", "-json", "-profile", "structured"}
+	args := []string{"-rows", "1", "-runs", "1", "-query", "uuid lookup", "-json", "-profile", "structured", "-dir", t.TempDir()}
 	if err := run(args, &buf); err != nil {
 		t.Fatalf("run: %v\n%s", err, buf.String())
 	}
@@ -141,6 +142,9 @@ func TestBenchEmitsJSONResults(t *testing.T) {
 	}
 	if report.Rows != rows || report.Mode != benchModeSameProcess || len(report.Queries) != len(buildBenchmarkQueries(profile, rows)) {
 		t.Fatalf("report = %#v", report)
+	}
+	if report.Load.Elapsed == 0 || report.Load.GenerateNs == 0 || report.Load.AppendNs == 0 || report.Load.AppendCallNs == 0 || report.Load.FlushNs == 0 {
+		t.Fatalf("missing setup timing breakdown = %#v", report.Load)
 	}
 	for _, tc := range []struct {
 		name string
@@ -187,9 +191,55 @@ func TestDefaultProfileRunsAllProfiles(t *testing.T) {
 	}
 }
 
+func TestBenchmarkReusesExistingRowsAndAppendsMissingRows(t *testing.T) {
+	root := t.TempDir()
+	args := []string{"-runs", "1", "-json", "-profile", "structured", "-query", "uuid lookup", "-dir", root}
+
+	first := runBenchReportJSON(t, append(args, "-rows", "10")...)
+	if want := filepath.Join(root, "structured", "seg-default"); first.Dir != want {
+		t.Fatalf("dir = %q, want %q", first.Dir, want)
+	}
+	if first.Load.ExistingRows != 0 || first.Load.TargetRows != 10 || first.Load.Rows != 10 || first.Rows != 10 {
+		t.Fatalf("first load = %#v rows=%d", first.Load, first.Rows)
+	}
+
+	second := runBenchReportJSON(t, append(args, "-rows", "10")...)
+	if second.Load.ExistingRows != 10 || second.Load.TargetRows != 10 || second.Load.Rows != 0 || second.Rows != 10 {
+		t.Fatalf("second load = %#v rows=%d", second.Load, second.Rows)
+	}
+
+	larger := runBenchReportJSON(t, append(args, "-rows", "15")...)
+	if larger.Load.ExistingRows != 10 || larger.Load.TargetRows != 15 || larger.Load.Rows != 5 || larger.Rows != 15 {
+		t.Fatalf("larger load = %#v rows=%d", larger.Load, larger.Rows)
+	}
+}
+
+func TestBenchmarkSeparatesProfilesAndSegmentRows(t *testing.T) {
+	root := t.TempDir()
+	common := []string{"-rows", "3", "-runs", "1", "-json", "-query", "uuid lookup", "-dir", root}
+
+	structured := runBenchReportJSON(t, append(common, "-profile", "structured")...)
+	random := runBenchReportJSON(t, append(common, "-profile", "random")...)
+	customSegment := runBenchReportJSON(t, append(common, "-profile", "structured", "-segment-rows", "16")...)
+
+	if structured.Dir != filepath.Join(root, "structured", "seg-default") {
+		t.Fatalf("structured dir = %q", structured.Dir)
+	}
+	if random.Dir != filepath.Join(root, "random", "seg-default") {
+		t.Fatalf("random dir = %q", random.Dir)
+	}
+	if customSegment.Dir != filepath.Join(root, "structured", "seg-16") {
+		t.Fatalf("custom segment dir = %q", customSegment.Dir)
+	}
+	if structured.Load.ExistingRows != 0 || random.Load.ExistingRows != 0 || customSegment.Load.ExistingRows != 0 {
+		t.Fatalf("expected isolated first loads, got %#v %#v %#v", structured.Load, random.Load, customSegment.Load)
+	}
+}
+
 func runBenchReportJSON(t *testing.T, args ...string) benchReport {
 	t.Helper()
 	var buf bytes.Buffer
+	args = appendBenchTempDir(t, args)
 	if err := run(args, &buf); err != nil {
 		t.Fatalf("run: %v\n%s", err, buf.String())
 	}
@@ -203,6 +253,7 @@ func runBenchReportJSON(t *testing.T, args ...string) benchReport {
 func runBenchReportsJSON(t *testing.T, args ...string) []benchReport {
 	t.Helper()
 	var buf bytes.Buffer
+	args = appendBenchTempDir(t, args)
 	if err := run(args, &buf); err != nil {
 		t.Fatalf("run: %v\n%s", err, buf.String())
 	}
@@ -223,6 +274,20 @@ func runBenchReportsJSON(t *testing.T, args ...string) []benchReport {
 		t.Fatal("no reports in JSON output")
 	}
 	return reports
+}
+
+func appendBenchTempDir(t *testing.T, args []string) []string {
+	t.Helper()
+	for i, arg := range args {
+		if arg == "-dir" || strings.HasPrefix(arg, "-dir=") {
+			if arg == "-dir" && i == len(args)-1 {
+				t.Fatalf("-dir requires a value")
+			}
+			return args
+		}
+	}
+	out := append([]string(nil), args...)
+	return append(out, "-dir", t.TempDir())
 }
 
 func firstNumericQueryValue(t *testing.T, q queryReport) float64 {

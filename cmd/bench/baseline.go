@@ -135,7 +135,7 @@ type comparisonDetail struct {
 func writeComparison(w io.Writer, baselines []benchReport, current []benchReport, showAll bool, details bool) error {
 	fprintf(w, "DripSQL v3 Benchmark Comparison\n")
 	fprintf(w, "Threshold: %.1f%%\n", regressionThresholdPct)
-	fprintf(w, "\nLoad\n")
+	fprintf(w, "\nSetup\n")
 	fprintf(w, "Profile      Mode          Rows       Baseline    Current     Delta\n")
 	var loadDeltaTotal float64
 	var loadCompared int
@@ -224,7 +224,7 @@ func writeComparison(w io.Writer, baselines []benchReport, current []benchReport
 	}
 	fprintf(w, "\nSummary\n")
 	if loadCompared > 0 {
-		fprintf(w, "Load avg delta:  %+.1f%% (%d regressions over %.1f%%)\n", loadDeltaTotal/float64(loadCompared), loadRegressions, regressionThresholdPct)
+		fprintf(w, "Setup avg delta: %+.1f%% (%d regressions over %.1f%%)\n", loadDeltaTotal/float64(loadCompared), loadRegressions, regressionThresholdPct)
 	}
 	if queryCompared > 0 {
 		fprintf(w, "Query avg delta: %+.1f%% (%d regressions, %d improvements over %.1f%%)\n", queryDeltaTotal/float64(queryCompared), queryRegressions, queryImprovements, regressionThresholdPct)
