@@ -20,7 +20,7 @@ const (
 	textSegmentBloomMinWords     = 1024
 	textSegmentBloomMaxWords     = 128 * 1024
 	textSegmentBloomProbes       = 3
-	textPageBloomProbes          = 5
+	textPageBloomProbes          = 8
 )
 
 type Int32Stats struct {
