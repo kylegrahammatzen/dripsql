@@ -245,17 +245,12 @@ func ReadSegmentFooter(path string) (SegmentMeta, error) {
 
 func encodeSegmentPageInto(v types.Vec, scratch []byte) (codec.Page, []byte, error) {
 	if v.Kind == types.VecText {
-		if best, ok := codec.PickSmallestPrepared(v, codec.Plain{}, codec.Dictionary{}, codec.Constant{}); ok {
-			if best.Encoding() == types.EncodingFlat {
-				if flate, ok := (codec.Flate{}).Prepare(v); ok && flate.Size() < best.Size() {
-					best = flate
-				}
-			}
+		if best, ok := codec.TextCandidates().Pick(v); ok {
 			page, err := best.EncodeInto(scratch)
 			return page, nextPageScratch(scratch, page.Payload), err
 		}
 	}
-	if best, ok := codec.PickSmallestPrepared(v, codec.Plain{}, codec.Constant{}, codec.FORBitPack{}); ok {
+	if best, ok := codec.FixedCandidates().Pick(v); ok {
 		page, err := best.EncodeInto(scratch)
 		return page, nextPageScratch(scratch, page.Payload), err
 	}
