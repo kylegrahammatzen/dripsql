@@ -40,6 +40,13 @@ func (db *DB) ByteCacheStats() ByteCacheStats {
 	return db.data.ByteCacheStats()
 }
 
+func (db *DB) ClearByteCache() {
+	if db == nil || db.data == nil {
+		return
+	}
+	db.data.ClearByteCache()
+}
+
 func ResetReadStats() {
 	storage.ResetReadStats()
 }

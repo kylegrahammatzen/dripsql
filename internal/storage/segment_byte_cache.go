@@ -131,6 +131,21 @@ func (c *segmentByteCache) Put(key segmentReadKey, src []byte) {
 	}
 }
 
+// Clear drops every cached entry and resets the resident-byte counter so the
+// next reads behave as if the cache had just been instantiated. Hit/miss
+// counters are intentionally preserved so bench harnesses can still compare
+// cumulative cache effectiveness across samples.
+func (c *segmentByteCache) Clear() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = make(map[segmentReadKey]*list.Element)
+	c.lru.Init()
+	c.bytes = 0
+}
+
 func (c *segmentByteCache) Stats() SegmentByteCacheStats {
 	if c == nil {
 		return SegmentByteCacheStats{}

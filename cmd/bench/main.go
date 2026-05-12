@@ -89,15 +89,16 @@ type query struct {
 const (
 	benchModeSameProcess = "same-process"
 	benchModeWarmReopen  = "warm-reopen"
+	benchModeByteCold    = "byte-cold"
 	benchModeColdish     = "cold-ish"
 )
 
 func benchModesFor(mode string) ([]string, error) {
 	switch mode {
-	case benchModeSameProcess, benchModeWarmReopen, benchModeColdish:
+	case benchModeSameProcess, benchModeWarmReopen, benchModeByteCold, benchModeColdish:
 		return []string{mode}, nil
 	case "all":
-		return []string{benchModeSameProcess, benchModeWarmReopen, benchModeColdish}, nil
+		return []string{benchModeSameProcess, benchModeWarmReopen, benchModeByteCold, benchModeColdish}, nil
 	default:
 		return nil, fmt.Errorf("unknown benchmark mode %q", mode)
 	}
@@ -233,7 +234,7 @@ func parseOptions(args []string) (options, error) {
 	fs.BoolVar(&opts.keep, "keep", true, "deprecated no-op; benchmark databases are always reused")
 	fs.IntVar(&opts.runs, "runs", opts.runs, "number of timing samples per query")
 	fs.StringVar(&opts.profile, "profile", opts.profile, "data profile (structured|random|skewed|wide-text|sorted|all; all runs structured,random,skewed)")
-	fs.StringVar(&opts.mode, "mode", opts.mode, "query mode (same-process|warm-reopen|cold-ish|all)")
+	fs.StringVar(&opts.mode, "mode", opts.mode, "query mode (same-process|warm-reopen|byte-cold|cold-ish|all)")
 	fs.BoolVar(&opts.json, "json", false, "emit machine-readable JSON output")
 	fs.StringVar(&opts.baseline, "baseline", "", "compare against a previously emitted JSON report")
 	fs.BoolVar(&opts.showAll, "show-all", false, "in baseline mode, show every query (not just regressions)")
@@ -378,13 +379,19 @@ func runOne(opts options, rows int64, profile profileSpec) (benchReport, error) 
 			f.Close()
 		}()
 	}
-	var reopenBetweenRuns func() error
-	if effectiveMode(opts.mode) == benchModeColdish {
-		reopenBetweenRuns = func() error {
+	var prepareBetweenRuns func() error
+	switch effectiveMode(opts.mode) {
+	case benchModeColdish:
+		prepareBetweenRuns = func() error {
 			return reopenBenchDB(ctx, &db, dir)
 		}
+	case benchModeByteCold:
+		prepareBetweenRuns = func() error {
+			db.ClearByteCache()
+			return nil
+		}
 	}
-	queries, err := runQuerySet(ctx, &db, benchQueries, opts.runs, opts.query, reopenBetweenRuns)
+	queries, err := runQuerySet(ctx, &db, benchQueries, opts.runs, opts.query, prepareBetweenRuns)
 	if err != nil {
 		return benchReport{}, err
 	}
@@ -427,6 +434,18 @@ func prepareQueryMode(ctx context.Context, db **engine.DB, dir string, mode stri
 		return "queries run in the same process immediately after load", nil
 	case benchModeWarmReopen:
 		return "database closed and reopened before queries; OS file cache may remain warm", reopenBenchDB(ctx, db, dir)
+	case benchModeByteCold:
+		if err := reopenBenchDB(ctx, db, dir); err != nil {
+			return "", err
+		}
+		// Prime segment state so the timed samples don't pay the cold-open
+		// cost; StorageStats walks ScanSegments which loads the manifest and
+		// per-segment footers exactly once.
+		if _, err := (*db).StorageStats(ctx, "events"); err != nil {
+			return "", err
+		}
+		(*db).ClearByteCache()
+		return "DB stays open across samples but the in-process byte cache is cleared before each one; isolates byte-cache amplifier cost from Open cost.", nil
 	case benchModeColdish:
 		runtime.GC()
 		debug.FreeOSMemory()

@@ -29,6 +29,17 @@ func (s *Store) ByteCacheStats() SegmentByteCacheStats {
 	return s.byteCache.Stats()
 }
 
+// ClearByteCache drops the in-process page-byte cache without dropping the
+// loaded segment metadata, file-handle cache, or table state. Used by the
+// byte-cold benchmark mode to isolate "what does the byte cache buy me"
+// from "what does Open() buy me".
+func (s *Store) ClearByteCache() {
+	if s == nil {
+		return
+	}
+	s.byteCache.Clear()
+}
+
 type tableState struct {
 	spec           types.TableSpec
 	dir            string
