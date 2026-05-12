@@ -72,8 +72,27 @@ Snapshot (2026-05-11):
 End-to-end query workload via the bench driver:
 
 ```
-go run ./cmd/bench -runs 3 -profile structured
+go run ./cmd/bench -rows 10000000 -segment-rows 2097152 -profile structured -runs 50
 ```
+
+Snapshot (2026-05-11), `structured` profile, 10M rows, 2M-row segments, `sort_by = 'tenant_id'`:
+
+| Query | best | strategy |
+| --- | --- | --- |
+| `SELECT count(*) WHERE event_type = 'checkout'` | 28 µs | text summary + metadata count |
+| `SELECT event_type, count(*) GROUP BY event_type` | 8 µs | metadata group |
+| `SELECT status, count(*) GROUP BY status` | 8 µs | metadata group |
+| `SELECT count(*) WHERE path = '/checkout/confirm'` | 63 µs | text summary prune |
+| `SELECT count(*), sum(amount), min(amount), max(amount)` | 13 µs | metadata aggregates |
+| `SELECT country, count(*), sum(amount) GROUP BY country` | 15 µs | per-segment SMA |
+| `SELECT count(*) WHERE tenant_id = 42 AND event_type = 'checkout'` | 216 µs | min/max prune (sort_by) |
+| `SELECT count(*) WHERE tenant_id = 999999` | 6 µs | min/max prune (sort_by) |
+| `SELECT sum(amount) WHERE tenant_id = 42 AND event_type = 'checkout'` | 307 µs | min/max prune (sort_by) |
+| `SELECT country, count(*) WHERE event_type = 'checkout' GROUP BY country` | 6 µs | cross-count SMA |
+| `SELECT count(*) WHERE user_id = 778` | 6.0 ms | min/max prune (no clustering on user_id) |
+| `SELECT count(*) WHERE created_at = ...` | 4.5 ms | min/max prune (no clustering on created_at) |
+| `SELECT count(*) WHERE event_uuid = '...'` | 250 µs | uuid summary prune |
+| `SELECT count(*) WHERE url = '...'` | 336 µs | text summary prune |
 
 Full usage in [`cmd/bench/README.md`](cmd/bench/README.md). The driver exercises segment build, predicate pushdown, and aggregate execution end-to-end.
 

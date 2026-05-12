@@ -781,6 +781,7 @@ type profileSpec struct {
 	name    string
 	columns []columnSpec
 	userFor int64Function
+	sortBy  []string
 }
 
 type columnSpec struct {
@@ -797,6 +798,9 @@ func createBenchTable(ctx context.Context, db *engine.DB, profile profileSpec, s
 	spec := types.TableSpec{Name: "events", IfNotExists: true, Columns: cols}
 	if segmentRows > 0 {
 		spec.Options.SegmentRows = types.SegmentRows(segmentRows)
+	}
+	if len(profile.sortBy) > 0 {
+		spec.Options.SortBy = append([]string(nil), profile.sortBy...)
 	}
 	return db.CreateTable(ctx, spec)
 }
@@ -837,7 +841,7 @@ func (p profileSpec) buildBatch(start int64, n int) (types.Batch, error) {
 func profileSpecFor(profile string) (profileSpec, error) {
 	switch profile {
 	case "structured":
-		return profileSpec{name: "structured", columns: baseProfileColumns(structuredValues), userFor: structuredValues.user}, nil
+		return profileSpec{name: "structured", columns: baseProfileColumns(structuredValues), userFor: structuredValues.user, sortBy: []string{"tenant_id"}}, nil
 	case "random":
 		return profileSpec{name: "random", columns: baseProfileColumns(randomValues), userFor: randomValues.user}, nil
 	case "skewed":
