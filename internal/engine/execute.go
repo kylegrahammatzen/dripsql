@@ -5,18 +5,12 @@ import (
 	"fmt"
 	"runtime"
 	"sort"
-	"sync"
-	"time"
 
 	v3exec "github.com/kylegrahammatzen/dripsql/internal/exec"
+	"github.com/kylegrahammatzen/dripsql/internal/format"
 	v3sql "github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
-)
-
-const (
-	secondsPerDay   = int64(24 * time.Hour / time.Second)
-	timestampLayout = "2006-01-02T15:04:05.000000000Z"
 )
 
 func (db *DB) Execute(ctx context.Context, plan v3sql.Plan) (*Rows, error) {
@@ -128,9 +122,9 @@ func (db *DB) runAggregateProject(ctx context.Context, plan *v3sql.AggregatePlan
 }
 
 func (db *DB) runScan(ctx context.Context, plan *v3sql.ScanPlan, consumer v3exec.Consumer, trace *executionTrace) error {
-	entry, ok := db.table(plan.Table.Name)
-	if !ok {
-		return fmt.Errorf("table %q does not exist", plan.Table.Name)
+	entry, err := db.table(plan.Table.Name)
+	if err != nil {
+		return err
 	}
 	pushExpr, postExpr, err := splitScanWhere(plan.Where)
 	if err != nil {
@@ -776,22 +770,15 @@ func (db *DB) aggregateBatch(ctx context.Context, plan *v3sql.AggregatePlan, tra
 	return scalarAggregateBatch(specs, sinks)
 }
 
-type metadataAggState struct {
-	count int64
-	sum   int64
-	value int64
-	set   bool
-}
-
 // scanSegmentsForTable resolves the table entry and returns its segments.
 // ScanSegments includes any unsealed buffer rows as a virtual in-memory
 // segment, so callers do not need to FlushBuffered to see fresh data.
 // Metadata fast-paths must bail when a returned segment has Path == ""
 // (in-memory) since segment.Meta carries no per-page stats for buffered rows.
 func (db *DB) scanSegmentsForTable(ctx context.Context, tableName string) ([]storage.ScanSegment, types.TableSpec, error) {
-	entry, ok := db.table(tableName)
-	if !ok {
-		return nil, types.TableSpec{}, fmt.Errorf("table %q does not exist", tableName)
+	entry, err := db.table(tableName)
+	if err != nil {
+		return nil, types.TableSpec{}, err
 	}
 	segments, err := db.data.ScanSegments(ctx, entry.spec)
 	if err != nil {
@@ -810,6 +797,39 @@ func segmentsContainBuffer(segments []storage.ScanSegment) bool {
 		}
 	}
 	return false
+}
+
+// metadataSegmentsForScan resolves the ScanPlan, loads its segments, and
+// rejects in-memory buffers. Returns ok=false (without error) when the plan
+// is not a scan or has buffered rows, so callers can chain bail-outs.
+func (db *DB) metadataSegmentsForScan(ctx context.Context, source v3sql.Plan) (*v3sql.ScanPlan, []storage.ScanSegment, bool, error) {
+	scan, ok := source.(*v3sql.ScanPlan)
+	if !ok {
+		return nil, nil, false, nil
+	}
+	segments, _, err := db.scanSegmentsForTable(ctx, scan.Table.Name)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if segmentsContainBuffer(segments) {
+		return nil, nil, false, nil
+	}
+	return scan, segments, true, nil
+}
+
+// textStatsForColumn returns the TextStats for a text column when its summary
+// is exact enough to drive metadata-only answers (the page-level hash filter
+// in particular needs exact counts). Returns nil/false otherwise.
+func textStatsForColumn(meta storage.SegmentMeta, column string) (*storage.TextStats, []storage.PageMeta, bool) {
+	for _, col := range meta.Columns {
+		if normalizeName(col.Name) == normalizeName(column) && col.Type.Kind == types.KindText {
+			if !textStatsExact(col.Text) {
+				return nil, nil, false
+			}
+			return col.Text, col.Pages, true
+		}
+	}
+	return nil, nil, false
 }
 
 // metadataPruneAllPages runs the segment/page prune loop for predicate-driven
@@ -835,28 +855,29 @@ func metadataPruneAllPages(segments []storage.ScanSegment, pred storage.Predicat
 	return true
 }
 
+// scalarMetadataBatch answers WHERE-less scalar aggregates from segment
+// metadata. Each sink implements MetadataSink and absorbs every segment;
+// any false return falls back to a scan.
 func (db *DB) scalarMetadataBatch(ctx context.Context, source v3sql.Plan, specs []v3sql.AggSpec, trace *executionTrace) (types.Batch, bool, error) {
 	if len(specs) == 0 {
 		return types.Batch{}, false, nil
 	}
-	scan, ok := source.(*v3sql.ScanPlan)
-	if !ok || scan.Where != nil {
-		return types.Batch{}, false, nil
+	scan, segments, ok, err := db.metadataSegmentsForScan(ctx, source)
+	if !ok || err != nil || scan.Where != nil {
+		return types.Batch{}, false, err
 	}
-	for _, spec := range specs {
-		if !scalarMetadataEligible(source, spec) {
-			return types.Batch{}, false, nil
-		}
-	}
-	segments, _, err := db.scanSegmentsForTable(ctx, scan.Table.Name)
+	sinks, err := db.aggregateSinks(source, specs)
 	if err != nil {
 		return types.Batch{}, false, err
 	}
-	if segmentsContainBuffer(segments) {
-		return types.Batch{}, false, nil
+	metas := make([]v3exec.MetadataSink, len(sinks))
+	for i, s := range sinks {
+		ms, ok := s.(v3exec.MetadataSink)
+		if !ok {
+			return types.Batch{}, false, nil
+		}
+		metas[i] = ms
 	}
-
-	states := make([]metadataAggState, len(specs))
 	stats := storage.ExecStats{}
 	for _, segment := range segments {
 		stats.ObserveSegment(true)
@@ -864,167 +885,46 @@ func (db *DB) scalarMetadataBatch(ctx context.Context, source v3sql.Plan, specs 
 			rows := int(info.Rows)
 			stats.ObservePage(rows, 0, rows, true)
 		}
-		for i, spec := range specs {
-			ok, err := updateMetadataAggState(&states[i], spec, segment.Meta)
-			if err != nil || !ok {
-				return types.Batch{}, ok, err
+		for _, ms := range metas {
+			if !ms.TryAbsorbSegment(segment.Meta) {
+				return types.Batch{}, false, nil
 			}
 		}
-	}
-	sinks, err := metadataAggregateSinks(source, specs, states)
-	if err != nil {
-		return types.Batch{}, true, err
 	}
 	trace.recordScan(scan, stats)
 	batch, err := scalarAggregateBatch(specs, sinks)
 	return batch, true, err
 }
 
-func scalarMetadataEligible(source v3sql.Plan, spec v3sql.AggSpec) bool {
-	switch spec.Func {
-	case v3sql.AggregateCount:
-		if spec.Star {
-			return true
-		}
-		_, ok := sourceColumnType(source, spec.ArgColumn, spec.ArgName)
-		return ok
-	case v3sql.AggregateSum, v3sql.AggregateMin, v3sql.AggregateMax:
-		typ, ok := sourceColumnType(source, spec.ArgColumn, spec.ArgName)
-		return ok && (typ.Kind == types.KindInt32 || typ.Kind == types.KindInt64)
-	default:
-		return false
-	}
-}
-
-func updateMetadataAggState(state *metadataAggState, spec v3sql.AggSpec, meta storage.SegmentMeta) (bool, error) {
-	switch spec.Func {
-	case v3sql.AggregateCount:
-		if spec.Star {
-			state.count += int64(meta.Rows)
-			return true, nil
-		}
-		col, ok := segmentColumnMeta(meta, spec.ArgName)
-		if !ok {
-			return false, nil
-		}
-		state.count += int64(col.Rows - col.NullCount)
-		return true, nil
-	case v3sql.AggregateSum:
-		col, ok := segmentColumnMeta(meta, spec.ArgName)
-		if !ok {
-			return false, nil
-		}
-		numeric, ok := numericColumnStatsFromMeta(col)
-		if !ok || !numeric.sumValid {
-			return false, nil
-		}
-		next, ok := v3exec.AddInt64(state.sum, numeric.sum)
-		if !ok {
-			return true, v3exec.ErrSumOverflow
-		}
-		state.sum = next
-		state.count += int64(col.Rows - col.NullCount)
-		return true, nil
-	case v3sql.AggregateMin, v3sql.AggregateMax:
-		col, ok := segmentColumnMeta(meta, spec.ArgName)
-		if !ok {
-			return false, nil
-		}
-		numeric, ok := numericColumnStatsFromMeta(col)
-		if !ok {
-			return false, nil
-		}
-		if !numeric.set {
-			return true, nil
-		}
-		if !state.set || (spec.Func == v3sql.AggregateMin && numeric.min < state.value) || (spec.Func == v3sql.AggregateMax && numeric.max > state.value) {
-			if spec.Func == v3sql.AggregateMin {
-				state.value = numeric.min
-			} else {
-				state.value = numeric.max
-			}
-			state.set = true
-		}
-		return true, nil
-	default:
-		return false, nil
-	}
-}
-
-func metadataAggregateSinks(source v3sql.Plan, specs []v3sql.AggSpec, states []metadataAggState) ([]v3exec.AggregateSink, error) {
-	sinks := make([]v3exec.AggregateSink, len(specs))
-	for i, spec := range specs {
-		state := states[i]
-		switch spec.Func {
-		case v3sql.AggregateCount:
-			sinks[i] = &v3exec.CountSink{N: state.count}
-		case v3sql.AggregateSum:
-			typ, ok := sourceColumnType(source, spec.ArgColumn, spec.ArgName)
-			if !ok {
-				return nil, fmt.Errorf("missing SUM column %q", spec.ArgName)
-			}
-			if typ.Kind == types.KindInt32 {
-				sinks[i] = &v3exec.SumInt32Sink{Sum: state.sum, Count: state.count}
-			} else {
-				sinks[i] = &v3exec.SumInt64Sink{Sum: state.sum, Count: state.count}
-			}
-		case v3sql.AggregateMin:
-			sinks[i] = &v3exec.MinInt64Sink{Value: state.value, Set: state.set}
-		case v3sql.AggregateMax:
-			sinks[i] = &v3exec.MaxInt64Sink{Value: state.value, Set: state.set}
-		default:
-			return nil, fmt.Errorf("unsupported aggregate %d", spec.Func)
-		}
-	}
-	return sinks, nil
-}
-
+// countStarMetadataBatch answers COUNT(*) WHERE <pushable predicate> from
+// metadata: either via the page-level text hash filter (when no value can
+// possibly match) or via metadataPruneAllPages (when no surviving page can
+// contribute). WHERE-less COUNT(*) is handled by scalarMetadataBatch.
 func (db *DB) countStarMetadataBatch(ctx context.Context, source v3sql.Plan, specs []v3sql.AggSpec, trace *executionTrace) (types.Batch, bool, error) {
 	if len(specs) != 1 || specs[0].Func != v3sql.AggregateCount || !specs[0].Star {
 		return types.Batch{}, false, nil
 	}
-	scan, ok := source.(*v3sql.ScanPlan)
-	if !ok {
-		return types.Batch{}, false, nil
+	scan, segments, ok, err := db.metadataSegmentsForScan(ctx, source)
+	if !ok || err != nil || scan.Where == nil {
+		return types.Batch{}, false, err
 	}
 	pred, pushed, err := predicateFromBoundExpr(scan.Where)
 	if err != nil || !pushed {
 		return types.Batch{}, false, err
 	}
-	segments, _, err := db.scanSegmentsForTable(ctx, scan.Table.Name)
-	if err != nil {
-		return types.Batch{}, false, err
-	}
-	if segmentsContainBuffer(segments) {
-		return types.Batch{}, false, nil
-	}
 
-	var count int64
-	stats := storage.ExecStats{}
-	if scan.Where == nil {
-		for _, segment := range segments {
-			stats.ObserveSegment(true)
-			for _, info := range segment.PageInfos {
-				rows := int(info.Rows)
-				count += int64(rows)
-				stats.ObservePage(rows, 0, rows, true)
-			}
-		}
-		trace.recordScan(scan, stats)
-		batch, err := scalarAggregateBatch(specs, []v3exec.AggregateSink{&v3exec.CountSink{N: count}})
-		return batch, true, err
-	}
 	if count, metadataStats, ok := countStarTextPredicateMetadata(segments, pred); ok {
 		trace.recordScan(scan, metadataStats)
 		batch, err := scalarAggregateBatch(specs, []v3exec.AggregateSink{&v3exec.CountSink{N: count}})
 		return batch, true, err
 	}
 
+	stats := storage.ExecStats{}
 	if !metadataPruneAllPages(segments, pred, &stats) {
 		return types.Batch{}, false, nil
 	}
 	trace.recordScan(scan, stats)
-	batch, err := scalarAggregateBatch(specs, []v3exec.AggregateSink{&v3exec.CountSink{N: count}})
+	batch, err := scalarAggregateBatch(specs, []v3exec.AggregateSink{&v3exec.CountSink{N: 0}})
 	return batch, true, err
 }
 
@@ -1034,56 +934,27 @@ func observeMetadataSkippedPages(stats *storage.ExecStats, infos []storage.Segme
 	}
 }
 
+// sumMetadataBatch answers SUM(col) WHERE <pushable predicate> from metadata
+// when every page is pruned (result = 0). WHERE-less SUM is handled by
+// scalarMetadataBatch.
 func (db *DB) sumMetadataBatch(ctx context.Context, source v3sql.Plan, specs []v3sql.AggSpec, trace *executionTrace) (types.Batch, bool, error) {
 	if len(specs) != 1 || specs[0].Func != v3sql.AggregateSum {
-		return types.Batch{}, false, nil
-	}
-	scan, ok := source.(*v3sql.ScanPlan)
-	if !ok {
 		return types.Batch{}, false, nil
 	}
 	typ, ok := sourceColumnType(source, specs[0].ArgColumn, specs[0].ArgName)
 	if !ok || (typ.Kind != types.KindInt32 && typ.Kind != types.KindInt64) {
 		return types.Batch{}, false, nil
 	}
+	scan, segments, ok, err := db.metadataSegmentsForScan(ctx, source)
+	if !ok || err != nil || scan.Where == nil {
+		return types.Batch{}, false, err
+	}
 	pred, pushed, err := predicateFromBoundExpr(scan.Where)
 	if err != nil || !pushed {
 		return types.Batch{}, false, err
 	}
-	segments, _, err := db.scanSegmentsForTable(ctx, scan.Table.Name)
-	if err != nil {
-		return types.Batch{}, false, err
-	}
-	if segmentsContainBuffer(segments) {
-		return types.Batch{}, false, nil
-	}
 
-	var sum int64
-	var count int64
 	stats := storage.ExecStats{}
-	if scan.Where == nil {
-		for _, segment := range segments {
-			colStats, ok := numericColumnStats(segment.Meta, specs[0].ArgName)
-			if !ok || !colStats.sumValid {
-				return types.Batch{}, false, nil
-			}
-			if next, ok := v3exec.AddInt64(sum, colStats.sum); ok {
-				sum = next
-			} else {
-				return types.Batch{}, false, nil
-			}
-			stats.ObserveSegment(true)
-			for _, info := range segment.PageInfos {
-				rows := int(info.Rows)
-				count += int64(rows)
-				stats.ObservePage(rows, 0, rows, true)
-			}
-		}
-		trace.recordScan(scan, stats)
-		batch, err := scalarAggregateBatch(specs, []v3exec.AggregateSink{&v3exec.SumInt64Sink{Sum: sum, Count: count}})
-		return batch, true, err
-	}
-
 	if !metadataPruneAllPages(segments, pred, &stats) {
 		return types.Batch{}, false, nil
 	}
@@ -1097,39 +968,12 @@ func (db *DB) parallelScalarAggregateBatch(ctx context.Context, source v3sql.Pla
 	if !ok || len(specs) == 0 {
 		return types.Batch{}, false, nil
 	}
-	pushExpr, postExpr, err := splitScanWhere(scan.Where)
-	if err != nil {
+	base, pushPred, hasPushPred, ok, err := db.parallelScanIterator(ctx, scan)
+	if err != nil || !ok {
 		return types.Batch{}, false, err
 	}
-	if postExpr != nil {
-		return types.Batch{}, false, nil
-	}
-	entry, ok := db.table(scan.Table.Name)
-	if !ok {
-		return types.Batch{}, false, fmt.Errorf("table %q does not exist", scan.Table.Name)
-	}
-	baseStats := &storage.ExecStats{}
-	var base storage.SegmentScanIterator
-	var pushPred storage.Predicate
-	hasPushPred := false
-	if pushExpr == nil {
-		base, err = db.data.ScanIterator(ctx, entry.spec, nil, baseStats)
-	} else {
-		pred, pushed, err := predicateFromBoundExpr(pushExpr)
-		if err != nil {
-			return types.Batch{}, false, err
-		}
-		if !pushed {
-			return types.Batch{}, false, nil
-		}
-		pushPred = pred
-		hasPushPred = true
-		base, err = db.data.ScanIteratorForPredicate(ctx, entry.spec, pred, baseStats)
-	}
-	if err != nil {
-		return types.Batch{}, false, err
-	}
-	if len(base.Segments) < 2 {
+	workers := min(len(base.Segments), runtime.GOMAXPROCS(0))
+	if workers < 2 {
 		return types.Batch{}, false, nil
 	}
 	master, err := db.aggregateSinks(source, specs)
@@ -1139,63 +983,80 @@ func (db *DB) parallelScalarAggregateBatch(ctx context.Context, source v3sql.Pla
 	base.OutputColumns = columnNamesForIDs(scan.Table, scan.Columns)
 	base.EncodedOutputColumns = columnSet((&v3exec.Aggregate{Sinks: master}).EncodedColumns())
 
-	workers := min(len(base.Segments), runtime.GOMAXPROCS(0))
-	if workers < 2 {
-		return types.Batch{}, false, nil
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	workerSinks := make([][]v3exec.AggregateSink, workers)
-	workerStats := make([]storage.ExecStats, workers)
-	errCh := make(chan error, workers)
-	var wg sync.WaitGroup
-	for worker := 0; worker < workers; worker++ {
-		start := worker * len(base.Segments) / workers
-		end := (worker + 1) * len(base.Segments) / workers
-		if start == end {
-			continue
-		}
+	for w := range workerSinks {
 		sinks, err := db.aggregateSinks(source, specs)
 		if err != nil {
 			return types.Batch{}, false, err
 		}
-		workerSinks[worker] = sinks
-		it := base
-		it.Context = ctx
-		it.Segments = base.Segments[start:end]
-		it.Stats = &workerStats[worker]
+		workerSinks[w] = sinks
+	}
+	stats, err := base.RunParallel(ctx, workers, func(w int, it storage.SegmentScanIterator) error {
 		if hasPushPred {
 			it.Predicate = storage.NewPredicateEvaluator(pushPred)
 		}
-		wg.Add(1)
-		go func(it storage.SegmentScanIterator, sinks []v3exec.AggregateSink) {
-			defer wg.Done()
-			if err := consumeAggregateIterator(it, sinks); err != nil {
-				cancel()
-				errCh <- err
-			}
-		}(it, sinks)
-	}
-	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		if err != nil {
-			return types.Batch{}, true, err
-		}
+		return consumeAggregateIterator(it, workerSinks[w])
+	})
+	if err != nil {
+		return types.Batch{}, true, err
 	}
 	mergedStats := storage.ExecStats{}
-	for worker := range workerSinks {
-		if workerSinks[worker] == nil {
+	for w, sinks := range workerSinks {
+		if sinks == nil {
 			continue
 		}
-		if err := mergeAggregateSinks(master, workerSinks[worker], specs); err != nil {
+		if err := mergeAggregateSinks(master, sinks, specs); err != nil {
 			return types.Batch{}, true, err
 		}
-		mergeExecStats(&mergedStats, workerStats[worker])
+		mergeExecStats(&mergedStats, stats[w])
 	}
 	trace.recordScan(scan, mergedStats)
 	batch, err := scalarAggregateBatch(specs, master)
 	return batch, true, err
+}
+
+// parallelScanIterator builds the per-table iterator that both
+// parallelScalarAggregateBatch and parallelGroupedCountBatch start from.
+// ok=false (no error) means the plan cannot be parallelized (post-filter,
+// non-pushable WHERE, or fewer than two segments).
+func (db *DB) parallelScanIterator(ctx context.Context, scan *v3sql.ScanPlan) (storage.SegmentScanIterator, storage.Predicate, bool, bool, error) {
+	pushExpr, postExpr, err := splitScanWhere(scan.Where)
+	if err != nil {
+		return storage.SegmentScanIterator{}, storage.Predicate{}, false, false, err
+	}
+	if postExpr != nil {
+		return storage.SegmentScanIterator{}, storage.Predicate{}, false, false, nil
+	}
+	entry, err := db.table(scan.Table.Name)
+	if err != nil {
+		return storage.SegmentScanIterator{}, storage.Predicate{}, false, false, err
+	}
+	baseStats := &storage.ExecStats{}
+	if pushExpr == nil {
+		base, err := db.data.ScanIterator(ctx, entry.spec, nil, baseStats)
+		if err != nil {
+			return storage.SegmentScanIterator{}, storage.Predicate{}, false, false, err
+		}
+		if len(base.Segments) < 2 {
+			return storage.SegmentScanIterator{}, storage.Predicate{}, false, false, nil
+		}
+		return base, storage.Predicate{}, false, true, nil
+	}
+	pred, pushed, err := predicateFromBoundExpr(pushExpr)
+	if err != nil {
+		return storage.SegmentScanIterator{}, storage.Predicate{}, false, false, err
+	}
+	if !pushed {
+		return storage.SegmentScanIterator{}, storage.Predicate{}, false, false, nil
+	}
+	base, err := db.data.ScanIteratorForPredicate(ctx, entry.spec, pred, baseStats)
+	if err != nil {
+		return storage.SegmentScanIterator{}, storage.Predicate{}, false, false, err
+	}
+	if len(base.Segments) < 2 {
+		return storage.SegmentScanIterator{}, storage.Predicate{}, false, false, nil
+	}
+	return base, pred, true, true, nil
 }
 
 func consumeAggregateIterator(it storage.SegmentScanIterator, sinks []v3exec.AggregateSink) error {
@@ -1220,46 +1081,6 @@ func mergeExecStats(dst *storage.ExecStats, src storage.ExecStats) {
 	dst.PayloadBytesRead += src.PayloadBytesRead
 }
 
-type numericStats struct {
-	min      int64
-	max      int64
-	sum      int64
-	sumValid bool
-	set      bool
-}
-
-func numericColumnStats(meta storage.SegmentMeta, column string) (numericStats, bool) {
-	for _, col := range meta.Columns {
-		if normalizeName(col.Name) != normalizeName(column) {
-			continue
-		}
-		return numericColumnStatsFromMeta(col)
-	}
-	return numericStats{}, false
-}
-
-func segmentColumnMeta(meta storage.SegmentMeta, column string) (storage.ColumnMeta, bool) {
-	for _, col := range meta.Columns {
-		if normalizeName(col.Name) == normalizeName(column) {
-			return col, true
-		}
-	}
-	return storage.ColumnMeta{}, false
-}
-
-func numericColumnStatsFromMeta(col storage.ColumnMeta) (numericStats, bool) {
-	if col.Int64 != nil {
-		return numericStats{min: col.Int64.Min, max: col.Int64.Max, sum: col.Int64.Sum, sumValid: col.Int64.SumValid, set: true}, true
-	}
-	if col.Int32 != nil {
-		return numericStats{min: int64(col.Int32.Min), max: int64(col.Int32.Max), sum: col.Int32.Sum, sumValid: col.Int32.SumValid, set: true}, true
-	}
-	if col.AllNull {
-		return numericStats{sumValid: true}, true
-	}
-	return numericStats{}, false
-}
-
 func (db *DB) groupedAggregateBatch(ctx context.Context, plan *v3sql.AggregatePlan, trace *executionTrace) (types.Batch, error) {
 	if len(plan.GroupBy) != 1 || len(plan.Aggregates) == 0 {
 		return types.Batch{}, fmt.Errorf("GROUP BY execution requires one group key and at least one visible aggregate")
@@ -1281,6 +1102,9 @@ func (db *DB) groupedAggregateBatch(ctx context.Context, plan *v3sql.AggregatePl
 	if batch, ok, err := db.groupedTextCountMetadataBatch(ctx, plan.Source, group, aggSpec, trace); err != nil || ok {
 		return batch, err
 	}
+	if batch, ok, err := db.groupedTextCountFilteredMetadataBatch(ctx, plan.Source, group, aggSpec, trace); err != nil || ok {
+		return batch, err
+	}
 	if batch, ok, err := db.parallelGroupedCountBatch(ctx, plan.Source, group, aggSpec, trace); err != nil || ok {
 		return batch, err
 	}
@@ -1297,17 +1121,6 @@ func (db *DB) groupedAggregateBatch(ctx context.Context, plan *v3sql.AggregatePl
 		return types.Batch{}, err
 	}
 	return groupStringCountBatch(group, aggSpec, result.(map[string]int64))
-}
-
-type textGroupCountSumState struct {
-	count int64
-	sum   int64
-}
-
-type textGroupCountSumCollector struct {
-	group  string
-	sumCol string
-	groups map[string]textGroupCountSumState
 }
 
 func (db *DB) groupedTextCountSumBatch(ctx context.Context, plan *v3sql.AggregatePlan, trace *executionTrace) (types.Batch, bool, error) {
@@ -1339,172 +1152,78 @@ func (db *DB) groupedTextCountSumBatch(ctx context.Context, plan *v3sql.Aggregat
 	if countIndex < 0 || sumIndex < 0 {
 		return types.Batch{}, false, nil
 	}
-	collector := &textGroupCountSumCollector{group: group.Column, sumCol: plan.Aggregates[sumIndex].ArgName, groups: make(map[string]textGroupCountSumState)}
+	sumCol := plan.Aggregates[sumIndex].ArgName
+	if batch, ok, err := db.groupedTextCountSumMetadataBatch(ctx, plan.Source, group, sumCol, plan.Aggregates, trace); err != nil || ok {
+		return batch, true, err
+	}
+	if batch, ok, err := db.parallelGroupedTextCountSumBatch(ctx, plan.Source, group, sumCol, plan.Aggregates, trace); err != nil || ok {
+		return batch, true, err
+	}
+	collector := &v3exec.TextGroupCountSumSink{Group: group.Column, SumCol: sumCol, Groups: make(map[string]v3exec.TextGroupCountSumState)}
 	if err := db.runSource(ctx, plan.Source, collector, trace); err != nil {
 		return types.Batch{}, true, err
 	}
-	batch, err := groupTextCountSumBatch(group, plan.Aggregates, collector.groups)
+	batch, err := groupTextCountSumBatch(group, plan.Aggregates, collector.Groups)
 	return batch, true, err
 }
 
-func (c *textGroupCountSumCollector) Open(context.Context) error { return nil }
-
-func (c *textGroupCountSumCollector) Push(batch types.Batch, sel types.SelectionMask) error {
-	if sel.Rows != batch.Len {
-		return fmt.Errorf("selection rows %d do not match batch length %d", sel.Rows, batch.Len)
-	}
-	groupCol, ok := columnFromList(batch.Columns, c.group)
+// parallelGroupedTextCountSumBatch fans the GROUP BY <text> + COUNT(*) + SUM(int)
+// path across one worker per segment. Each worker keeps its own per-group
+// counter/sum map; results merge once all workers finish. Returns ok=false
+// (no error) when the plan can't be parallelized, falling through to the
+// serial collector.
+func (db *DB) parallelGroupedTextCountSumBatch(ctx context.Context, source v3sql.Plan, group v3sql.BoundExpr, sumCol string, specs []v3sql.AggSpec, trace *executionTrace) (types.Batch, bool, error) {
+	scan, ok := source.(*v3sql.ScanPlan)
 	if !ok {
-		return fmt.Errorf("missing GROUP BY column %q", c.group)
+		return types.Batch{}, false, nil
 	}
-	sumCol, ok := columnFromList(batch.Columns, c.sumCol)
-	if !ok {
-		return fmt.Errorf("missing aggregate column %q", c.sumCol)
+	base, pushPred, hasPushPred, ok, err := db.parallelScanIterator(ctx, scan)
+	if err != nil || !ok {
+		return types.Batch{}, false, err
 	}
-	if groupCol.V.Kind != types.VecText {
-		return fmt.Errorf("GROUP BY column %q has kind %s, want text", groupCol.Name, groupCol.V.Kind)
+	workers := min(len(base.Segments), runtime.GOMAXPROCS(0))
+	if workers < 2 {
+		return types.Batch{}, false, nil
 	}
-	switch groupCol.V.Encoding {
-	case types.EncodingDictionary:
-		return c.pushDict(batch.Len, groupCol.V, sumCol.V, sel)
-	case types.EncodingFlat:
-		return c.pushFlat(batch.Len, groupCol.V, sumCol.V, sel)
-	default:
-		return fmt.Errorf("GROUP BY column %q has unsupported text encoding %s", groupCol.Name, groupCol.V.Encoding)
-	}
-}
+	base.OutputColumns = []string{group.Column, sumCol}
 
-func (c *textGroupCountSumCollector) pushDict(rows int, group types.Vec, sum types.Vec, sel types.SelectionMask) error {
-	if len(group.DictIDs) < rows {
-		return fmt.Errorf("dictionary ids length %d is shorter than rows %d", len(group.DictIDs), rows)
+	workerSinks := make([]*v3exec.TextGroupCountSumSink, workers)
+	for w := range workerSinks {
+		workerSinks[w] = &v3exec.TextGroupCountSumSink{Group: group.Column, SumCol: sumCol, Groups: make(map[string]v3exec.TextGroupCountSumState)}
 	}
-	if sum.Kind != types.VecInt32 && sum.Kind != types.VecInt64 {
-		return fmt.Errorf("aggregate column %q has kind %s, want int32 or int64", c.sumCol, sum.Kind)
-	}
-	dictRows := group.DictValues.Rows()
-	if dictRows > 256 {
-		return fmt.Errorf("dictionary group has %d values, max 256", dictRows)
-	}
-	var counts [256]int64
-	var sums [256]int64
-	addRow := func(row int) error {
-		if !types.IsValid(group.Valid, row) {
-			return nil
+	stats, err := base.RunParallel(ctx, workers, func(w int, it storage.SegmentScanIterator) error {
+		if hasPushPred {
+			it.Predicate = storage.NewPredicateEvaluator(pushPred)
 		}
-		id := int(group.DictIDs[row])
-		if id >= dictRows {
-			return fmt.Errorf("dictionary id %d exceeds dictionary size %d", id, dictRows)
-		}
-		counts[id]++
-		if !types.IsValid(sum.Valid, row) {
-			return nil
-		}
-		var value int64
-		if sum.Kind == types.VecInt32 {
-			value = int64(sum.I32[row])
-		} else {
-			value = sum.I64[row]
-		}
-		next, ok := v3exec.AddInt64(sums[id], value)
-		if !ok {
-			return v3exec.ErrSumOverflow
-		}
-		sums[id] = next
-		return nil
-	}
-	if selectionAllRows(sel) {
-		for row := 0; row < rows; row++ {
-			if err := addRow(row); err != nil {
-				return err
-			}
-		}
-	} else {
-		var pushErr error
-		sel.IterSet(func(row int) {
-			if pushErr != nil {
-				return
-			}
-			pushErr = addRow(row)
+		sink := workerSinks[w]
+		return it.ForEach(func(batch types.Batch, sel types.SelectionMask) error {
+			return sink.Push(batch, sel)
 		})
-		if pushErr != nil {
-			return pushErr
-		}
-	}
-	for id := 0; id < dictRows; id++ {
-		if counts[id] == 0 {
-			continue
-		}
-		key := group.DictValues.String(id)
-		state, ok := c.groups[key]
-		if !ok {
-			key = group.DictValues.StringCopy(id)
-		}
-		if err := mergeTextGroupCountSum(c.groups, key, state, counts[id], sums[id]); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (c *textGroupCountSumCollector) pushFlat(rows int, group types.Vec, sum types.Vec, sel types.SelectionMask) error {
-	if sum.Kind != types.VecInt32 && sum.Kind != types.VecInt64 {
-		return fmt.Errorf("aggregate column %q has kind %s, want int32 or int64", c.sumCol, sum.Kind)
-	}
-	addRow := func(row int) error {
-		if !types.IsValid(group.Valid, row) {
-			return nil
-		}
-		key := group.Var.String(row)
-		state, ok := c.groups[key]
-		if !ok {
-			key = group.Var.StringCopy(row)
-		}
-		var rowSum int64
-		if types.IsValid(sum.Valid, row) {
-			if sum.Kind == types.VecInt32 {
-				rowSum = int64(sum.I32[row])
-			} else {
-				rowSum = sum.I64[row]
-			}
-		}
-		return mergeTextGroupCountSum(c.groups, key, state, 1, rowSum)
-	}
-	if selectionAllRows(sel) {
-		for row := 0; row < rows; row++ {
-			if err := addRow(row); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	var pushErr error
-	sel.IterSet(func(row int) {
-		if pushErr != nil {
-			return
-		}
-		pushErr = addRow(row)
 	})
-	return pushErr
-}
-
-func (c *textGroupCountSumCollector) Close() error { return nil }
-
-func mergeTextGroupCountSum(groups map[string]textGroupCountSumState, key string, state textGroupCountSumState, count int64, sum int64) error {
-	next, ok := v3exec.AddInt64(state.sum, sum)
-	if !ok {
-		return v3exec.ErrSumOverflow
+	if err != nil {
+		return types.Batch{}, true, err
 	}
-	state.count += count
-	state.sum = next
-	groups[key] = state
-	return nil
+	merged := make(map[string]v3exec.TextGroupCountSumState)
+	mergedStats := storage.ExecStats{}
+	for w, sink := range workerSinks {
+		for key, state := range sink.Groups {
+			cur := merged[key]
+			next, ok := v3exec.AddInt64(cur.Sum, state.Sum)
+			if !ok {
+				return types.Batch{}, true, v3exec.ErrSumOverflow
+			}
+			cur.Count += state.Count
+			cur.Sum = next
+			merged[key] = cur
+		}
+		mergeExecStats(&mergedStats, stats[w])
+	}
+	trace.recordScan(scan, mergedStats)
+	batch, err := groupTextCountSumBatch(group, specs, merged)
+	return batch, true, err
 }
 
-func selectionAllRows(sel types.SelectionMask) bool {
-	return sel.Rows == 0 || sel.PopCount() == sel.Rows
-}
-
-func groupTextCountSumBatch(group v3sql.BoundExpr, specs []v3sql.AggSpec, groups map[string]textGroupCountSumState) (types.Batch, error) {
+func groupTextCountSumBatch(group v3sql.BoundExpr, specs []v3sql.AggSpec, groups map[string]v3exec.TextGroupCountSumState) (types.Batch, error) {
 	keys := make([]string, 0, len(groups))
 	dataBytes := 0
 	for key := range groups {
@@ -1524,9 +1243,9 @@ func groupTextCountSumBatch(group v3sql.BoundExpr, specs []v3sql.AggSpec, groups
 		for i, key := range keys {
 			state := groups[key]
 			if spec.Func == v3sql.AggregateCount {
-				values[i] = state.count
+				values[i] = state.Count
 			} else {
-				values[i] = state.sum
+				values[i] = state.Sum
 			}
 		}
 		cols = append(cols, int64Column(aggregateOutputName(spec), values, nil))
@@ -1541,17 +1260,17 @@ func countStarTextPredicateMetadata(segments []storage.ScanSegment, pred storage
 	var count int64
 	stats := storage.ExecStats{}
 	for _, segment := range segments {
-		colIndex := textStatsColumnIndex(segment.Meta, pred.Column)
-		if colIndex < 0 {
+		text, pages, ok := textStatsForColumn(segment.Meta, pred.Column)
+		if !ok {
 			return 0, storage.ExecStats{}, false
 		}
-		segmentCount, ok := textStatsPredicateCount(segment.Meta.Columns[colIndex].Text, pred)
+		segmentCount, ok := textStatsPredicateCount(text, pred)
 		if !ok {
 			return 0, storage.ExecStats{}, false
 		}
 		stats.ObserveSegment(segmentCount != 0)
 		for pageIndex, info := range segment.PageInfos {
-			pageCount, ok := textStatsPredicateCount(segment.Meta.Columns[colIndex].Pages[pageIndex].Text, pred)
+			pageCount, ok := textStatsPredicateCount(pages[pageIndex].Text, pred)
 			if !ok {
 				return 0, storage.ExecStats{}, false
 			}
@@ -1563,25 +1282,18 @@ func countStarTextPredicateMetadata(segments []storage.ScanSegment, pred storage
 }
 
 func (db *DB) groupedTextCountMetadataBatch(ctx context.Context, source v3sql.Plan, group v3sql.BoundExpr, spec v3sql.AggSpec, trace *executionTrace) (types.Batch, bool, error) {
-	scan, ok := source.(*v3sql.ScanPlan)
-	if !ok || scan.Where != nil || group.Kind != v3sql.BoundExprColumn || group.Type.Kind != types.KindText || spec.Func != v3sql.AggregateCount || !spec.Star {
+	if group.Kind != v3sql.BoundExprColumn || group.Type.Kind != types.KindText || spec.Func != v3sql.AggregateCount || !spec.Star {
 		return types.Batch{}, false, nil
 	}
-	segments, _, err := db.scanSegmentsForTable(ctx, scan.Table.Name)
-	if err != nil {
+	scan, segments, ok, err := db.metadataSegmentsForScan(ctx, source)
+	if !ok || err != nil || scan.Where != nil {
 		return types.Batch{}, false, err
-	}
-	if segmentsContainBuffer(segments) {
-		return types.Batch{}, false, nil
 	}
 	counts := make(map[string]int64)
 	stats := storage.ExecStats{}
 	for _, segment := range segments {
-		colIndex := textStatsColumnIndex(segment.Meta, group.Column)
-		if colIndex < 0 {
-			return types.Batch{}, false, nil
-		}
-		if !mergeTextStatsCounts(counts, segment.Meta.Columns[colIndex].Text) {
+		text, _, ok := textStatsForColumn(segment.Meta, group.Column)
+		if !ok || !mergeTextStatsCounts(counts, text) {
 			return types.Batch{}, false, nil
 		}
 		stats.ObserveSegment(true)
@@ -1592,15 +1304,6 @@ func (db *DB) groupedTextCountMetadataBatch(ctx context.Context, source v3sql.Pl
 	trace.recordScan(scan, stats)
 	batch, err := groupStringCountBatch(group, spec, counts)
 	return batch, true, err
-}
-
-func textStatsColumnIndex(meta storage.SegmentMeta, column string) int {
-	for i, col := range meta.Columns {
-		if normalizeName(col.Name) == normalizeName(column) && col.Type.Kind == types.KindText {
-			return i
-		}
-	}
-	return -1
 }
 
 func textStatsPredicateCount(stats *storage.TextStats, pred storage.Predicate) (int64, bool) {
@@ -1642,6 +1345,117 @@ func mergeTextStatsCounts(dst map[string]int64, stats *storage.TextStats) bool {
 	return true
 }
 
+// groupedTextCountFilteredMetadataBatch answers
+// `SELECT <text>, count(*) FROM t WHERE <other_text> = 'X' GROUP BY <text>`
+// from TextStats.GroupCounts cross-counts when the writer recorded them for
+// the sibling column. All-or-nothing per query: any segment missing the
+// cross-counts for the requested predicate column forces fallback to scan.
+func (db *DB) groupedTextCountFilteredMetadataBatch(ctx context.Context, source v3sql.Plan, group v3sql.BoundExpr, spec v3sql.AggSpec, trace *executionTrace) (types.Batch, bool, error) {
+	if group.Kind != v3sql.BoundExprColumn || group.Type.Kind != types.KindText || spec.Func != v3sql.AggregateCount || !spec.Star {
+		return types.Batch{}, false, nil
+	}
+	scan, segments, ok, err := db.metadataSegmentsForScan(ctx, source)
+	if !ok || err != nil || scan.Where == nil {
+		return types.Batch{}, false, err
+	}
+	pred, pushed, err := predicateFromBoundExpr(scan.Where)
+	if err != nil || !pushed {
+		return types.Batch{}, false, err
+	}
+	if pred.Op != storage.PredicateOpEq || pred.Text == "" {
+		return types.Batch{}, false, nil
+	}
+	siblingCol := pred.Column
+	if normalizeName(siblingCol) == normalizeName(group.Column) {
+		return types.Batch{}, false, nil
+	}
+	counts := make(map[string]int64)
+	stats := storage.ExecStats{}
+	for _, segment := range segments {
+		text, _, ok := textStatsForColumn(segment.Meta, group.Column)
+		if !ok || !textStatsExact(text) {
+			return types.Batch{}, false, nil
+		}
+		bySibling, ok := text.GroupCounts[siblingCol]
+		if !ok {
+			return types.Batch{}, false, nil
+		}
+		// pred.Text may be absent from this segment (zero-count contribution);
+		// that's not a fast-path failure as long as the sibling was tracked.
+		if parallel := bySibling[pred.Text]; parallel != nil {
+			for i, value := range text.Values {
+				if parallel[i] == 0 {
+					continue
+				}
+				counts[value] += parallel[i]
+			}
+		}
+		stats.ObserveSegment(true)
+		for _, info := range segment.PageInfos {
+			stats.ObservePage(int(info.Rows), 0, int(info.Rows), true)
+		}
+	}
+	trace.recordScan(scan, stats)
+	batch, err := groupStringCountBatch(group, spec, counts)
+	return batch, true, err
+}
+
+// mergeTextStatsCountSums extends mergeTextStatsCounts with the per-int-column
+// rolled-up sums from TextStats.GroupSums. Returns false when stats are
+// truncated, missing, or the requested sumCol wasn't recorded at write time —
+// any of those force the caller to fall back to scan-based aggregation.
+func mergeTextStatsCountSums(counts map[string]int64, sums map[string]int64, stats *storage.TextStats, sumCol string) bool {
+	if !textStatsExact(stats) {
+		return false
+	}
+	groupSums, ok := stats.GroupSums[sumCol]
+	if !ok || len(groupSums) != len(stats.Values) {
+		return false
+	}
+	for i, value := range stats.Values {
+		counts[value] += int64(stats.Counts[i])
+		sums[value] += groupSums[i]
+	}
+	return true
+}
+
+// groupedTextCountSumMetadataBatch is the SUM-extended sibling of
+// groupedTextCountMetadataBatch. Fires only when the writer sealed segment-
+// level GroupSums for the requested int column AND there is no WHERE clause,
+// answering the GROUP BY entirely from metadata with no payload reads.
+func (db *DB) groupedTextCountSumMetadataBatch(ctx context.Context, source v3sql.Plan, group v3sql.BoundExpr, sumCol string, specs []v3sql.AggSpec, trace *executionTrace) (types.Batch, bool, error) {
+	if group.Kind != v3sql.BoundExprColumn || group.Type.Kind != types.KindText || sumCol == "" {
+		return types.Batch{}, false, nil
+	}
+	scan, segments, ok, err := db.metadataSegmentsForScan(ctx, source)
+	if !ok || err != nil || scan.Where != nil {
+		return types.Batch{}, false, err
+	}
+	if len(segments) == 0 {
+		return types.Batch{}, false, nil
+	}
+	counts := make(map[string]int64)
+	sums := make(map[string]int64)
+	stats := storage.ExecStats{}
+	for _, segment := range segments {
+		text, _, ok := textStatsForColumn(segment.Meta, group.Column)
+		if !ok || !mergeTextStatsCountSums(counts, sums, text, sumCol) {
+			return types.Batch{}, false, nil
+		}
+		stats.ObserveSegment(true)
+		for _, info := range segment.PageInfos {
+			stats.ObservePage(int(info.Rows), 0, int(info.Rows), true)
+		}
+	}
+	trace.recordScan(scan, stats)
+	groups := make(map[string]v3exec.TextGroupCountSumState, len(counts))
+	for key, count := range counts {
+		groups[key] = v3exec.TextGroupCountSumState{Count: count, Sum: sums[key]}
+	}
+	batch, err := groupTextCountSumBatch(group, specs, groups)
+	return batch, true, err
+}
+
 func textStatsExact(stats *storage.TextStats) bool {
 	return stats != nil && !stats.Truncated && len(stats.Values) == len(stats.Counts)
 }
@@ -1651,40 +1465,9 @@ func (db *DB) parallelGroupedCountBatch(ctx context.Context, source v3sql.Plan, 
 	if !ok || group.Kind != v3sql.BoundExprColumn || spec.Func != v3sql.AggregateCount || !spec.Star {
 		return types.Batch{}, false, nil
 	}
-	pushExpr, postExpr, err := splitScanWhere(scan.Where)
-	if err != nil {
+	base, pushPred, hasPushPred, ok, err := db.parallelScanIterator(ctx, scan)
+	if err != nil || !ok {
 		return types.Batch{}, false, err
-	}
-	if postExpr != nil {
-		return types.Batch{}, false, nil
-	}
-	entry, ok := db.table(scan.Table.Name)
-	if !ok {
-		return types.Batch{}, false, fmt.Errorf("table %q does not exist", scan.Table.Name)
-	}
-	baseStats := &storage.ExecStats{}
-	var base storage.SegmentScanIterator
-	var pushPred storage.Predicate
-	hasPushPred := false
-	if pushExpr == nil {
-		base, err = db.data.ScanIterator(ctx, entry.spec, nil, baseStats)
-	} else {
-		pred, pushed, err := predicateFromBoundExpr(pushExpr)
-		if err != nil {
-			return types.Batch{}, false, err
-		}
-		if !pushed {
-			return types.Batch{}, false, nil
-		}
-		pushPred = pred
-		hasPushPred = true
-		base, err = db.data.ScanIteratorForPredicate(ctx, entry.spec, pred, baseStats)
-	}
-	if err != nil {
-		return types.Batch{}, false, err
-	}
-	if len(base.Segments) < 2 {
-		return types.Batch{}, false, nil
 	}
 	workers := min(len(base.Segments), runtime.GOMAXPROCS(0))
 	if workers < 2 {
@@ -1692,52 +1475,28 @@ func (db *DB) parallelGroupedCountBatch(ctx context.Context, source v3sql.Plan, 
 	}
 	base.OutputColumns = []string{group.Column}
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	workerStats := make([]storage.ExecStats, workers)
-	errCh := make(chan error, workers)
-	var wg sync.WaitGroup
-
 	if group.Type.Kind == types.KindText {
 		counts := make([]map[string]int64, workers)
-		for worker := 0; worker < workers; worker++ {
-			start := worker * len(base.Segments) / workers
-			end := (worker + 1) * len(base.Segments) / workers
-			if start == end {
-				continue
-			}
-			counts[worker] = make(map[string]int64)
-			sink := &v3exec.GroupStringCountSink{Column: group.Column, Counts: counts[worker]}
-			it := base
-			it.Context = ctx
-			it.Segments = base.Segments[start:end]
-			it.Stats = &workerStats[worker]
+		for w := range counts {
+			counts[w] = make(map[string]int64)
+		}
+		stats, err := base.RunParallel(ctx, workers, func(w int, it storage.SegmentScanIterator) error {
 			if hasPushPred {
 				it.Predicate = storage.NewPredicateEvaluator(pushPred)
 			}
-			wg.Add(1)
-			go func(it storage.SegmentScanIterator, sink v3exec.AggregateSink) {
-				defer wg.Done()
-				if err := consumeAggregateIterator(it, []v3exec.AggregateSink{sink}); err != nil {
-					cancel()
-					errCh <- err
-				}
-			}(it, sink)
-		}
-		wg.Wait()
-		close(errCh)
-		for err := range errCh {
-			if err != nil {
-				return types.Batch{}, true, err
-			}
+			sink := &v3exec.GroupStringCountSink{Column: group.Column, Counts: counts[w]}
+			return consumeAggregateIterator(it, []v3exec.AggregateSink{sink})
+		})
+		if err != nil {
+			return types.Batch{}, true, err
 		}
 		merged := make(map[string]int64)
 		mergedStats := storage.ExecStats{}
-		for worker := range counts {
-			for key, count := range counts[worker] {
+		for w, partial := range counts {
+			for key, count := range partial {
 				merged[key] += count
 			}
-			mergeExecStats(&mergedStats, workerStats[worker])
+			mergeExecStats(&mergedStats, stats[w])
 		}
 		trace.recordScan(scan, mergedStats)
 		batch, err := groupStringCountBatch(group, spec, merged)
@@ -1745,44 +1504,26 @@ func (db *DB) parallelGroupedCountBatch(ctx context.Context, source v3sql.Plan, 
 	}
 
 	counts := make([]map[v3exec.GroupKey]int64, workers)
-	for worker := 0; worker < workers; worker++ {
-		start := worker * len(base.Segments) / workers
-		end := (worker + 1) * len(base.Segments) / workers
-		if start == end {
-			continue
-		}
-		counts[worker] = make(map[v3exec.GroupKey]int64)
-		sink := &v3exec.GroupAnyCountSink{Column: group.Column, Counts: counts[worker]}
-		it := base
-		it.Context = ctx
-		it.Segments = base.Segments[start:end]
-		it.Stats = &workerStats[worker]
+	for w := range counts {
+		counts[w] = make(map[v3exec.GroupKey]int64)
+	}
+	stats, err := base.RunParallel(ctx, workers, func(w int, it storage.SegmentScanIterator) error {
 		if hasPushPred {
 			it.Predicate = storage.NewPredicateEvaluator(pushPred)
 		}
-		wg.Add(1)
-		go func(it storage.SegmentScanIterator, sink v3exec.AggregateSink) {
-			defer wg.Done()
-			if err := consumeAggregateIterator(it, []v3exec.AggregateSink{sink}); err != nil {
-				cancel()
-				errCh <- err
-			}
-		}(it, sink)
-	}
-	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		if err != nil {
-			return types.Batch{}, true, err
-		}
+		sink := &v3exec.GroupAnyCountSink{Column: group.Column, Counts: counts[w]}
+		return consumeAggregateIterator(it, []v3exec.AggregateSink{sink})
+	})
+	if err != nil {
+		return types.Batch{}, true, err
 	}
 	merged := make(map[v3exec.GroupKey]int64)
 	mergedStats := storage.ExecStats{}
-	for worker := range counts {
-		for key, count := range counts[worker] {
+	for w, partial := range counts {
+		for key, count := range partial {
 			merged[key] += count
 		}
-		mergeExecStats(&mergedStats, workerStats[worker])
+		mergeExecStats(&mergedStats, stats[w])
 	}
 	trace.recordScan(scan, mergedStats)
 	col, ok := sourceColumnDef(source, group.Column)
@@ -1894,7 +1635,7 @@ func groupKeyFromColumn(col types.Column, row int) (v3exec.GroupKey, bool, error
 	case types.VecInt64, types.VecDecimal64, types.VecTimestamp, types.VecTime:
 		return v3exec.GroupKey{Kind: col.V.Kind, I64: col.V.I64[row]}, true, nil
 	case types.VecText, types.VecBytes:
-		value, ok := v3exec.TextValueCopy(col.V, row)
+		value, ok := col.V.TextCopy(row)
 		if !ok {
 			return v3exec.GroupKey{}, false, fmt.Errorf("GROUP BY column %q has unsupported text encoding %s", col.Name, col.V.Encoding)
 		}
@@ -2373,7 +2114,7 @@ func (c *rowCollector) Push(batch types.Batch, sel types.SelectionMask) error {
 		}
 		values := make([]any, len(batch.Columns))
 		for i, col := range batch.Columns {
-			value, err := rowValue(col, row)
+			value, err := format.RowValue(col, row)
 			if err != nil {
 				pushErr = err
 				return
@@ -2393,61 +2134,6 @@ func batchColumnNames(batch types.Batch) []string {
 		names[i] = col.Name
 	}
 	return names
-}
-
-func rowValue(col types.Column, row int) (any, error) {
-	if !types.IsValid(col.V.Valid, row) {
-		return nil, nil
-	}
-	switch col.V.Kind {
-	case types.VecBool:
-		return col.V.BoolBits[row>>6]&(uint64(1)<<uint(row&63)) != 0, nil
-	case types.VecInt16:
-		return col.V.I16[row], nil
-	case types.VecInt32:
-		return col.V.I32[row], nil
-	case types.VecDate:
-		return formatDateDays(col.V.I32[row]), nil
-	case types.VecInt64, types.VecDecimal64, types.VecTime:
-		return col.V.I64[row], nil
-	case types.VecTimestamp:
-		return formatTimestampNanos(col.V.I64[row]), nil
-	case types.VecFloat32:
-		return col.V.F32[row], nil
-	case types.VecFloat64:
-		return col.V.F64[row], nil
-	case types.VecText, types.VecBytes, types.VecJSON:
-		value, ok := v3exec.TextValueCopy(col.V, row)
-		if !ok {
-			return nil, fmt.Errorf("column %q has unsupported text encoding %s", col.Name, col.V.Encoding)
-		}
-		return value, nil
-	case types.VecUUID:
-		return types.FormatUUID(col.V.UUID[row]), nil
-	case types.VecEnum32:
-		label, ok := enumLabelForCode(col.V.U32[row], col.EnumLabels)
-		if !ok {
-			return nil, fmt.Errorf("column %q has invalid enum code %d", col.Name, col.V.U32[row])
-		}
-		return label, nil
-	default:
-		return nil, fmt.Errorf("column %q has unsupported vector kind %s", col.Name, col.V.Kind)
-	}
-}
-
-func enumLabelForCode(code uint32, labels []string) (string, bool) {
-	if code == 0 || int(code) > len(labels) {
-		return "", false
-	}
-	return labels[code-1], true
-}
-
-func formatDateDays(days int32) string {
-	return time.Unix(int64(days)*secondsPerDay, 0).UTC().Format("2006-01-02")
-}
-
-func formatTimestampNanos(nanos int64) string {
-	return time.Unix(0, nanos).UTC().Format(timestampLayout)
 }
 
 func planOutputColumns(plan v3sql.Plan) []string {

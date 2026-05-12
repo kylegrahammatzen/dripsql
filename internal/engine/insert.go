@@ -120,6 +120,15 @@ func batchFromInsert(values v3sql.InsertValues) (types.Batch, error) {
 			}
 			cols = append(cols, types.Column{Name: col.Name, Type: col.Type, EnumLabels: col.Labels, V: types.Vec{Kind: types.VecEnum32, Encoding: types.EncodingFlat, Len: len(out), Valid: valid, U32: out}})
 		case types.KindText, types.KindBytes, types.KindJSON:
+			var kind types.VecKind
+			switch col.Type.Kind {
+			case types.KindBytes:
+				kind = types.VecBytes
+			case types.KindJSON:
+				kind = types.VecJSON
+			default:
+				kind = types.VecText
+			}
 			varbytes := types.NewVarBytes(len(col.Values), len(col.Values)*8)
 			for i, value := range col.Values {
 				if value.Kind != v3sql.ValueNull {
@@ -127,12 +136,6 @@ func batchFromInsert(values v3sql.InsertValues) (types.Batch, error) {
 				} else {
 					varbytes.Offsets[i+1] = varbytes.Offsets[i]
 				}
-			}
-			kind := types.VecText
-			if col.Type.Kind == types.KindBytes {
-				kind = types.VecBytes
-			} else if col.Type.Kind == types.KindJSON {
-				kind = types.VecJSON
 			}
 			cols = append(cols, types.Column{Name: col.Name, Type: col.Type, V: types.Vec{Kind: kind, Encoding: types.EncodingFlat, Len: len(col.Values), Valid: valid, Var: varbytes}})
 		default:

@@ -4,15 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 
 	v3sql "github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
-
-type Options struct{}
 
 type Result struct {
 	Statements   int
@@ -22,29 +19,6 @@ type Result struct {
 type Rows struct {
 	Columns []string
 	Values  [][]any
-}
-
-type StorageStats struct {
-	Table              string        `json:"table"`
-	Rows               int64         `json:"rows"`
-	Segments           int           `json:"segments"`
-	TableBytes         int64         `json:"table_bytes"`
-	ColumnPayloadBytes int64         `json:"column_payload_bytes"`
-	StorageOverhead    int64         `json:"storage_overhead_bytes"`
-	PlainEstimate      int64         `json:"plain_estimate_bytes"`
-	ColumnCompression  float64       `json:"column_compression"`
-	TableCompression   float64       `json:"table_compression"`
-	BytesPerRow        float64       `json:"bytes_per_row"`
-	Columns            []ColumnStats `json:"columns,omitempty"`
-}
-
-type ColumnStats struct {
-	Name        string   `json:"name"`
-	TypeName    string   `json:"type"`
-	Encodings   []string `json:"encodings"`
-	PlainBytes  int64    `json:"plain_bytes"`
-	StoredBytes int64    `json:"stored_bytes"`
-	Compression float64  `json:"compression"`
 }
 
 type DB struct {
@@ -67,11 +41,8 @@ type tableEntry struct {
 	spec types.TableSpec
 }
 
-func Open(ctx context.Context, path string, opts Options) (*DB, error) {
-	_ = opts
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func Open(ctx context.Context, path string) (*DB, error) {
+	ctx = readyContext(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -120,43 +91,54 @@ func (db *DB) Exec(ctx context.Context, sqlText string, args ...any) (Result, er
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		switch stmt := stmt.(type) {
-		case *v3sql.CreateTypeStmt:
-			plan, err := v3sql.BindCreateType(stmt)
-			if err != nil {
-				return result, err
-			}
-			if err := db.CreateType(ctx, plan.Spec); err != nil {
-				return result, err
-			}
-		case *v3sql.CreateTableStmt:
-			plan, err := v3sql.BindCreateTable(stmt)
-			if err != nil {
-				return result, err
-			}
-			if err := db.CreateTable(ctx, plan.Spec); err != nil {
-				return result, err
-			}
-		case *v3sql.InsertStmt:
-			bound, err := db.bindInsert(stmt)
-			if err != nil {
-				return result, err
-			}
-			batch, err := batchFromInsert(bound)
-			if err != nil {
-				return result, err
-			}
-			entry, _ := db.table(bound.Table)
-			if err := db.data.AppendBuffered(ctx, entry.spec, batch); err != nil {
-				return result, err
-			}
-			result.RowsAffected += int64(bound.RowCount)
-		default:
-			return result, fmt.Errorf("unsupported statement %T", stmt)
+		affected, err := db.execStmt(ctx, stmt)
+		if err != nil {
+			return result, err
 		}
 		result.Statements++
+		result.RowsAffected += affected
 	}
 	return result, nil
+}
+
+func (db *DB) execStmt(ctx context.Context, stmt v3sql.Stmt) (int64, error) {
+	switch stmt := stmt.(type) {
+	case *v3sql.CreateTypeStmt:
+		plan, err := v3sql.BindCreateType(stmt)
+		if err != nil {
+			return 0, err
+		}
+		return 0, db.CreateType(ctx, plan.Spec)
+	case *v3sql.CreateTableStmt:
+		plan, err := v3sql.BindCreateTable(stmt)
+		if err != nil {
+			return 0, err
+		}
+		return 0, db.CreateTable(ctx, plan.Spec)
+	case *v3sql.InsertStmt:
+		return db.execInsert(ctx, stmt)
+	default:
+		return 0, fmt.Errorf("unsupported statement %T", stmt)
+	}
+}
+
+func (db *DB) execInsert(ctx context.Context, stmt *v3sql.InsertStmt) (int64, error) {
+	bound, err := db.bindInsert(stmt)
+	if err != nil {
+		return 0, err
+	}
+	batch, err := batchFromInsert(bound)
+	if err != nil {
+		return 0, err
+	}
+	entry, err := db.table(bound.Table)
+	if err != nil {
+		return 0, err
+	}
+	if err := db.data.AppendBuffered(ctx, entry.spec, batch); err != nil {
+		return 0, err
+	}
+	return int64(bound.RowCount), nil
 }
 
 func (db *DB) Query(ctx context.Context, sqlText string, args ...any) (*Rows, error) {
@@ -196,25 +178,11 @@ func (db *DB) CreateType(ctx context.Context, spec types.TypeSpec) error {
 	if err := db.checkReady(ctx); err != nil {
 		return err
 	}
+	spec.Name = normalizeName(spec.Name)
 	if err := spec.Validate(); err != nil {
 		return err
 	}
-	name := normalizeName(spec.Name)
-	if _, ok := db.types[name]; ok {
-		if spec.IfNotExists {
-			return nil
-		}
-		return fmt.Errorf("type %q already exists", name)
-	}
-	db.version++
-	spec.Name = name
-	db.types[name] = typeEntry{id: v3sql.TypeID(len(db.types) + 1), spec: spec}
-	if err := db.saveCatalog(); err != nil {
-		delete(db.types, name)
-		db.version--
-		return err
-	}
-	return nil
+	return db.registerType(spec)
 }
 
 func (db *DB) CreateTable(ctx context.Context, spec types.TableSpec) error {
@@ -227,248 +195,145 @@ func (db *DB) CreateTable(ctx context.Context, spec types.TableSpec) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
-	name := normalizeName(spec.Name)
-	if _, ok := db.tables[name]; ok {
+	return db.registerTable(spec)
+}
+
+func (db *DB) registerType(spec types.TypeSpec) error {
+	if _, ok := db.types[spec.Name]; ok {
 		if spec.IfNotExists {
 			return nil
 		}
-		return fmt.Errorf("table %q already exists", name)
+		return fmt.Errorf("type %q already exists", spec.Name)
 	}
+	id := v3sql.TypeID(len(db.types) + 1)
 	db.version++
-	spec.Name = name
-	db.tables[name] = tableEntry{id: v3sql.TableID(len(db.tables) + 1), spec: spec}
+	db.types[spec.Name] = typeEntry{id: id, spec: spec}
 	if err := db.saveCatalog(); err != nil {
-		delete(db.tables, name)
+		delete(db.types, spec.Name)
 		db.version--
 		return err
 	}
 	return nil
 }
 
-// AppendBuffered clones the batch into the table's ingest buffer.
-// Use AppendBufferedOwned for the no-copy fast path when the caller
-// is done with the batch.
-func (db *DB) AppendBuffered(ctx context.Context, tableName string, batch types.Batch) error {
-	if err := db.checkReady(ctx); err != nil {
+func (db *DB) registerTable(spec types.TableSpec) error {
+	if _, ok := db.tables[spec.Name]; ok {
+		if spec.IfNotExists {
+			return nil
+		}
+		return fmt.Errorf("table %q already exists", spec.Name)
+	}
+	id := v3sql.TableID(len(db.tables) + 1)
+	db.version++
+	db.tables[spec.Name] = tableEntry{id: id, spec: spec}
+	if err := db.saveCatalog(); err != nil {
+		delete(db.tables, spec.Name)
+		db.version--
 		return err
 	}
-	entry, ok := db.table(tableName)
-	if !ok {
-		return fmt.Errorf("table %q does not exist", tableName)
+	return nil
+}
+
+// tableForOp resolves a table through checkReady + lookup. Append*/Flush*
+// methods share this entry path.
+func (db *DB) tableForOp(ctx context.Context, name string) (tableEntry, error) {
+	if err := db.checkReady(ctx); err != nil {
+		return tableEntry{}, err
+	}
+	return db.table(name)
+}
+
+// boundTableForName looks up a table and returns its BoundTableDef.
+func (db *DB) boundTableForName(name string) (v3sql.BoundTableDef, error) {
+	entry, err := db.table(name)
+	if err != nil {
+		return v3sql.BoundTableDef{}, err
+	}
+	return db.boundTable(entry), nil
+}
+
+// AppendBuffered clones the batch into the table's ingest buffer. Use
+// AppendBufferedOwned for the no-copy fast path when the caller is done with
+// the batch.
+func (db *DB) AppendBuffered(ctx context.Context, tableName string, batch types.Batch) error {
+	entry, err := db.tableForOp(ctx, tableName)
+	if err != nil {
+		return err
 	}
 	return db.data.AppendBuffered(ctx, entry.spec, batch)
 }
 
-// AppendBufferedOwned takes ownership of batch — the caller MUST NOT
-// mutate or reuse it after this call. Skips the per-Vec slice clone
-// AppendBuffered performs.
+// AppendBufferedOwned takes ownership of batch — the caller MUST NOT mutate
+// or reuse it after this call.
 func (db *DB) AppendBufferedOwned(ctx context.Context, tableName string, batch types.Batch) error {
-	if err := db.checkReady(ctx); err != nil {
+	entry, err := db.tableForOp(ctx, tableName)
+	if err != nil {
 		return err
-	}
-	entry, ok := db.table(tableName)
-	if !ok {
-		return fmt.Errorf("table %q does not exist", tableName)
 	}
 	return db.data.AppendBufferedOwned(ctx, entry.spec, batch)
 }
 
 func (db *DB) FlushBuffered(ctx context.Context, tableName string) error {
-	if err := db.checkReady(ctx); err != nil {
+	entry, err := db.tableForOp(ctx, tableName)
+	if err != nil {
 		return err
 	}
-	entry, ok := db.table(tableName)
-	if !ok {
-		return fmt.Errorf("table %q does not exist", tableName)
-	}
 	return db.data.FlushBuffered(ctx, entry.spec)
-}
-
-func (db *DB) StorageStats(ctx context.Context, tableName string) (StorageStats, error) {
-	if err := db.checkReady(ctx); err != nil {
-		return StorageStats{}, err
-	}
-	entry, ok := db.table(tableName)
-	if !ok {
-		return StorageStats{}, fmt.Errorf("table %q does not exist", tableName)
-	}
-	if err := db.data.FlushBuffered(ctx, entry.spec); err != nil {
-		return StorageStats{}, err
-	}
-	segments, err := db.data.ScanSegments(ctx, entry.spec)
-	if err != nil {
-		return StorageStats{}, err
-	}
-	stats := StorageStats{Table: entry.spec.Name, Segments: len(segments)}
-	type colAgg struct {
-		stored    int64
-		plain     int64
-		encodings map[string]int64
-	}
-	colAggs := make(map[string]*colAgg, len(entry.spec.Columns))
-	for _, col := range entry.spec.Columns {
-		colAggs[col.Name] = &colAgg{encodings: make(map[string]int64)}
-	}
-	for _, segment := range segments {
-		stats.Rows += int64(segment.Meta.Rows)
-		stats.TableBytes += segment.Size
-		for _, col := range segment.Meta.Columns {
-			agg, ok := colAggs[col.Name]
-			if !ok {
-				continue
-			}
-			for _, page := range col.Pages {
-				stats.ColumnPayloadBytes += int64(page.Length)
-				agg.stored += int64(page.Length)
-				agg.encodings[page.Encoding.String()] += int64(page.Length)
-				agg.plain += plainBytesForPage(col.Type, page)
-			}
-		}
-	}
-	stats.StorageOverhead = stats.TableBytes - stats.ColumnPayloadBytes
-	if stats.StorageOverhead < 0 {
-		stats.StorageOverhead = 0
-	}
-	for _, agg := range colAggs {
-		stats.PlainEstimate += agg.plain
-	}
-	if stats.ColumnPayloadBytes > 0 {
-		stats.ColumnCompression = float64(stats.PlainEstimate) / float64(stats.ColumnPayloadBytes)
-	}
-	if stats.TableBytes > 0 {
-		stats.TableCompression = float64(stats.PlainEstimate) / float64(stats.TableBytes)
-	}
-	if stats.Rows > 0 {
-		stats.BytesPerRow = float64(stats.TableBytes) / float64(stats.Rows)
-	}
-	stats.Columns = make([]ColumnStats, 0, len(entry.spec.Columns))
-	for _, col := range entry.spec.Columns {
-		agg := colAggs[col.Name]
-		cs := ColumnStats{Name: col.Name, TypeName: col.Type.String(), PlainBytes: agg.plain, StoredBytes: agg.stored}
-		cs.Encodings = encodingsByDescendingShare(agg.encodings)
-		if cs.StoredBytes > 0 {
-			cs.Compression = float64(cs.PlainBytes) / float64(cs.StoredBytes)
-		}
-		stats.Columns = append(stats.Columns, cs)
-	}
-	return stats, nil
-}
-
-// plainBytesForPage returns the bytes a page would have taken under plain
-// encoding. Varlen pages carry original data-byte stats so compressed and
-// dictionary pages can still report an honest plain baseline.
-func plainBytesForPage(typ types.Type, page storage.PageMeta) int64 {
-	rows := int64(page.Rows)
-	if typ.Kind != types.KindText && typ.Kind != types.KindBytes && typ.Kind != types.KindJSON {
-		return rows * plainColumnBytes(typ)
-	}
-	if page.Text != nil {
-		validityBytes := int64(0)
-		if page.NullCount != 0 {
-			validityBytes = int64(types.ValidityWords(int(page.Rows)) * 8)
-		}
-		return int64(page.Text.DataBytes) + rows*4 + 4 + validityBytes
-	}
-	if page.Encoding == types.EncodingFlat {
-		return int64(page.Length)
-	}
-	return rows * 20
-}
-
-func encodingsByDescendingShare(byBytes map[string]int64) []string {
-	if len(byBytes) == 0 {
-		return nil
-	}
-	type pair struct {
-		name  string
-		bytes int64
-	}
-	pairs := make([]pair, 0, len(byBytes))
-	for name, bytes := range byBytes {
-		pairs = append(pairs, pair{name, bytes})
-	}
-	sort.Slice(pairs, func(i, j int) bool { return pairs[i].bytes > pairs[j].bytes })
-	out := make([]string, len(pairs))
-	for i, p := range pairs {
-		out[i] = p.name
-	}
-	return out
-}
-
-func plainEstimate(table types.TableSpec, rows int64) int64 {
-	var perRow int64
-	for _, col := range table.Columns {
-		perRow += plainColumnBytes(col.Type)
-	}
-	return rows * perRow
-}
-
-func plainColumnBytes(typ types.Type) int64 {
-	switch typ.Kind {
-	case types.KindBool:
-		return 1
-	case types.KindInt16:
-		return 2
-	case types.KindInt32, types.KindDate, types.KindFloat32, types.KindNamed:
-		return 4
-	case types.KindInt64, types.KindDecimal, types.KindTimestamp, types.KindTime, types.KindFloat64:
-		return 8
-	case types.KindUUID:
-		return 16
-	case types.KindText, types.KindBytes, types.KindJSON:
-		return 20
-	default:
-		return 0
-	}
 }
 
 func (db *DB) bindQuery(stmt v3sql.Stmt) (v3sql.Plan, error) {
 	switch stmt := stmt.(type) {
 	case *v3sql.SelectStmt:
-		entry, ok := db.table(stmt.Table)
-		if !ok {
-			return nil, fmt.Errorf("table %q does not exist", stmt.Table)
+		table, err := db.boundTableForName(stmt.Table)
+		if err != nil {
+			return nil, err
 		}
-		return v3sql.BindSelect(stmt, db.boundTable(entry))
+		return v3sql.BindSelect(stmt, table)
 	case *v3sql.ExplainStmt:
 		selectStmt, ok := stmt.Inner.(*v3sql.SelectStmt)
 		if !ok {
 			return nil, fmt.Errorf("EXPLAIN supports SELECT only")
 		}
-		entry, ok := db.table(selectStmt.Table)
-		if !ok {
-			return nil, fmt.Errorf("table %q does not exist", selectStmt.Table)
+		table, err := db.boundTableForName(selectStmt.Table)
+		if err != nil {
+			return nil, err
 		}
-		return v3sql.BindExplain(stmt, db.boundTable(entry))
+		return v3sql.BindExplain(stmt, table)
 	default:
 		return nil, fmt.Errorf("Query only supports SELECT and EXPLAIN statements")
 	}
 }
 
 func (db *DB) bindInsert(stmt *v3sql.InsertStmt) (v3sql.InsertValues, error) {
-	entry, ok := db.table(stmt.Table)
-	if !ok {
-		return v3sql.InsertValues{}, fmt.Errorf("table %q does not exist", stmt.Table)
+	table, err := db.boundTableForName(stmt.Table)
+	if err != nil {
+		return v3sql.InsertValues{}, err
 	}
-	return v3sql.BindInsertValues(stmt, db.boundTable(entry))
+	return v3sql.BindInsertValues(stmt, table)
 }
 
 func (db *DB) boundTable(entry tableEntry) v3sql.BoundTableDef {
 	cols := make([]v3sql.BoundColumnDef, len(entry.spec.Columns))
 	for i, col := range entry.spec.Columns {
-		cols[i] = v3sql.BoundColumnDef{ID: v3sql.ColumnID(i + 1), Name: col.Name, Type: col.Type, Nullable: col.Nullable}
+		var labels []string
 		if col.Type.Kind == types.KindNamed {
 			if typ, ok := db.types[normalizeName(col.Type.Name)]; ok {
-				cols[i].Labels = append([]string(nil), typ.spec.EnumLabels...)
+				labels = append([]string(nil), typ.spec.EnumLabels...)
 			}
 		}
+		cols[i] = v3sql.BoundColumnDef{ID: v3sql.ColumnID(i + 1), Name: col.Name, Type: col.Type, Nullable: col.Nullable, Labels: labels}
 	}
 	return v3sql.BoundTableDef{ID: entry.id, Name: entry.spec.Name, Columns: cols, Options: entry.spec.Options, Version: db.version}
 }
 
-func (db *DB) table(name string) (tableEntry, bool) {
+// table looks up a table by name and returns a "does not exist" error when
+// missing. This is the only table-lookup entry point in engine.
+func (db *DB) table(name string) (tableEntry, error) {
 	entry, ok := db.tables[normalizeName(name)]
-	return entry, ok
+	if !ok {
+		return tableEntry{}, fmt.Errorf("table %q does not exist", name)
+	}
+	return entry, nil
 }
 
 func (db *DB) resolveTableTypes(spec *types.TableSpec) error {
@@ -487,20 +352,21 @@ func (db *DB) resolveTableTypes(spec *types.TableSpec) error {
 	return nil
 }
 
-func (db *DB) checkReady(ctx context.Context) error {
+func readyContext(ctx context.Context) context.Context {
 	if ctx == nil {
-		ctx = context.Background()
+		return context.Background()
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+	return ctx
+}
+
+func (db *DB) checkReady(ctx context.Context) error {
 	if db == nil || db.data == nil {
 		return fmt.Errorf("database is nil")
 	}
 	if db.closed {
 		return fmt.Errorf("database is closed")
 	}
-	return nil
+	return readyContext(ctx).Err()
 }
 
 func normalizeName(name string) string {

@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/explain"
+	v3exec "github.com/kylegrahammatzen/dripsql/internal/exec"
 	v3sql "github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
@@ -131,7 +131,7 @@ func TestEngineSplitsPushableAndComputedWhere(t *testing.T) {
 
 func TestEngineParallelScalarAggregateAcrossSegments(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(ctx, t.TempDir(), Options{})
+	db, err := Open(ctx, t.TempDir())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestEngineCountStarUsesMetadataWhenEligible(t *testing.T) {
 
 func TestEngineCountStarUsesIntValuePagePruning(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(ctx, t.TempDir(), Options{})
+	db, err := Open(ctx, t.TempDir())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestEngineScalarMultiAggregateUsesMetadata(t *testing.T) {
 
 func TestEngineScalarMetadataAggregatesInt32AndNullable(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(ctx, t.TempDir(), Options{})
+	db, err := Open(ctx, t.TempDir())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -383,7 +383,7 @@ func TestEngineParallelGroupedCountWithPredicateAcrossSegments(t *testing.T) {
 	oldProcs := runtime.GOMAXPROCS(2)
 	t.Cleanup(func() { runtime.GOMAXPROCS(oldProcs) })
 
-	db, err := Open(ctx, t.TempDir(), Options{})
+	db, err := Open(ctx, t.TempDir())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -413,6 +413,181 @@ func TestEngineParallelGroupedCountWithPredicateAcrossSegments(t *testing.T) {
 		[]string{"country", "count"},
 		[][]any{{"CA", int64(8)}, {"US", int64(16)}},
 	)
+}
+
+func TestEngineParallelGroupedTextCountSumAcrossSegments(t *testing.T) {
+	ctx := context.Background()
+	oldProcs := runtime.GOMAXPROCS(4)
+	t.Cleanup(func() { runtime.GOMAXPROCS(oldProcs) })
+
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+	if _, err := db.Exec(ctx, `CREATE TABLE events (country TEXT NOT NULL, amount INT64 NOT NULL)`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	for segment := 0; segment < 8; segment++ {
+		if _, err := db.Exec(ctx, `INSERT INTO events VALUES
+			('US', 10),
+			('CA', 20),
+			('US', 30),
+			('GB', 40),
+			('CA', 50),
+			('US', 60)`); err != nil {
+			t.Fatalf("INSERT segment %d: %v", segment, err)
+		}
+		if err := db.FlushBuffered(ctx, "events"); err != nil {
+			t.Fatalf("Flush segment %d: %v", segment, err)
+		}
+	}
+
+	assertQueryRows(t, ctx, db,
+		"SELECT country, count(*) AS events, sum(amount) AS amount FROM events GROUP BY country",
+		[]string{"country", "events", "amount"},
+		[][]any{
+			{"CA", int64(16), int64(560)},
+			{"GB", int64(8), int64(320)},
+			{"US", int64(24), int64(800)},
+		},
+	)
+}
+
+func TestEngineGroupedTextCountSumUsesMetadataFastPath(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(ctx, `CREATE TABLE events (country TEXT NOT NULL, amount INT64 NOT NULL)`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO events VALUES
+		('US', 10), ('CA', 20), ('US', 30), ('GB', 40), ('CA', 50), ('US', 60)`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	if err := db.FlushBuffered(ctx, "events"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	result, report, err := db.ExplainAnalyze(ctx,
+		"SELECT country, count(*) AS events, sum(amount) AS amount FROM events GROUP BY country")
+	if err != nil {
+		t.Fatalf("ExplainAnalyze: %v", err)
+	}
+	if got, want := report.Read.PayloadBytes, int64(0); got != want {
+		t.Fatalf("expected metadata-only path (payload = 0), got %d bytes", got)
+	}
+	expectRows := [][]any{
+		{"CA", int64(2), int64(70)},
+		{"GB", int64(1), int64(40)},
+		{"US", int64(3), int64(100)},
+	}
+	if !reflect.DeepEqual(result.Values, expectRows) {
+		t.Fatalf("rows = %#v, want %#v", result.Values, expectRows)
+	}
+}
+
+func TestEngineGroupedTextCountSumFallsBackWithWhere(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(ctx, `CREATE TABLE events (country TEXT NOT NULL, tenant_id INT64 NOT NULL, amount INT64 NOT NULL)`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO events VALUES
+		('US', 1, 10), ('CA', 2, 20), ('US', 1, 30), ('GB', 2, 40)`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	if err := db.FlushBuffered(ctx, "events"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	result, report, err := db.ExplainAnalyze(ctx,
+		"SELECT country, count(*) AS events, sum(amount) AS amount FROM events WHERE tenant_id = 1 GROUP BY country")
+	if err != nil {
+		t.Fatalf("ExplainAnalyze: %v", err)
+	}
+	if report.Read.PayloadBytes == 0 {
+		t.Fatalf("expected scan-based path with WHERE (payload > 0), got 0")
+	}
+	expectRows := [][]any{{"US", int64(2), int64(40)}}
+	if !reflect.DeepEqual(result.Values, expectRows) {
+		t.Fatalf("rows = %#v, want %#v", result.Values, expectRows)
+	}
+}
+
+func TestEngineGroupedTextCountFilteredUsesMetadataFastPath(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(ctx, `CREATE TABLE events (country TEXT NOT NULL, event_type TEXT NOT NULL)`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO events VALUES
+		('US', 'checkout'), ('CA', 'login'), ('US', 'checkout'),
+		('GB', 'checkout'), ('CA', 'login'), ('US', 'login'),
+		('GB', 'checkout'), ('US', 'checkout')`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	if err := db.FlushBuffered(ctx, "events"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	result, report, err := db.ExplainAnalyze(ctx,
+		"SELECT country, count(*) FROM events WHERE event_type = 'checkout' GROUP BY country")
+	if err != nil {
+		t.Fatalf("ExplainAnalyze: %v", err)
+	}
+	if got, want := report.Read.PayloadBytes, int64(0); got != want {
+		t.Fatalf("expected metadata-only path (payload = 0), got %d bytes", got)
+	}
+	expectRows := [][]any{
+		{"GB", int64(2)},
+		{"US", int64(3)},
+	}
+	if !reflect.DeepEqual(result.Values, expectRows) {
+		t.Fatalf("rows = %#v, want %#v", result.Values, expectRows)
+	}
+}
+
+func TestEngineGroupedTextCountFilteredAbsentValueReturnsEmpty(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(ctx, `CREATE TABLE events (country TEXT NOT NULL, event_type TEXT NOT NULL)`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO events VALUES ('US', 'login'), ('CA', 'login')`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	if err := db.FlushBuffered(ctx, "events"); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	result, _, err := db.ExplainAnalyze(ctx,
+		"SELECT country, count(*) FROM events WHERE event_type = 'never_present' GROUP BY country")
+	if err != nil {
+		t.Fatalf("ExplainAnalyze: %v", err)
+	}
+	if len(result.Values) != 0 {
+		t.Fatalf("rows = %#v, want empty", result.Values)
+	}
 }
 
 func TestEngineSumUsesMetadataWhenEligible(t *testing.T) {
@@ -526,7 +701,7 @@ func TestEngineGroupedAggregateQueries(t *testing.T) {
 
 func TestEngineGroupedTextCountSumNullableQuery(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(ctx, t.TempDir(), Options{})
+	db, err := Open(ctx, t.TempDir())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -567,17 +742,17 @@ func TestTextGroupCountSumCollectorDictionaryNullableInt64(t *testing.T) {
 	}
 	sel := types.NewSelectionMask(batch.Len)
 	sel.FillAll()
-	collector := &textGroupCountSumCollector{group: "country", sumCol: "amount", groups: make(map[string]textGroupCountSumState)}
+	collector := &v3exec.TextGroupCountSumSink{Group: "country", SumCol: "amount", Groups: make(map[string]v3exec.TextGroupCountSumState)}
 	if err := collector.Push(batch, sel); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
-	want := map[string]textGroupCountSumState{
-		"CA": {count: 2, sum: 7},
-		"GB": {count: 1, sum: 0},
-		"US": {count: 3, sum: 17},
+	want := map[string]v3exec.TextGroupCountSumState{
+		"CA": {Count: 2, Sum: 7},
+		"GB": {Count: 1, Sum: 0},
+		"US": {Count: 3, Sum: 17},
 	}
-	if !reflect.DeepEqual(collector.groups, want) {
-		t.Fatalf("groups = %#v, want %#v", collector.groups, want)
+	if !reflect.DeepEqual(collector.Groups, want) {
+		t.Fatalf("groups = %#v, want %#v", collector.Groups, want)
 	}
 }
 
@@ -597,22 +772,22 @@ func TestTextGroupCountSumCollectorFlatSelectionAndInt32(t *testing.T) {
 	sel.Set(2)
 	sel.Set(3)
 	sel.Set(4)
-	collector := &textGroupCountSumCollector{group: "country", sumCol: "amount32", groups: make(map[string]textGroupCountSumState)}
+	collector := &v3exec.TextGroupCountSumSink{Group: "country", SumCol: "amount32", Groups: make(map[string]v3exec.TextGroupCountSumState)}
 	if err := collector.Push(batch, sel); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
-	want := map[string]textGroupCountSumState{
-		"CA": {count: 1, sum: 5},
-		"US": {count: 2, sum: 1},
+	want := map[string]v3exec.TextGroupCountSumState{
+		"CA": {Count: 1, Sum: 5},
+		"US": {Count: 2, Sum: 1},
 	}
-	if !reflect.DeepEqual(collector.groups, want) {
-		t.Fatalf("groups = %#v, want %#v", collector.groups, want)
+	if !reflect.DeepEqual(collector.Groups, want) {
+		t.Fatalf("groups = %#v, want %#v", collector.Groups, want)
 	}
 }
 
 func TestEngineGroupedEnumCountQuery(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(ctx, t.TempDir(), Options{})
+	db, err := Open(ctx, t.TempDir())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -701,7 +876,7 @@ func TestEngineExplainReportsUUIDSummaryPrune(t *testing.T) {
 func TestEngineReopensCatalogAndSegments(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := Open(ctx, dir, Options{})
+	db, err := Open(ctx, dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -718,7 +893,7 @@ func TestEngineReopensCatalogAndSegments(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	reopened, err := Open(ctx, dir, Options{})
+	reopened, err := Open(ctx, dir)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -736,7 +911,7 @@ func TestEngineReopensCatalogAndSegments(t *testing.T) {
 
 func openEventsDB(t *testing.T, ctx context.Context) *DB {
 	t.Helper()
-	db, err := Open(ctx, t.TempDir(), Options{})
+	db, err := Open(ctx, t.TempDir())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -782,7 +957,7 @@ func assertQueryRows(t *testing.T, ctx context.Context, db *DB, query string, co
 }
 
 func testDictionaryTextColumn(name string, values []string, ids []uint8, valid types.Validity) types.Column {
-	return types.Column{Name: name, Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: len(ids), Valid: valid, DictIDs: ids, DictValues: testVarBytes(values)}}
+	return types.Column{Name: name, Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: len(ids), Valid: valid, Encoded: &types.EncodedState{DictIDs: ids, DictValues: testVarBytes(values)}}}
 }
 
 func testFlatTextColumn(name string, values []string, valid types.Validity) types.Column {
@@ -813,7 +988,7 @@ func hasExplainSection(rows *Rows, section string) bool {
 	return false
 }
 
-func hasAccess(access []explain.Access, name, strategy, effect string) bool {
+func hasAccess(access []Access, name, strategy, effect string) bool {
 	for _, entry := range access {
 		if entry.Name == name && entry.Strategy == strategy && entry.Effect == effect {
 			return true

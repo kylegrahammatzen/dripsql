@@ -1,4 +1,4 @@
-package explain
+package engine
 
 import (
 	"fmt"
@@ -74,15 +74,11 @@ type Read struct {
 }
 
 type Timing struct {
-	FirstMs float64 `json:"first_ms"`
-	BestMs  float64 `json:"best_ms"`
-	AvgMs   float64 `json:"avg_ms"`
-	P95Ms   float64 `json:"p95_ms,omitempty"`
-	FirstNs int64   `json:"first_ns,omitempty"`
-	BestNs  int64   `json:"best_ns,omitempty"`
-	AvgNs   int64   `json:"avg_ns,omitempty"`
-	P95Ns   int64   `json:"p95_ns,omitempty"`
-	Samples int     `json:"samples"`
+	FirstNs int64 `json:"first_ns"`
+	BestNs  int64 `json:"best_ns"`
+	AvgNs   int64 `json:"avg_ns"`
+	P95Ns   int64 `json:"p95_ns,omitempty"`
+	Samples int   `json:"samples"`
 }
 
 func ReductionFromStats(stats storage.ExecStats) Reduction {
@@ -135,13 +131,13 @@ func (r Report) Table() ([]string, [][]any) {
 		rows = append(rows, []any{"Selectivity", "rows", "-"})
 	}
 	if r.BytesPerMatch.Valid {
-		rows = append(rows, []any{"Bytes / match", "payload", fmt.Sprintf("%s (%s read, %d rows kept)", formatBytesFloat(r.BytesPerMatch.Value), formatBytes(r.BytesPerMatch.Bytes), r.BytesPerMatch.Rows)})
+		rows = append(rows, []any{"Bytes / match", "payload", fmt.Sprintf("%s (%s read, %d rows kept)", humanfmt.Bytes(r.BytesPerMatch.Value), humanfmt.Bytes(float64(r.BytesPerMatch.Bytes)), r.BytesPerMatch.Rows)})
 	} else {
 		rows = append(rows, []any{"Bytes / match", "payload", "-"})
 	}
 	rows = append(rows,
-		[]any{"Reduction", "segments", counterString(r.Reduction.Segments)},
-		[]any{"Reduction", "pages", counterString(r.Reduction.Pages)},
+		[]any{"Reduction", "segments", fmt.Sprintf("%d scanned -> %d candidate (%.1f%% pruned)", r.Reduction.Segments.Scanned, r.Reduction.Segments.Candidate, r.Reduction.Segments.PrunedPct)},
+		[]any{"Reduction", "pages", fmt.Sprintf("%d scanned -> %d candidate (%.1f%% pruned)", r.Reduction.Pages.Scanned, r.Reduction.Pages.Candidate, r.Reduction.Pages.PrunedPct)},
 		[]any{"Reduction", "rows", fmt.Sprintf("%d scanned -> %d candidate -> %d matched", r.Reduction.Rows.Scanned, r.Reduction.Rows.Candidate, r.Reduction.Rows.Matched)},
 	)
 	for _, access := range r.Access {
@@ -151,21 +147,21 @@ func (r Report) Table() ([]string, [][]any) {
 		}
 		rows = append(rows, []any{"Access", access.Name, value})
 	}
-	rows = append(rows, []any{"Read", "payload", formatBytes(r.Read.PayloadBytes)})
+	rows = append(rows, []any{"Read", "payload", humanfmt.Bytes(float64(r.Read.PayloadBytes))})
 	if r.Read.PredicatePayloadBytes > 0 {
-		rows = append(rows, []any{"Read", "predicate payload", formatBytes(r.Read.PredicatePayloadBytes)})
+		rows = append(rows, []any{"Read", "predicate payload", humanfmt.Bytes(float64(r.Read.PredicatePayloadBytes))})
 	}
 	if r.Read.AggregatePayloadBytes > 0 {
-		rows = append(rows, []any{"Read", "aggregate payload", formatBytes(r.Read.AggregatePayloadBytes)})
+		rows = append(rows, []any{"Read", "aggregate payload", humanfmt.Bytes(float64(r.Read.AggregatePayloadBytes))})
 	}
 	if r.Timing.Samples > 0 {
 		rows = append(rows,
-			[]any{"Timing", "first", r.Timing.FormatFirst()},
-			[]any{"Timing", "best", r.Timing.FormatBest()},
-			[]any{"Timing", "avg", r.Timing.FormatAvg()},
+			[]any{"Timing", "first", humanfmt.Duration(time.Duration(r.Timing.FirstNs))},
+			[]any{"Timing", "best", humanfmt.Duration(time.Duration(r.Timing.BestNs))},
+			[]any{"Timing", "avg", humanfmt.Duration(time.Duration(r.Timing.AvgNs))},
 		)
-		if r.Timing.HasP95() {
-			rows = append(rows, []any{"Timing", "p95", r.Timing.FormatP95()})
+		if r.Timing.P95Ns != 0 {
+			rows = append(rows, []any{"Timing", "p95", humanfmt.Duration(time.Duration(r.Timing.P95Ns))})
 		}
 		rows = append(rows, []any{"Timing", "samples", r.Timing.Samples})
 	}
@@ -185,7 +181,7 @@ func RenderText(w io.Writer, r Report, indent string) {
 		fprintf(w, "%sSelectivity:    -\n", indent)
 	}
 	if r.BytesPerMatch.Valid {
-		fprintf(w, "%sBytes / match:  %s per matched row (%s read for %s rows)\n", indent, formatBytesFloat(r.BytesPerMatch.Value), formatBytes(r.BytesPerMatch.Bytes), formatCount(r.BytesPerMatch.Rows))
+		fprintf(w, "%sBytes / match:  %s per matched row (%s read for %s rows)\n", indent, humanfmt.Bytes(r.BytesPerMatch.Value), humanfmt.Bytes(float64(r.BytesPerMatch.Bytes)), formatCount(r.BytesPerMatch.Rows))
 	} else {
 		fprintf(w, "%sBytes / match:  -\n", indent)
 	}
@@ -209,16 +205,24 @@ func RenderText(w io.Writer, r Report, indent string) {
 	}
 
 	fprintf(w, "%sRead:\n", indent)
-	fprintf(w, "%s  payload:            %s\n", indent, formatBytes(r.Read.PayloadBytes))
-	fprintf(w, "%s  predicate payload:  %s\n", indent, formatOptionalBytes(r.Read.PredicatePayloadBytes))
-	fprintf(w, "%s  aggregate payload:  %s\n", indent, formatOptionalBytes(r.Read.AggregatePayloadBytes))
+	fprintf(w, "%s  payload:            %s\n", indent, humanfmt.Bytes(float64(r.Read.PayloadBytes)))
+	predicatePayload := "-"
+	if r.Read.PredicatePayloadBytes > 0 {
+		predicatePayload = humanfmt.Bytes(float64(r.Read.PredicatePayloadBytes))
+	}
+	aggregatePayload := "-"
+	if r.Read.AggregatePayloadBytes > 0 {
+		aggregatePayload = humanfmt.Bytes(float64(r.Read.AggregatePayloadBytes))
+	}
+	fprintf(w, "%s  predicate payload:  %s\n", indent, predicatePayload)
+	fprintf(w, "%s  aggregate payload:  %s\n", indent, aggregatePayload)
 	if r.Timing.Samples > 0 {
 		fprintf(w, "%sTiming:\n", indent)
-		fprintf(w, "%s  first:    %s\n", indent, r.Timing.FormatFirst())
-		fprintf(w, "%s  best:     %s\n", indent, r.Timing.FormatBest())
-		fprintf(w, "%s  avg:      %s\n", indent, r.Timing.FormatAvg())
-		if r.Timing.HasP95() {
-			fprintf(w, "%s  p95:      %s\n", indent, r.Timing.FormatP95())
+		fprintf(w, "%s  first:    %s\n", indent, humanfmt.Duration(time.Duration(r.Timing.FirstNs)))
+		fprintf(w, "%s  best:     %s\n", indent, humanfmt.Duration(time.Duration(r.Timing.BestNs)))
+		fprintf(w, "%s  avg:      %s\n", indent, humanfmt.Duration(time.Duration(r.Timing.AvgNs)))
+		if r.Timing.P95Ns != 0 {
+			fprintf(w, "%s  p95:      %s\n", indent, humanfmt.Duration(time.Duration(r.Timing.P95Ns)))
 		}
 		fprintf(w, "%s  samples:  %d\n", indent, r.Timing.Samples)
 	}
@@ -251,7 +255,6 @@ func formatPlanNode(node string) string {
 	return name + "  " + args
 }
 
-// readLine renders a Counter as "X/Y read, Z pruned" — tight and readable.
 func readLine(c Counter) string {
 	pruned := c.Pruned
 	if pruned <= 0 {
@@ -260,8 +263,6 @@ func readLine(c Counter) string {
 	return fmt.Sprintf("%s/%s read, %s pruned (%.1f%%)", formatCount(c.Candidate), formatCount(c.Scanned), formatCount(pruned), c.PrunedPct)
 }
 
-// formatCount adds thousands separators to make 6-digit row counts readable
-// at a glance.
 func formatCount(n int64) string {
 	negative := n < 0
 	if negative {
@@ -296,81 +297,3 @@ func fprintf(w io.Writer, format string, args ...any) {
 	_, _ = fmt.Fprintf(w, format, args...)
 }
 
-func counterString(counter Counter) string {
-	return fmt.Sprintf("%d scanned -> %d candidate (%.1f%% pruned)", counter.Scanned, counter.Candidate, counter.PrunedPct)
-}
-
-func formatOptionalBytes(n int64) string {
-	if n <= 0 {
-		return "-"
-	}
-	return formatBytes(n)
-}
-
-func formatBytes(n int64) string {
-	if n < 0 {
-		return "-" + formatBytes(-n)
-	}
-	const unit = 1024
-	if n < unit {
-		return strconv.FormatInt(n, 10) + " B"
-	}
-	value := float64(n)
-	units := []string{"KiB", "MiB", "GiB", "TiB"}
-	for i, suffix := range units {
-		value /= unit
-		if value < unit || i == len(units)-1 {
-			return strconv.FormatFloat(value, 'f', 2, 64) + " " + suffix
-		}
-	}
-	return strconv.FormatInt(n, 10) + " B"
-}
-
-func formatBytesFloat(n float64) string {
-	if n < 0 {
-		return "-" + formatBytesFloat(-n)
-	}
-	const unit = 1024
-	if n < unit {
-		if n == float64(int64(n)) {
-			return strconv.FormatInt(int64(n), 10) + " B"
-		}
-		return strconv.FormatFloat(n, 'f', 2, 64) + " B"
-	}
-	value := n
-	units := []string{"KiB", "MiB", "GiB", "TiB"}
-	for i, suffix := range units {
-		value /= unit
-		if value < unit || i == len(units)-1 {
-			return strconv.FormatFloat(value, 'f', 2, 64) + " " + suffix
-		}
-	}
-	return strconv.FormatFloat(n, 'f', 2, 64) + " B"
-}
-
-func (t Timing) FormatFirst() string {
-	return formatTiming(t.FirstNs, t.FirstMs)
-}
-
-func (t Timing) FormatBest() string {
-	return formatTiming(t.BestNs, t.BestMs)
-}
-
-func (t Timing) FormatAvg() string {
-	return formatTiming(t.AvgNs, t.AvgMs)
-}
-
-func (t Timing) FormatP95() string {
-	return formatTiming(t.P95Ns, t.P95Ms)
-}
-
-func (t Timing) HasP95() bool {
-	return t.P95Ns != 0 || t.P95Ms != 0
-}
-
-func formatTiming(ns int64, ms float64) string {
-	if ns != 0 {
-		return humanfmt.Duration(time.Duration(ns))
-	}
-	return humanfmt.Milliseconds(ms)
-}

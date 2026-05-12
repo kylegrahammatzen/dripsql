@@ -8,7 +8,6 @@ import (
 	"time"
 
 	v3exec "github.com/kylegrahammatzen/dripsql/internal/exec"
-	"github.com/kylegrahammatzen/dripsql/internal/explain"
 	v3sql "github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
@@ -44,16 +43,16 @@ func (t *executionTrace) addScan(plan *v3sql.ScanPlan, stats storage.ExecStats) 
 	})
 }
 
-func (db *DB) ExplainAnalyze(ctx context.Context, sqlText string, args ...any) (*Rows, explain.Report, error) {
+func (db *DB) ExplainAnalyze(ctx context.Context, sqlText string, args ...any) (*Rows, Report, error) {
 	if err := db.checkReady(ctx); err != nil {
-		return nil, explain.Report{}, err
+		return nil, Report{}, err
 	}
 	if len(args) != 0 {
-		return nil, explain.Report{}, fmt.Errorf("ExplainAnalyze arguments are not supported yet")
+		return nil, Report{}, fmt.Errorf("ExplainAnalyze arguments are not supported yet")
 	}
 	plan, err := db.planForQuery(sqlText)
 	if err != nil {
-		return nil, explain.Report{}, err
+		return nil, Report{}, err
 	}
 	if explainPlan, ok := plan.(*v3sql.ExplainPlan); ok {
 		plan = explainPlan.Inner
@@ -73,7 +72,7 @@ func (db *DB) executeExplain(ctx context.Context, plan *v3sql.ExplainPlan) (*Row
 	return &Rows{Columns: []string{"plan"}, Values: explainPlanRows(plan.Inner, 0)}, nil
 }
 
-func (db *DB) executeAnalyzed(ctx context.Context, plan v3sql.Plan) (*Rows, explain.Report, error) {
+func (db *DB) executeAnalyzed(ctx context.Context, plan v3sql.Plan) (*Rows, Report, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -82,7 +81,7 @@ func (db *DB) executeAnalyzed(ctx context.Context, plan v3sql.Plan) (*Rows, expl
 	counter := &v3exec.Explain{Downstream: collector}
 	start := time.Now()
 	if err := db.runSource(ctx, plan, counter, trace); err != nil {
-		return nil, explain.Report{}, err
+		return nil, Report{}, err
 	}
 	report := explainReport(plan, trace, counter, time.Since(start))
 	return collector.rows, report, nil
@@ -124,17 +123,16 @@ func planNodeLabel(plan v3sql.Plan) string {
 	}
 }
 
-func explainReport(plan v3sql.Plan, trace *executionTrace, counter *v3exec.Explain, elapsed time.Duration) explain.Report {
+func explainReport(plan v3sql.Plan, trace *executionTrace, counter *v3exec.Explain, elapsed time.Duration) Report {
 	stats := combinedScanStats(trace)
 	ns := elapsed.Nanoseconds()
-	ms := float64(ns) / 1_000_000.0
-	report := explain.Report{
+	report := Report{
 		Plan:      planLine(plan),
-		Output:    explain.Output{Batches: counter.Batches, Rows: counter.Rows, Kept: counter.Selected},
-		Reduction: explain.ReductionFromStats(stats),
+		Output:    Output{Batches: counter.Batches, Rows: counter.Rows, Kept: counter.Selected},
+		Reduction: ReductionFromStats(stats),
 		Access:    explainAccess(plan, trace),
 		Read:      explainRead(plan, trace, stats),
-		Timing:    explain.Timing{FirstMs: ms, BestMs: ms, AvgMs: ms, FirstNs: ns, BestNs: ns, AvgNs: ns, Samples: 1},
+		Timing:    Timing{FirstNs: ns, BestNs: ns, AvgNs: ns, Samples: 1},
 	}
 	report.Finalize()
 	return report
@@ -322,8 +320,8 @@ func literalString(value any) string {
 	}
 }
 
-func explainAccess(plan v3sql.Plan, trace *executionTrace) []explain.Access {
-	var entries []explain.Access
+func explainAccess(plan v3sql.Plan, trace *executionTrace) []Access {
+	var entries []Access
 	seen := make(map[string]struct{})
 	if trace != nil {
 		for _, scan := range trace.scans {
@@ -341,15 +339,15 @@ func explainAccess(plan v3sql.Plan, trace *executionTrace) []explain.Access {
 	return entries
 }
 
-func scanAccess(scan scanTrace) []explain.Access {
+func scanAccess(scan scanTrace) []Access {
 	if scan.where == nil {
 		if scan.stats.PayloadBytesRead == 0 {
-			return []explain.Access{{Name: scan.table.Name, Strategy: "metadata scan", Effect: "no payload"}}
+			return []Access{{Name: scan.table.Name, Strategy: "metadata scan", Effect: "no payload"}}
 		}
-		return []explain.Access{{Name: scan.table.Name, Strategy: "full scan", Effect: "all pages"}}
+		return []Access{{Name: scan.table.Name, Strategy: "full scan", Effect: "all pages"}}
 	}
 	leaves := predicateLeaves(*scan.where)
-	entries := make([]explain.Access, 0, len(leaves))
+	entries := make([]Access, 0, len(leaves))
 	for _, leaf := range leaves {
 		column := predicateLeafColumn(leaf)
 		if column == "" {
@@ -361,10 +359,10 @@ func scanAccess(scan scanTrace) []explain.Access {
 			strategy = "metadata prune"
 			eligible = false
 		}
-		entries = append(entries, explain.Access{Name: column, Strategy: strategy, Effect: pruneEffect(scan.stats, eligible)})
+		entries = append(entries, Access{Name: column, Strategy: strategy, Effect: pruneEffect(scan.stats, eligible)})
 	}
 	if len(entries) == 0 {
-		return []explain.Access{{Name: "predicate", Strategy: "metadata prune", Effect: "not eligible"}}
+		return []Access{{Name: "predicate", Strategy: "metadata prune", Effect: "not eligible"}}
 	}
 	return entries
 }
@@ -481,7 +479,7 @@ func boundColumn(table v3sql.BoundTableDef, name string) (v3sql.BoundColumnDef, 
 	return v3sql.BoundColumnDef{}, false
 }
 
-func aggregateAccess(plan v3sql.Plan, trace *executionTrace) []explain.Access {
+func aggregateAccess(plan v3sql.Plan, trace *executionTrace) []Access {
 	switch plan := plan.(type) {
 	case *v3sql.LimitPlan:
 		return aggregateAccess(plan.Source, trace)
@@ -490,17 +488,17 @@ func aggregateAccess(plan v3sql.Plan, trace *executionTrace) []explain.Access {
 	case *v3sql.ProjectPlan:
 		return aggregateAccess(plan.Source, trace)
 	case *v3sql.AggregatePlan:
-		entries := make([]explain.Access, 0, len(plan.GroupBy)+len(plan.Aggregates)+len(plan.Hidden))
+		entries := make([]Access, 0, len(plan.GroupBy)+len(plan.Aggregates)+len(plan.Hidden))
 		metadataOnly := aggregateTraceMetadataOnly(trace)
 		for _, group := range plan.GroupBy {
 			if metadataOnly {
-				entries = append(entries, explain.Access{Name: "group by " + group.Column, Strategy: "metadata group", Effect: "exact counts"})
+				entries = append(entries, Access{Name: "group by " + group.Column, Strategy: "metadata group", Effect: "exact counts"})
 				continue
 			}
-			entries = append(entries, explain.Access{Name: "group by " + group.Column, Strategy: "hash group", Effect: "in memory"})
+			entries = append(entries, Access{Name: "group by " + group.Column, Strategy: "hash group", Effect: "in memory"})
 		}
 		for _, spec := range append(append([]v3sql.AggSpec{}, plan.Aggregates...), plan.Hidden...) {
-			entries = append(entries, explain.Access{Name: aggregateSpecString(spec), Strategy: aggregateStrategy(spec, metadataOnly)})
+			entries = append(entries, Access{Name: aggregateSpecString(spec), Strategy: aggregateStrategy(spec, metadataOnly)})
 		}
 		entries = append(entries, aggregateAccess(plan.Source, trace)...)
 		return entries
@@ -551,8 +549,8 @@ func aggregateStrategy(spec v3sql.AggSpec, metadataOnly bool) string {
 	}
 }
 
-func explainRead(plan v3sql.Plan, trace *executionTrace, stats storage.ExecStats) explain.Read {
-	read := explain.Read{PayloadBytes: stats.PayloadBytesRead}
+func explainRead(plan v3sql.Plan, trace *executionTrace, stats storage.ExecStats) Read {
+	read := Read{PayloadBytes: stats.PayloadBytesRead}
 	if hasPredicateScan(trace) {
 		read.PredicatePayloadBytes = stats.PayloadBytesRead
 	} else if hasAggregate(plan) {

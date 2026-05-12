@@ -30,13 +30,11 @@ type catalogTableEntry struct {
 }
 
 func loadCatalog(root string) (map[string]typeEntry, map[string]tableEntry, v3sql.SchemaVersion, error) {
-	typesByName := make(map[string]typeEntry)
-	tablesByName := make(map[string]tableEntry)
 	path := filepath.Join(root, catalogFileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return typesByName, tablesByName, 0, nil
+			return map[string]typeEntry{}, map[string]tableEntry{}, 0, nil
 		}
 		return nil, nil, 0, err
 	}
@@ -45,11 +43,15 @@ func loadCatalog(root string) (map[string]typeEntry, map[string]tableEntry, v3sq
 	if err := json.Unmarshal(data, &file); err != nil {
 		return nil, nil, 0, fmt.Errorf("load catalog: %w", err)
 	}
+
+	typesByName := make(map[string]typeEntry, len(file.Types))
 	for i, entry := range file.Types {
-		spec := entry.Spec
-		spec.Name = normalizeName(spec.Name)
+		spec := normalizeCatalogType(entry.Spec)
 		if err := spec.Validate(); err != nil {
 			return nil, nil, 0, fmt.Errorf("catalog type %d: %w", i, err)
+		}
+		if _, exists := typesByName[spec.Name]; exists {
+			return nil, nil, 0, fmt.Errorf("duplicate catalog type %q", spec.Name)
 		}
 		id := entry.ID
 		if id == 0 {
@@ -57,14 +59,12 @@ func loadCatalog(root string) (map[string]typeEntry, map[string]tableEntry, v3sq
 		}
 		typesByName[spec.Name] = typeEntry{id: id, spec: spec}
 	}
+
+	tablesByName := make(map[string]tableEntry, len(file.Tables))
 	for i, entry := range file.Tables {
-		spec := entry.Spec
-		spec.Name = normalizeName(spec.Name)
-		for colIndex := range spec.Columns {
-			col := &spec.Columns[colIndex]
-			col.Name = normalizeName(col.Name)
+		spec := normalizeCatalogTable(entry.Spec)
+		for _, col := range spec.Columns {
 			if col.Type.Kind == types.KindNamed {
-				col.Type = types.Named(normalizeName(col.Type.Name))
 				if _, ok := typesByName[col.Type.Name]; !ok {
 					return nil, nil, 0, fmt.Errorf("catalog table %q references unknown type %q", spec.Name, col.Type.Name)
 				}
@@ -73,24 +73,49 @@ func loadCatalog(root string) (map[string]typeEntry, map[string]tableEntry, v3sq
 		if err := spec.Validate(); err != nil {
 			return nil, nil, 0, fmt.Errorf("catalog table %d: %w", i, err)
 		}
+		if _, exists := tablesByName[spec.Name]; exists {
+			return nil, nil, 0, fmt.Errorf("duplicate catalog table %q", spec.Name)
+		}
 		id := entry.ID
 		if id == 0 {
 			id = v3sql.TableID(i + 1)
 		}
 		tablesByName[spec.Name] = tableEntry{id: id, spec: spec}
 	}
+
 	return typesByName, tablesByName, file.Version, nil
 }
 
+func normalizeCatalogType(spec types.TypeSpec) types.TypeSpec {
+	spec.Name = normalizeName(spec.Name)
+	return spec
+}
+
+func normalizeCatalogTable(spec types.TableSpec) types.TableSpec {
+	spec.Name = normalizeName(spec.Name)
+	for i := range spec.Columns {
+		col := &spec.Columns[i]
+		col.Name = normalizeName(col.Name)
+		if col.Type.Kind == types.KindNamed {
+			col.Type = types.Named(normalizeName(col.Type.Name))
+		}
+	}
+	return spec
+}
+
 func (db *DB) saveCatalog() error {
-	file := catalogFile{Version: db.version}
+	file := catalogFile{
+		Version: db.version,
+		Types:   make([]catalogTypeEntry, 0, len(db.types)),
+		Tables:  make([]catalogTableEntry, 0, len(db.tables)),
+	}
 	for _, entry := range db.types {
 		file.Types = append(file.Types, catalogTypeEntry{ID: entry.id, Spec: entry.spec})
 	}
 	for _, entry := range db.tables {
 		file.Tables = append(file.Tables, catalogTableEntry{ID: entry.id, Spec: entry.spec})
 	}
-	data, err := json.MarshalIndent(file, "", "  ")
+	data, err := json.Marshal(file)
 	if err != nil {
 		return err
 	}
