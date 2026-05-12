@@ -173,15 +173,15 @@ func (m SelectionMask) IterSet(fn func(row int)) {
 	}
 }
 
+// AppendToSel appends the set rows of m to dst as a Sel ([]Row) and returns
+// the result. Sel and SelectionMask are kept as distinct representations:
+// SelectionMask is the bitmap used during predicate evaluation; Sel is the
+// sparse list consumed by operators that need to iterate matched rows.
 func (m SelectionMask) AppendToSel(dst Sel) Sel {
 	m.IterSet(func(row int) {
 		dst = append(dst, Row(row))
 	})
 	return dst
-}
-
-func (m SelectionMask) ToSel() Sel {
-	return m.AppendToSel(make(Sel, 0, m.PopCount()))
 }
 
 func (m SelectionMask) checkCompatible(other SelectionMask) {

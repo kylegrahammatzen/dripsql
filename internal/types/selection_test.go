@@ -250,9 +250,9 @@ func TestSelectionMaskToSel(t *testing.T) {
 	m.Set(3)
 	m.Set(8)
 	m.Set(40)
-	sel := m.ToSel()
+	sel := m.AppendToSel(make(Sel, 0, m.PopCount()))
 	if len(sel) != 3 {
-		t.Fatalf("ToSel returned %d rows, want 3", len(sel))
+		t.Fatalf("AppendToSel returned %d rows, want 3", len(sel))
 	}
 	want := []Row{3, 8, 40}
 	for i, r := range sel {

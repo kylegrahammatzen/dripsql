@@ -42,6 +42,29 @@ func (k VecKind) String() string {
 	return fmt.Sprintf("vec_kind(%d)", k)
 }
 
+// IsVarBytes reports whether k stores variable-length payloads in Vec.Var
+// (text, bytes, JSON). Used by codecs to gate var-length encode/decode paths.
+func (k VecKind) IsVarBytes() bool {
+	switch k {
+	case VecText, VecBytes, VecJSON:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsFORPackable reports whether k is acceptable input to the FOR+BitPack
+// codec. Excludes VecDecimal64 because the decimal scale lives outside the
+// vector and cannot be reconstructed from a packed offset alone.
+func (k VecKind) IsFORPackable() bool {
+	switch k {
+	case VecInt16, VecInt32, VecDate, VecInt64, VecTimestamp, VecTime, VecEnum32:
+		return true
+	default:
+		return false
+	}
+}
+
 func (k VecKind) valid() bool {
 	switch k {
 	case VecBool,

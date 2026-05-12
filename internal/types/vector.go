@@ -21,31 +21,69 @@ type Vec struct {
 	U32      []uint32
 	Var      VarBytes
 
+	// Encoded holds codec-specific state when the vector is in non-flat form.
+	// Always nil when Encoding == EncodingFlat. Pointer (not embedded value)
+	// because most vectors are flat and we don't want to pay the per-Vec cost
+	// of the encoded fields.
+	Encoded *EncodedState
+}
+
+// EncodedState carries the per-codec scratch needed to interpret a non-flat
+// Vec without having to redecode the page. Each group of fields is meaningful
+// for exactly one Encoding.
+type EncodedState struct {
+	// EncodingConstant: the single value repeated across every row. Only
+	// ConstantI64 (used by integer/decimal/temporal kinds via reinterpretation)
+	// is consumed today; other kinds either expand to flat or read the page
+	// payload directly. ConstantValid is false when the page is all-null.
+	ConstantI64   int64
+	ConstantValid bool
+
+	// EncodingDictionary: per-row dict codes plus the value table. Read by
+	// aggregate kernels and predicate evaluators that special-case dictionary
+	// columns.
 	DictIDs    []uint8
 	DictValues VarBytes
 
-	ConstantBool  bool
-	ConstantI64   int64
-	ConstantF64   float64
-	ConstantUUID  UUID16
-	ConstantU32   uint32
-	ConstantBytes []byte
-	ConstantValid bool
-
+	// EncodingFORBitPack: frame-of-reference base, packed-offset width, and
+	// the bit-packed offset payload. Read by predicate eval and aggregate
+	// kernels that fuse decode with their loop.
 	FORBase  int64
 	FORWidth int
 	FORData  []byte
-
-	Runs []Run
 }
 
-type Run struct {
-	Length int
-	I64    int64
-	F64    float64
-	Bool   bool
-	U32    uint32
-	Bytes  []byte
+func (e *EncodedState) Clone() *EncodedState {
+	if e == nil {
+		return nil
+	}
+	out := *e
+	out.DictIDs = slices.Clone(e.DictIDs)
+	out.DictValues = e.DictValues.Clone()
+	out.FORData = slices.Clone(e.FORData)
+	return &out
+}
+
+// TextCopy returns the row's text value as an owned string, dispatching on
+// encoding (flat reads from Var, dictionary translates DictIDs through
+// DictValues). The bool is false when the encoding isn't supported or the
+// dictionary state is missing/inconsistent.
+func (v Vec) TextCopy(row int) (string, bool) {
+	switch v.Encoding {
+	case EncodingFlat:
+		return v.Var.StringCopy(row), true
+	case EncodingDictionary:
+		if v.Encoded == nil || row >= len(v.Encoded.DictIDs) {
+			return "", false
+		}
+		id := int(v.Encoded.DictIDs[row])
+		if id >= v.Encoded.DictValues.Rows() {
+			return "", false
+		}
+		return v.Encoded.DictValues.StringCopy(id), true
+	default:
+		return "", false
+	}
 }
 
 func (v Vec) Clone() Vec {
@@ -60,28 +98,7 @@ func (v Vec) Clone() Vec {
 	out.UUID = slices.Clone(v.UUID)
 	out.U32 = slices.Clone(v.U32)
 	out.Var = v.Var.Clone()
-	out.DictIDs = slices.Clone(v.DictIDs)
-	out.DictValues = v.DictValues.Clone()
-	out.ConstantBytes = slices.Clone(v.ConstantBytes)
-	out.FORData = slices.Clone(v.FORData)
-	out.Runs = cloneRuns(v.Runs)
-	return out
-}
-
-func (r Run) Clone() Run {
-	out := r
-	out.Bytes = slices.Clone(r.Bytes)
-	return out
-}
-
-func cloneRuns(runs []Run) []Run {
-	if len(runs) == 0 {
-		return nil
-	}
-	out := make([]Run, len(runs))
-	for i, run := range runs {
-		out[i] = run.Clone()
-	}
+	out.Encoded = v.Encoded.Clone()
 	return out
 }
 
@@ -158,7 +175,7 @@ func (v Vec) validateFlat() error {
 
 func (v Vec) validateNonFlat() error {
 	switch v.Encoding {
-	case EncodingDictionary, EncodingConstant, EncodingSequence, EncodingFORBitPack, EncodingFlate:
+	case EncodingDictionary, EncodingConstant, EncodingSequence, EncodingFORBitPack, EncodingFlate, EncodingZstd:
 		return nil
 	default:
 		return fmt.Errorf("invalid vector encoding %s", v.Encoding)
@@ -193,8 +210,8 @@ func (v Vec) validateInactiveFields(active string) error {
 	if active != "Var" && (len(v.Var.Offsets) != 0 || len(v.Var.Data) != 0) {
 		return fmt.Errorf("inactive varbytes values set for %s vector", v.Kind)
 	}
-	if v.FORBase != 0 || v.FORWidth != 0 || len(v.FORData) != 0 {
-		return fmt.Errorf("inactive for+bitpack values set for %s vector", v.Kind)
+	if v.Encoded != nil {
+		return fmt.Errorf("inactive encoded scratch set for %s vector", v.Kind)
 	}
 	return nil
 }

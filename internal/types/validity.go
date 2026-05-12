@@ -35,10 +35,6 @@ func (valid Validity) IsAllValid() bool {
 	return valid == nil
 }
 
-func (valid Validity) IsValid(row int) bool {
-	return IsValid(valid, row)
-}
-
 func IsValid(valid Validity, row int) bool {
 	return valid == nil || valid[row>>6]&(uint64(1)<<uint(row&63)) != 0
 }
