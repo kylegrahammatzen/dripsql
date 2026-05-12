@@ -3,7 +3,6 @@ package storage
 import (
 	"bufio"
 	"bytes"
-	"compress/flate"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/klauspost/compress/flate"
 	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
