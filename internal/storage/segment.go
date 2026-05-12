@@ -461,6 +461,15 @@ func compressSegmentFooter(raw []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// flateReaderPool reuses flate decoders so the per-segment Reset path
+// replaces what otherwise would be a NewReader allocation per segment during
+// parallel cold open.
+var flateReaderPool = sync.Pool{
+	New: func() any {
+		return flate.NewReader(bytes.NewReader(nil))
+	},
+}
+
 // decompressSegmentFooter decompresses body into a buffer pre-sized to rawLen,
 // which is taken from the footer envelope. Pre-sizing eliminates the doubling
 // growth io.ReadAll would otherwise do, which showed up as ~60% of cold-open
@@ -469,8 +478,11 @@ func decompressSegmentFooter(body []byte, rawLen int) ([]byte, error) {
 	if rawLen < 0 {
 		return nil, fmt.Errorf("segment footer raw length %d is negative", rawLen)
 	}
-	zr := flate.NewReader(bytes.NewReader(body))
-	defer zr.Close()
+	zr := flateReaderPool.Get().(io.ReadCloser)
+	defer flateReaderPool.Put(zr)
+	if err := zr.(flate.Resetter).Reset(bytes.NewReader(body), nil); err != nil {
+		return nil, err
+	}
 	raw := make([]byte, rawLen)
 	if _, err := io.ReadFull(zr, raw); err != nil {
 		return nil, err
