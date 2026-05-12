@@ -96,6 +96,8 @@ Snapshot (2026-05-12), `structured` profile, 10M rows, 2M-row segments, `sort_by
 
 Every query is now sub-millisecond on this profile.
 
+Pass `-mode cold-ish` to close and reopen the database between every sample, so each measurement starts with an empty in-process page cache. OS file cache is not dropped (no portable way without admin), so this measures "first query after process restart" rather than truly cold disk — and shows that cold-cache cost is dominated by segment-footer loading at open time, not by the queries themselves.
+
 Full usage in [`cmd/bench/README.md`](cmd/bench/README.md). The driver exercises segment build, predicate pushdown, and aggregate execution end-to-end.
 
 These are reference points, not regression gates. Re-baseline with `-count=5` or higher for any comparison work.

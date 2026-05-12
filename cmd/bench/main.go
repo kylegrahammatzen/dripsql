@@ -378,7 +378,13 @@ func runOne(opts options, rows int64, profile profileSpec) (benchReport, error) 
 			f.Close()
 		}()
 	}
-	queries, err := runQuerySet(ctx, db, benchQueries, opts.runs, opts.query)
+	var reopenBetweenRuns func() error
+	if effectiveMode(opts.mode) == benchModeColdish {
+		reopenBetweenRuns = func() error {
+			return reopenBenchDB(ctx, &db, dir)
+		}
+	}
+	queries, err := runQuerySet(ctx, &db, benchQueries, opts.runs, opts.query, reopenBetweenRuns)
 	if err != nil {
 		return benchReport{}, err
 	}
@@ -424,7 +430,7 @@ func prepareQueryMode(ctx context.Context, db **engine.DB, dir string, mode stri
 	case benchModeColdish:
 		runtime.GC()
 		debug.FreeOSMemory()
-		return "best-effort reopen after freeing Go memory; OS file cache is not cleared", reopenBenchDB(ctx, db, dir)
+		return "DB closed and reopened before every sample; OS file cache is not cleared. Read-count totals are approximate in this mode.", reopenBenchDB(ctx, db, dir)
 	}
 	return "", fmt.Errorf("unknown benchmark mode %q", mode)
 }
@@ -530,13 +536,13 @@ func elapsedNanoseconds(start time.Time) int64 {
 	return elapsed
 }
 
-func runQuerySet(ctx context.Context, db *engine.DB, queries []query, runs int, queryFilter string) ([]queryReport, error) {
+func runQuerySet(ctx context.Context, db **engine.DB, queries []query, runs int, queryFilter string, reopenBetween func() error) ([]queryReport, error) {
 	out := make([]queryReport, 0, len(queries))
 	for _, q := range queries {
 		if !queryMatchesFilter(q, queryFilter) {
 			continue
 		}
-		report, err := timeQuery(ctx, db, q, runs)
+		report, err := timeQuery(ctx, db, q, runs, reopenBetween)
 		if err != nil {
 			return nil, err
 		}
@@ -556,16 +562,21 @@ func queryMatchesFilter(q query, filter string) bool {
 	return strings.Contains(strings.ToLower(q.Name), filter) || strings.Contains(strings.ToLower(q.SQL), filter)
 }
 
-func timeQuery(ctx context.Context, db *engine.DB, q query, runs int) (queryReport, error) {
+func timeQuery(ctx context.Context, db **engine.DB, q query, runs int, reopenBetween func() error) (queryReport, error) {
 	report := queryReport{Name: q.Name, SQL: q.SQL, Timing: engine.Timing{Samples: runs}}
 	var firstExplain engine.Report
 	var totalNs int64
 	samples := make([]int64, 0, runs)
 	for i := range runs {
+		if i > 0 && reopenBetween != nil {
+			if err := reopenBetween(); err != nil {
+				return queryReport{}, fmt.Errorf("query %s: reopen between samples: %w", q.Name, err)
+			}
+		}
 		var sampleNs int64
 		for iterations := int64(0); iterations == 0 || (sampleNs == 0 && iterations < 10_000); iterations++ {
 			start := time.Now()
-			rows, runExplain, err := db.ExplainAnalyze(ctx, q.SQL)
+			rows, runExplain, err := (*db).ExplainAnalyze(ctx, q.SQL)
 			elapsed := time.Since(start)
 			if err != nil {
 				return queryReport{}, fmt.Errorf("query %s: %w", q.Name, err)

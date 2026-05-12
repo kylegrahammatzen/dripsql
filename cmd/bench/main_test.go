@@ -63,6 +63,20 @@ func TestBenchWarmReopenMode(t *testing.T) {
 	}
 }
 
+func TestBenchColdishModeReopensBetweenSamples(t *testing.T) {
+	var buf bytes.Buffer
+	args := []string{"-rows", "1000", "-runs", "3", "-mode", "cold-ish", "-dir", t.TempDir(), "-query", "user id lookup"}
+	if err := run(args, &buf); err != nil {
+		t.Fatalf("run: %v\n%s", err, buf.String())
+	}
+	out := buf.String()
+	for _, want := range []string{"Mode:         cold-ish", "closed and reopened before every sample", "user id lookup"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in output\n%s", want, out)
+		}
+	}
+}
+
 func TestBuildBenchmarkQueriesUsesProfileValues(t *testing.T) {
 	profile, err := profileSpecFor("random")
 	if err != nil {
