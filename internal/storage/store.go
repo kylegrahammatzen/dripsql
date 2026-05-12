@@ -13,12 +13,20 @@ import (
 )
 
 type Store struct {
-	root    string
-	closeMu sync.RWMutex
-	mu      sync.RWMutex
-	closed  bool
-	tables  map[string]*tableState
-	files   *segmentFileCache
+	root      string
+	closeMu   sync.RWMutex
+	mu        sync.RWMutex
+	closed    bool
+	tables    map[string]*tableState
+	files     *segmentFileCache
+	byteCache *segmentByteCache
+}
+
+func (s *Store) ByteCacheStats() SegmentByteCacheStats {
+	if s == nil {
+		return SegmentByteCacheStats{}
+	}
+	return s.byteCache.Stats()
 }
 
 type tableState struct {
@@ -79,7 +87,12 @@ func Open(root string) (*Store, error) {
 			return nil, err
 		}
 	}
-	return &Store{root: root, tables: make(map[string]*tableState), files: newSegmentFileCache()}, nil
+	return &Store{
+		root:      root,
+		tables:    make(map[string]*tableState),
+		files:     newSegmentFileCache(),
+		byteCache: newSegmentByteCache(defaultSegmentByteCacheBytes),
+	}, nil
 }
 
 func (s *Store) Close() error {
@@ -387,7 +400,7 @@ func (s *Store) ScanIterator(ctx context.Context, table types.TableSpec, pred Pr
 	if err != nil {
 		return SegmentScanIterator{}, err
 	}
-	return SegmentScanIterator{Context: ctx, Segments: segments, Predicate: pred, Stats: stats, fileCache: s.files}, nil
+	return SegmentScanIterator{Context: ctx, Segments: segments, Predicate: pred, Stats: stats, fileCache: s.files, byteCache: s.byteCache}, nil
 }
 
 func (s *Store) ScanIteratorForPredicate(ctx context.Context, table types.TableSpec, pred Predicate, stats *ExecStats) (SegmentScanIterator, error) {
@@ -395,7 +408,7 @@ func (s *Store) ScanIteratorForPredicate(ctx context.Context, table types.TableS
 	if err != nil {
 		return SegmentScanIterator{}, err
 	}
-	return SegmentScanIterator{Context: ctx, Segments: segments, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats, fileCache: s.files}, nil
+	return SegmentScanIterator{Context: ctx, Segments: segments, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats, fileCache: s.files, byteCache: s.byteCache}, nil
 }
 
 func (s *Store) ensureTableState(table types.TableSpec, create bool) (*tableState, error) {

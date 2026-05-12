@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sort"
 	"sync"
 
 	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
@@ -20,9 +21,15 @@ const segmentMagic = "DRIPV3S1"
 const segmentWriteBufferBytes = 4 << 20
 
 const (
-	segmentFooterPlainMagic = "DRIPFTR0"
-	segmentFooterFlateMagic = "DRIPFTZ1"
+	segmentFooterPlainMagic   = "DRIPFTR0"
+	segmentFooterFlateMagic   = "DRIPFTZ1"
+	segmentFooterPlainMagicV2 = "DRIPFTR2"
+	segmentFooterFlateMagicV2 = "DRIPFTZ3"
 )
+
+// v2 footer encoding adds TextStats.GroupSums for SMA-style metadata-only
+// GROUP BY + SUM. Old segments encoded at v1 are still read; GroupSums comes
+// back nil and the engine falls back to scan-based execution.
 
 // Minimum encoded bytes for a PageMeta before optional stats payloads:
 // rowStart(4), rows(4), nullCount(4), offset(8), length(8), kind(1),
@@ -102,6 +109,10 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 	}
 	rowStart := 0
 	scratch := make([][]byte, len(meta.Columns))
+	var sma *segmentSMAAccumulator
+	if !smaDisabled {
+		sma = newSegmentSMAAccumulator(batches[0].Columns)
+	}
 	for _, batch := range batches {
 		pages, err := encodeSegmentBatchPages(batch, rowStart, scratch)
 		if err != nil {
@@ -124,6 +135,9 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 			colMeta.Text = mergeTextStats(colMeta.Text, page.meta.Text)
 			colMeta.Pages = append(colMeta.Pages, page.meta)
 		}
+		if sma != nil {
+			sma.observeBatch(batch)
+		}
 		rowStart += batch.Len
 	}
 	for i := range meta.Columns {
@@ -132,6 +146,9 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 		colMeta.AllNull = colMeta.NullCount == colMeta.Rows
 		finalizeColumnTextBlooms(colMeta)
 		finalizeColumnUUIDBlooms(colMeta)
+	}
+	if sma != nil {
+		sma.finalize(meta.Columns)
 	}
 	footer, err := marshalSegmentMeta(meta)
 	if err != nil {
@@ -216,14 +233,14 @@ func ReadSegmentFooter(path string) (SegmentMeta, error) {
 		return SegmentMeta{}, fmt.Errorf("segment %q is too small", path)
 	}
 	header := make([]byte, len(segmentMagic))
-	if _, err := file.ReadAt(header, 0); err != nil {
+	if _, err := readAt(file, header, 0); err != nil {
 		return SegmentMeta{}, err
 	}
 	if string(header) != segmentMagic {
 		return SegmentMeta{}, fmt.Errorf("segment %q has invalid header", path)
 	}
 	tail := make([]byte, len(segmentMagic)+8)
-	if _, err := file.ReadAt(tail, info.Size()-int64(len(tail))); err != nil {
+	if _, err := readAt(file, tail, info.Size()-int64(len(tail))); err != nil {
 		return SegmentMeta{}, err
 	}
 	if string(tail[8:]) != segmentMagic {
@@ -237,7 +254,7 @@ func ReadSegmentFooter(path string) (SegmentMeta, error) {
 	}
 	footerStart := dataEnd - int64(footerLen)
 	footer := make([]byte, int(footerLen))
-	if _, err := file.ReadAt(footer, footerStart); err != nil {
+	if _, err := readAt(file, footer, footerStart); err != nil {
 		return SegmentMeta{}, err
 	}
 	return unmarshalSegmentMeta(footer)
@@ -350,38 +367,55 @@ func marshalSegmentMetaRaw(meta SegmentMeta) ([]byte, error) {
 func encodeSegmentFooter(raw []byte) ([]byte, error) {
 	compressed, err := compressSegmentFooter(raw)
 	if err == nil && len(compressed) < len(raw) {
-		return segmentFooterEnvelope(segmentFooterFlateMagic, uint64(len(raw)), compressed), nil
+		return segmentFooterEnvelope(segmentFooterFlateMagicV2, uint64(len(raw)), compressed), nil
 	}
-	return segmentFooterEnvelope(segmentFooterPlainMagic, uint64(len(raw)), raw), nil
+	return segmentFooterEnvelope(segmentFooterPlainMagicV2, uint64(len(raw)), raw), nil
 }
 
-func decodeSegmentFooter(data []byte) ([]byte, error) {
+// decodeSegmentFooter returns the raw footer body and the format version. v1
+// (the DRIPFTR0/DRIPFTZ1 magics) is still read so existing on-disk segments
+// keep working; new segments are always written at v2.
+func decodeSegmentFooter(data []byte) ([]byte, int, error) {
 	if len(data) < len(segmentFooterPlainMagic)+8 {
-		return nil, fmt.Errorf("segment footer missing encoding header")
+		return nil, 0, fmt.Errorf("segment footer missing encoding header")
 	}
 	magic := string(data[:len(segmentFooterPlainMagic)])
 	rawLen := binary.LittleEndian.Uint64(data[len(segmentFooterPlainMagic) : len(segmentFooterPlainMagic)+8])
 	body := data[len(segmentFooterPlainMagic)+8:]
 	if rawLen > uint64(math.MaxInt) {
-		return nil, fmt.Errorf("segment footer raw length exceeds int capacity")
+		return nil, 0, fmt.Errorf("segment footer raw length exceeds int capacity")
 	}
 	switch magic {
 	case segmentFooterPlainMagic:
 		if uint64(len(body)) != rawLen {
-			return nil, fmt.Errorf("segment footer raw length %d does not match body length %d", rawLen, len(body))
+			return nil, 0, fmt.Errorf("segment footer raw length %d does not match body length %d", rawLen, len(body))
 		}
-		return body, nil
+		return body, 1, nil
+	case segmentFooterPlainMagicV2:
+		if uint64(len(body)) != rawLen {
+			return nil, 0, fmt.Errorf("segment footer raw length %d does not match body length %d", rawLen, len(body))
+		}
+		return body, 2, nil
 	case segmentFooterFlateMagic:
 		raw, err := decompressSegmentFooter(body)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if len(raw) != int(rawLen) {
-			return nil, fmt.Errorf("segment footer expanded to %d bytes, want %d", len(raw), rawLen)
+			return nil, 0, fmt.Errorf("segment footer expanded to %d bytes, want %d", len(raw), rawLen)
 		}
-		return raw, nil
+		return raw, 1, nil
+	case segmentFooterFlateMagicV2:
+		raw, err := decompressSegmentFooter(body)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(raw) != int(rawLen) {
+			return nil, 0, fmt.Errorf("segment footer expanded to %d bytes, want %d", len(raw), rawLen)
+		}
+		return raw, 2, nil
 	default:
-		return nil, fmt.Errorf("segment footer has unknown encoding %q", magic)
+		return nil, 0, fmt.Errorf("segment footer has unknown encoding %q", magic)
 	}
 }
 
@@ -423,11 +457,11 @@ func decompressSegmentFooter(body []byte) ([]byte, error) {
 }
 
 func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
-	data, err := decodeSegmentFooter(data)
+	data, version, err := decodeSegmentFooter(data)
 	if err != nil {
 		return SegmentMeta{}, err
 	}
-	r := segmentMetaReader{r: bytes.NewReader(data)}
+	r := segmentMetaReader{r: bytes.NewReader(data), version: version}
 	meta := SegmentMeta{ID: SegmentID(r.readU64()), Rows: r.readU32(), PageRows: r.readU32()}
 	cols := r.readU32()
 	if r.err != nil {
@@ -501,8 +535,9 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 }
 
 type segmentMetaReader struct {
-	r   *bytes.Reader
-	err error
+	r       *bytes.Reader
+	err     error
+	version int
 }
 
 func (r *segmentMetaReader) readType() types.Type {
@@ -663,6 +698,67 @@ func (r *segmentMetaReader) readTextStats() *TextStats {
 	}
 	if r.err != nil {
 		return nil
+	}
+	if r.version >= 2 {
+		groupCount := r.readU32()
+		if r.err != nil {
+			return nil
+		}
+		if groupCount != 0 {
+			out.GroupSums = make(map[string][]int64, int(groupCount))
+			for g := uint32(0); g < groupCount; g++ {
+				key := r.readString()
+				n := r.readU32()
+				if r.err != nil {
+					return nil
+				}
+				if uint64(n) > uint64(r.r.Len()/8) {
+					r.err = io.ErrUnexpectedEOF
+					return nil
+				}
+				sums := make([]int64, int(n))
+				for i := range sums {
+					sums[i] = int64(r.readU64())
+				}
+				out.GroupSums[key] = sums
+			}
+		}
+		// GroupCounts (cross-text counts).
+		siblingCount := r.readU32()
+		if r.err != nil {
+			return nil
+		}
+		if siblingCount != 0 {
+			out.GroupCounts = make(map[string]map[string][]int64, int(siblingCount))
+			for s := uint32(0); s < siblingCount; s++ {
+				col := r.readString()
+				valueCount := r.readU32()
+				if r.err != nil {
+					return nil
+				}
+				bySibling := make(map[string][]int64, int(valueCount))
+				for v := uint32(0); v < valueCount; v++ {
+					value := r.readString()
+					n := r.readU32()
+					if r.err != nil {
+						return nil
+					}
+					if uint64(n) > uint64(r.r.Len()/8) {
+						r.err = io.ErrUnexpectedEOF
+						return nil
+					}
+					counts := make([]int64, int(n))
+					for i := range counts {
+						counts[i] = int64(r.readU64())
+					}
+					bySibling[value] = counts
+				}
+				out.GroupCounts[col] = bySibling
+			}
+		}
+		if r.err != nil {
+			return nil
+		}
 	}
 	return out
 }
@@ -852,6 +948,56 @@ func writeTextStats(w *segmentMetaWriter, stats *TextStats) {
 	writeU32(w, uint32(len(stats.HashBloom)))
 	for _, word := range stats.HashBloom {
 		writeU64(w, word)
+	}
+	// v2 GroupSums: deterministic key order so the on-disk bytes are stable.
+	if stats.Truncated {
+		writeU32(w, 0)
+		writeU32(w, 0)
+		return
+	}
+	keys := make([]string, 0, len(stats.GroupSums))
+	for key := range stats.GroupSums {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	writeU32(w, uint32(len(keys)))
+	for _, key := range keys {
+		sums := stats.GroupSums[key]
+		writeString(w, key)
+		writeU32(w, uint32(len(sums)))
+		for _, sum := range sums {
+			writeU64(w, uint64(sum))
+		}
+	}
+	// GroupCounts: outer keys (sibling col names) sorted, inner keys (sibling
+	// values) sorted, values parallel to this column's Values.
+	if len(stats.GroupCounts) == 0 {
+		writeU32(w, 0)
+		return
+	}
+	siblings := make([]string, 0, len(stats.GroupCounts))
+	for col := range stats.GroupCounts {
+		siblings = append(siblings, col)
+	}
+	sort.Strings(siblings)
+	writeU32(w, uint32(len(siblings)))
+	for _, col := range siblings {
+		writeString(w, col)
+		bySibling := stats.GroupCounts[col]
+		values := make([]string, 0, len(bySibling))
+		for v := range bySibling {
+			values = append(values, v)
+		}
+		sort.Strings(values)
+		writeU32(w, uint32(len(values)))
+		for _, value := range values {
+			writeString(w, value)
+			counts := bySibling[value]
+			writeU32(w, uint32(len(counts)))
+			for _, count := range counts {
+				writeU64(w, uint64(count))
+			}
+		}
 	}
 }
 

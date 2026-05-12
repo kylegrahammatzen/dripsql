@@ -28,6 +28,7 @@ type SegmentScanIterator struct {
 	EncodedOutputColumns map[string]struct{}
 	Stats                *ExecStats
 	fileCache            *segmentFileCache
+	byteCache            *segmentByteCache
 	readPlans            []*SegmentReadPlan
 	predPlans            []*SegmentReadPlan
 	outputPlans          []*SegmentReadPlan
@@ -303,7 +304,7 @@ func (it *SegmentScanIterator) cachedSegmentReadPlan(segmentIndex int, segment *
 	if plan := (*plans)[segmentIndex]; plan != nil {
 		return plan, nil
 	}
-	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, columns, segment.Size, segment.PageInfos, it.fileCache)
+	plan, err := newSegmentReadPlan(segment.Path, &segment.Meta, columns, segment.Size, segment.PageInfos, it.fileCache, it.byteCache)
 	if err != nil {
 		return nil, err
 	}

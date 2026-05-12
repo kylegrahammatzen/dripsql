@@ -18,6 +18,8 @@ type SegmentReadPlan struct {
 	Encoded    map[string]struct{}
 	PageInfos  []SegmentPageInfo
 	Cache      *segmentFileCache
+	ByteCache  *segmentByteCache
+	FileID     uint64
 
 	scratch          []byte
 	decodeScratch    []types.Vec
@@ -46,10 +48,10 @@ func ReadSegmentBatchColumns(path string, meta SegmentMeta, pageIndex int, colum
 }
 
 func NewSegmentReadPlan(path string, meta *SegmentMeta, columns []string, cache *segmentFileCache) (*SegmentReadPlan, error) {
-	return newSegmentReadPlan(path, meta, columns, 0, nil, cache)
+	return newSegmentReadPlan(path, meta, columns, 0, nil, cache, nil)
 }
 
-func newSegmentReadPlan(path string, meta *SegmentMeta, columns []string, segmentSize int64, pageInfos []SegmentPageInfo, cache *segmentFileCache) (*SegmentReadPlan, error) {
+func newSegmentReadPlan(path string, meta *SegmentMeta, columns []string, segmentSize int64, pageInfos []SegmentPageInfo, cache *segmentFileCache, byteCache *segmentByteCache) (*SegmentReadPlan, error) {
 	if meta == nil {
 		return nil, fmt.Errorf("segment metadata is nil")
 	}
@@ -90,7 +92,12 @@ func newSegmentReadPlan(path string, meta *SegmentMeta, columns []string, segmen
 		}
 	}
 
-	return &SegmentReadPlan{Path: path, Meta: meta, Size: segmentSize, Indexes: indexes, AllColumns: allColumns, PageInfos: infos, Cache: cache}, nil
+	return &SegmentReadPlan{
+		Path: path, Meta: meta, Size: segmentSize,
+		Indexes: indexes, AllColumns: allColumns, PageInfos: infos,
+		Cache: cache, ByteCache: byteCache,
+		FileID: segmentFileIdentity(path, segmentSize),
+	}, nil
 }
 
 func (p *SegmentReadPlan) ReadBatch(pageIndex int) (types.Batch, int, error) {
@@ -220,11 +227,11 @@ func (p *SegmentReadPlan) readBatch(pageIndex int, reuseDecodeBuffers bool) (typ
 
 func (p *SegmentReadPlan) readColumnPage(file *os.File, columnIndex int, pageIndex int, dst *types.Vec) (types.Column, error) {
 	if p.shouldReadEncoded(columnIndex, pageIndex) {
-		col, scratch, err := readEncodedColumnPageFromFile(file, *p.Meta, columnIndex, pageIndex, p.Size, p.scratch)
+		col, scratch, err := readEncodedColumnPageFromFile(file, *p.Meta, columnIndex, pageIndex, p.Size, p.scratch, p.ByteCache, p.FileID)
 		p.scratch = scratch
 		return col, err
 	}
-	col, scratch, err := readColumnPageFromFileInto(file, *p.Meta, columnIndex, pageIndex, p.Size, p.scratch, dst)
+	col, scratch, err := readColumnPageFromFileInto(file, *p.Meta, columnIndex, pageIndex, p.Size, p.scratch, dst, p.ByteCache, p.FileID)
 	p.scratch = scratch
 	return col, err
 }
@@ -233,20 +240,11 @@ func (p *SegmentReadPlan) readSelectedColumnPage(file *os.File, columnIndex int,
 	colMeta := p.Meta.Columns[columnIndex]
 	pageMeta := colMeta.Pages[pageIndex]
 	if p.shouldReadEncoded(columnIndex, pageIndex) {
-		encoded, scratch, err := readEncodedColumnPageFromFile(file, *p.Meta, columnIndex, pageIndex, p.Size, p.scratch)
+		encoded, scratch, err := readEncodedColumnPageFromFile(file, *p.Meta, columnIndex, pageIndex, p.Size, p.scratch, p.ByteCache, p.FileID)
 		p.scratch = scratch
 		return encoded, int(pageMeta.Length), err
 	}
-	if pageMeta.Encoding == types.EncodingFORBitPack {
-		encoded, scratch, err := readEncodedColumnPageFromFile(file, *p.Meta, columnIndex, pageIndex, p.Size, p.scratch)
-		p.scratch = scratch
-		if err != nil {
-			return types.Column{}, 0, err
-		}
-		col, err := materializeFORBitPackSelected(encoded, sel)
-		return col, int(pageMeta.Length), err
-	}
-	payload, scratch, err := readPagePayload(file, pageMeta, p.Size, p.scratch)
+	payload, scratch, err := readPagePayload(file, pageMeta, p.Size, p.scratch, p.ByteCache, p.FileID)
 	p.scratch = scratch
 	if err != nil {
 		return types.Column{}, 0, fmt.Errorf("page %d for column %q: %w", pageIndex, colMeta.Name, err)
@@ -288,7 +286,7 @@ func ReadColumnPage(path string, meta SegmentMeta, columnIndex int, pageIndex in
 		return types.Column{}, err
 	}
 	defer closeFile()
-	col, _, err := readColumnPageFromFileInto(file, meta, columnIndex, pageIndex, 0, nil, nil)
+	col, _, err := readColumnPageFromFileInto(file, meta, columnIndex, pageIndex, 0, nil, nil, nil, 0)
 	return col, err
 }
 
@@ -335,12 +333,12 @@ func resolveColumnPage(file *os.File, meta SegmentMeta, columnIndex int, pageInd
 	return colMeta, colMeta.Pages[pageIndex], segmentSize, nil
 }
 
-func readColumnPageFromFileInto(file *os.File, meta SegmentMeta, columnIndex int, pageIndex int, segmentSize int64, scratch []byte, dst *types.Vec) (types.Column, []byte, error) {
+func readColumnPageFromFileInto(file *os.File, meta SegmentMeta, columnIndex int, pageIndex int, segmentSize int64, scratch []byte, dst *types.Vec, cache *segmentByteCache, fileID uint64) (types.Column, []byte, error) {
 	colMeta, pageMeta, segmentSize, err := resolveColumnPage(file, meta, columnIndex, pageIndex, segmentSize)
 	if err != nil {
 		return types.Column{}, scratch, err
 	}
-	payload, scratch, err := readPagePayload(file, pageMeta, segmentSize, scratch)
+	payload, scratch, err := readPagePayload(file, pageMeta, segmentSize, scratch, cache, fileID)
 	if err != nil {
 		return types.Column{}, scratch, fmt.Errorf("page %d for column %q: %w", pageIndex, colMeta.Name, err)
 	}
@@ -351,12 +349,12 @@ func readColumnPageFromFileInto(file *os.File, meta SegmentMeta, columnIndex int
 	return col, scratch, nil
 }
 
-func readEncodedColumnPageFromFile(file *os.File, meta SegmentMeta, columnIndex int, pageIndex int, segmentSize int64, scratch []byte) (types.Column, []byte, error) {
+func readEncodedColumnPageFromFile(file *os.File, meta SegmentMeta, columnIndex int, pageIndex int, segmentSize int64, scratch []byte, cache *segmentByteCache, fileID uint64) (types.Column, []byte, error) {
 	colMeta, pageMeta, segmentSize, err := resolveColumnPage(file, meta, columnIndex, pageIndex, segmentSize)
 	if err != nil {
 		return types.Column{}, scratch, err
 	}
-	payload, scratch, err := readPagePayload(file, pageMeta, segmentSize, scratch)
+	payload, scratch, err := readPagePayload(file, pageMeta, segmentSize, scratch, cache, fileID)
 	if err != nil {
 		return types.Column{}, scratch, fmt.Errorf("page %d for column %q: %w", pageIndex, colMeta.Name, err)
 	}
@@ -376,42 +374,7 @@ func readEncodedColumnPageFromFile(file *os.File, meta SegmentMeta, columnIndex 
 	return types.Column{Name: colMeta.Name, Type: colMeta.Type, EnumLabels: append([]string(nil), colMeta.EnumLabels...), V: vec}, scratch, nil
 }
 
-func materializeFORBitPackSelected(col types.Column, sel types.SelectionMask) (types.Column, error) {
-	v := col.V
-	out := types.Vec{Kind: v.Kind, Encoding: types.EncodingFlat, Len: v.Len}
-	if v.Valid != nil {
-		out.Valid = append(types.Validity(nil), v.Valid...)
-	}
-	switch v.Kind {
-	case types.VecInt16:
-		out.I16 = make([]int16, v.Len)
-		sel.IterSet(func(row int) {
-			if types.IsValid(v.Valid, row) {
-				out.I16[row] = int16(forBitPackValue(v, row))
-			}
-		})
-	case types.VecInt32, types.VecDate:
-		out.I32 = make([]int32, v.Len)
-		sel.IterSet(func(row int) {
-			if types.IsValid(v.Valid, row) {
-				out.I32[row] = int32(forBitPackValue(v, row))
-			}
-		})
-	case types.VecInt64, types.VecTimestamp, types.VecTime:
-		out.I64 = make([]int64, v.Len)
-		sel.IterSet(func(row int) {
-			if types.IsValid(v.Valid, row) {
-				out.I64[row] = forBitPackValue(v, row)
-			}
-		})
-	default:
-		return types.Column{}, fmt.Errorf("for+bitpack selected materialization unsupported kind %s", v.Kind)
-	}
-	col.V = out
-	return col, nil
-}
-
-func readPagePayload(file *os.File, page PageMeta, segmentSize int64, scratch []byte) ([]byte, []byte, error) {
+func readPagePayload(file *os.File, page PageMeta, segmentSize int64, scratch []byte, cache *segmentByteCache, fileID uint64) ([]byte, []byte, error) {
 	readOffset, err := pageReadOffset(page)
 	if err != nil {
 		return nil, scratch, err
@@ -421,12 +384,21 @@ func readPagePayload(file *os.File, page PageMeta, segmentSize int64, scratch []
 		return nil, scratch, fmt.Errorf("extends beyond segment")
 	}
 	n := int(page.Length)
+	cacheKey := segmentReadKey{FileID: fileID, Offset: readOffset, Length: n}
+	if cache != nil {
+		if cached, ok := cache.Get(cacheKey); ok {
+			return cached, scratch, nil
+		}
+	}
 	if cap(scratch) < n {
 		scratch = make([]byte, n)
 	}
 	payload := scratch[:n]
-	if _, err := file.ReadAt(payload, readOffset); err != nil {
+	if _, err := readAt(file, payload, readOffset); err != nil {
 		return nil, scratch, err
+	}
+	if cache != nil {
+		cache.Put(cacheKey, payload)
 	}
 	return payload, scratch, nil
 }
@@ -477,6 +449,10 @@ func pageCodec(enc types.Encoding) (codec.Codec, error) {
 		return codec.FORBitPack{}, nil
 	case types.EncodingFlate:
 		return codec.Flate{}, nil
+	case types.EncodingDeltaBitPack:
+		return codec.DeltaBitPack{}, nil
+	case types.EncodingZstd:
+		return codec.Zstd{}, nil
 	default:
 		return nil, fmt.Errorf("missing codec %s", enc)
 	}

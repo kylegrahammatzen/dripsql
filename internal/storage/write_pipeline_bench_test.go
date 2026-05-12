@@ -156,7 +156,7 @@ func BenchmarkStorageReadSegmentDecode(b *testing.B) {
 					b.Fatalf("cache.Close: %v", err)
 				}
 			}()
-			plan, err := newSegmentReadPlan(path, &meta, tc.columns, size, infos, cache)
+			plan, err := newSegmentReadPlan(path, &meta, tc.columns, size, infos, cache, nil)
 			if err != nil {
 				b.Fatalf("newSegmentReadPlan: %v", err)
 			}

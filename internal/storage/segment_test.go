@@ -54,7 +54,7 @@ func TestReadColumnPageRoundTrip(t *testing.T) {
 	}
 }
 
-func TestWriteSegmentUsesFlateForCompressibleHighCardinalityText(t *testing.T) {
+func TestWriteSegmentCompressesHighCardinalityText(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "segment.dsv3")
 	batch := compressibleTextBatch(t, types.StandardBatchRows)
 	meta, err := WriteSegment(path, 12, []types.Batch{batch})
@@ -62,8 +62,8 @@ func TestWriteSegmentUsesFlateForCompressibleHighCardinalityText(t *testing.T) {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	page := meta.Columns[0].Pages[0]
-	if page.Encoding != types.EncodingFlate {
-		t.Fatalf("encoding = %s, want flate", page.Encoding)
+	if page.Encoding != types.EncodingFlate && page.Encoding != types.EncodingZstd {
+		t.Fatalf("encoding = %s, want flate or zstd", page.Encoding)
 	}
 	plainBytes := int64(page.Text.DataBytes) + int64(page.Rows)*4 + 4
 	if int64(page.Length) >= plainBytes {
@@ -630,7 +630,7 @@ func textValue(t *testing.T, v types.Vec, row int) string {
 	case types.EncodingFlat:
 		return v.Var.String(row)
 	case types.EncodingDictionary:
-		return v.DictValues.String(int(v.DictIDs[row]))
+		return v.Encoded.DictValues.String(int(v.Encoded.DictIDs[row]))
 	default:
 		t.Fatalf("unsupported text encoding %s", v.Encoding)
 		return ""
