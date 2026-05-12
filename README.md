@@ -9,9 +9,9 @@ will change.
 - `cmd/cli` — admin shell (`version`, `exec`, `query`).
 - `cmd/bench` — workload benchmark driver.
 - `internal/engine` — DB lifecycle, query/exec, EXPLAIN.
-- `internal/explain` — report types and renderers.
 - `internal/storage` — immutable columnar segments, predicate pushdown.
 - `internal/sql` — parser, binder, logical plan.
+- `internal/exec` — push-based vector operators (scan/filter/aggregate/project/sort/limit).
 - `internal/types` — table specs, typed batches, and vectors.
 
 ## Tests
@@ -103,7 +103,7 @@ Four query modes decompose the latency picture:
 - `byte-cold`: DB stays open; the in-process byte cache is cleared between samples.
 - `cold-ish`: DB closed and reopened between every sample.
 
-On this profile, `user id lookup` cold-ish lands at **~30 ms best / ~40 ms avg** at 5-segment scale (10M rows, 2M-row segments). Scaling up to 100M rows (763 default-sized segments) puts cold-ish at **~465 ms best / ~490 ms avg**. Cold-ish cost is in the open path, not the query path: `byte-cold` for the same query is 100–200 µs, which is the actual query-and-byte-cache-miss work.
+On this profile, `user id lookup` cold-ish lands at **~30 ms best / ~40 ms avg** at 5-segment scale (10M rows, 2M-row segments). Scaling up to 100M rows (763 default-sized segments) puts cold-ish at **~180 ms best / ~210 ms avg** after the lazy-column-decode pass (down from ~465 ms / ~490 ms when every footer eagerly allocated heavy fields). Cold-ish cost is in the open path, not the query path: `byte-cold` for the same query is 100–200 µs, which is the actual query-and-byte-cache-miss work.
 
 OS file cache is not dropped (no portable way without admin), so cold-ish still measures "first query after process restart" rather than truly cold disk.
 
