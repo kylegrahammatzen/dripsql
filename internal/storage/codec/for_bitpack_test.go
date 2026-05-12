@@ -19,6 +19,7 @@ func TestFORBitPackRoundTripNumericKinds(t *testing.T) {
 		{name: "int64", vec: types.Vec{Kind: types.VecInt64, Encoding: types.EncodingFlat, Len: 5, I64: []int64{-10, -8, -7, -4, -3}}},
 		{name: "timestamp", vec: types.Vec{Kind: types.VecTimestamp, Encoding: types.EncodingFlat, Len: 5, I64: []int64{1700000000000, 1700000000001, 1700000000002, 1700000000003, 1700000000004}}},
 		{name: "time", vec: types.Vec{Kind: types.VecTime, Encoding: types.EncodingFlat, Len: 5, I64: []int64{3600000000, 3600001000, 3600002000, 3600003000, 3600004000}}},
+		{name: "enum32", vec: types.Vec{Kind: types.VecEnum32, Encoding: types.EncodingFlat, Len: 6, U32: []uint32{1, 2, 1, 3, 2, 1}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -83,7 +84,7 @@ func TestFORBitPackRejectsUnsupportedInputs(t *testing.T) {
 	if _, ok := (FORBitPack{}).Estimate(textVec("a", "b")); ok {
 		t.Fatal("text estimate should be rejected")
 	}
-	if _, ok := (FORBitPack{}).Estimate(types.Vec{Kind: types.VecInt64, Encoding: types.EncodingConstant, Len: 2, ConstantI64: 7, ConstantValid: true}); ok {
+	if _, ok := (FORBitPack{}).Estimate(types.Vec{Kind: types.VecInt64, Encoding: types.EncodingConstant, Len: 2, Encoded: &types.EncodedState{ConstantI64: 7, ConstantValid: true}}); ok {
 		t.Fatal("non-flat estimate should be rejected")
 	}
 	if _, ok := (FORBitPack{}).Estimate(types.Vec{Kind: types.VecInt64, Encoding: types.EncodingFlat, Len: 3, I64: []int64{7, 7, 7}}); ok {
@@ -154,7 +155,7 @@ func TestFORBitPackBulkUnpackMatchesNaive(t *testing.T) {
 				forBitPackSet(payload, row, width, value)
 			}
 			dst := make([]int64, types.StandardBatchRows)
-			forBitPackUnpackInt64(payload, dst, 0, width)
+			forBitPackUnpack(payload, dst, 0, width)
 			for row := 0; row < types.StandardBatchRows; row++ {
 				want := int64(forBitPackGetNaive(payload, row, width))
 				if dst[row] != want {
@@ -163,7 +164,7 @@ func TestFORBitPackBulkUnpackMatchesNaive(t *testing.T) {
 			}
 			if width <= 32 {
 				dst32 := make([]int32, types.StandardBatchRows)
-				forBitPackUnpackInt32(payload, dst32, 0, width)
+				forBitPackUnpack(payload, dst32, 0, width)
 				for row := 0; row < types.StandardBatchRows; row++ {
 					want := int32(forBitPackGetNaive(payload, row, width))
 					if dst32[row] != want {
@@ -173,7 +174,7 @@ func TestFORBitPackBulkUnpackMatchesNaive(t *testing.T) {
 			}
 			if width <= 16 {
 				dst16 := make([]int16, types.StandardBatchRows)
-				forBitPackUnpackInt16(payload, dst16, 0, width)
+				forBitPackUnpack(payload, dst16, 0, width)
 				for row := 0; row < types.StandardBatchRows; row++ {
 					want := int16(forBitPackGetNaive(payload, row, width))
 					if dst16[row] != want {
@@ -211,6 +212,8 @@ func forBitPackVecEqual(a, b types.Vec) bool {
 		return reflect.DeepEqual(a.I32[:a.Len], b.I32[:b.Len])
 	case types.VecInt64, types.VecTimestamp, types.VecTime:
 		return reflect.DeepEqual(a.I64[:a.Len], b.I64[:b.Len])
+	case types.VecEnum32:
+		return reflect.DeepEqual(a.U32[:a.Len], b.U32[:b.Len])
 	default:
 		return false
 	}

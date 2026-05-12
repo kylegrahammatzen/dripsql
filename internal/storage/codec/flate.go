@@ -2,11 +2,11 @@ package codec
 
 import (
 	"bytes"
-	"compress/flate"
 	"encoding/binary"
 	"fmt"
 	"io"
 
+	"github.com/klauspost/compress/flate"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
@@ -31,18 +31,19 @@ func (Flate) Encode(v types.Vec) (Page, error) {
 }
 
 func (Flate) Prepare(v types.Vec) (PreparedEncoding, bool) {
-	if v.Encoding != types.EncodingFlat || !flateVarBytesKind(v.Kind) {
+	if v.Encoding != types.EncodingFlat || !v.Kind.IsVarBytes() {
 		return nil, false
 	}
-	plain, ok := (Plain{}).Prepare(v)
-	if !ok {
-		return nil, false
-	}
-	plainPage, err := plain.EncodeInto(nil)
-	if err != nil {
-		return nil, false
-	}
-	payload, ok := flatePayload(plainPage.Payload)
+	// Serialize the same plain varbytes layout that Plain.EncodeInto produces
+	// (validity + (rows+1)*4 offset bytes + data) directly into a buffer here,
+	// then compress. The cascade evaluates Plain and Flate as siblings, so
+	// going through Plain.Prepare/EncodeInto would do this work twice.
+	plainSize := validityBytes(v.Valid) + (v.Len+1)*4 + len(v.Var.Data)
+	plainPayload := make([]byte, plainSize)
+	pos := writeValidity(plainPayload, v.Valid)
+	pos += encodeFixedSlice(plainPayload[pos:], v.Var.Offsets[:v.Len+1])
+	copy(plainPayload[pos:], v.Var.Data)
+	payload, ok := flatePayload(plainPayload)
 	if !ok {
 		return nil, false
 	}
@@ -80,7 +81,7 @@ func (Flate) DecodeInto(page Page, dst *types.Vec) error {
 	if err != nil {
 		return err
 	}
-	return decodeFlateVarBytesInto(page, plainPayload, dst)
+	return decodeCompressedVarBytesInto(page, plainPayload, dst)
 }
 
 func (Flate) DecodeSelected(page Page, sel types.SelectionMask) (types.Vec, error) {
@@ -132,7 +133,7 @@ func inflatePayload(page Page) ([]byte, error) {
 	if page.Encoding != types.EncodingFlate {
 		return nil, fmt.Errorf("flate codec cannot decode %s", page.Encoding)
 	}
-	if !flateVarBytesKind(page.Kind) {
+	if !page.Kind.IsVarBytes() {
 		return nil, fmt.Errorf("flate codec unsupported kind %s", page.Kind)
 	}
 	if len(page.Payload) < flateHeaderBytes {
@@ -154,7 +155,10 @@ func inflatePayload(page Page) ([]byte, error) {
 	return plain, nil
 }
 
-func decodeFlateVarBytesInto(page Page, plainPayload []byte, dst *types.Vec) error {
+// decodeCompressedVarBytesInto materializes the inflated/decompressed plain
+// varbytes layout into dst. Shared by every codec that compresses Plain's
+// varbytes payload as a single opaque blob (Flate, Zstd).
+func decodeCompressedVarBytesInto(page Page, plainPayload []byte, dst *types.Vec) error {
 	valid, pos, err := readValidityInto(plainPayload, page.Rows, page.NullCount, dst.Valid)
 	if err != nil {
 		return err
@@ -163,7 +167,7 @@ func decodeFlateVarBytesInto(page Page, plainPayload []byte, dst *types.Vec) err
 	if len(plainPayload)-pos < offsetBytes {
 		return fmt.Errorf("flate varbytes offsets truncated")
 	}
-	preparePlainDecodeVec(dst, page.Kind)
+	resetVecForDecode(dst, page.Kind, false)
 	dst.Kind = page.Kind
 	dst.Encoding = types.EncodingFlat
 	dst.Len = page.Rows
@@ -181,11 +185,3 @@ func decodeFlateVarBytesInto(page Page, plainPayload []byte, dst *types.Vec) err
 	return nil
 }
 
-func flateVarBytesKind(kind types.VecKind) bool {
-	switch kind {
-	case types.VecText, types.VecBytes, types.VecJSON:
-		return true
-	default:
-		return false
-	}
-}

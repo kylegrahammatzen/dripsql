@@ -23,24 +23,35 @@ func fixedKindBytes(kind types.VecKind) (int, bool) {
 	return 0, false
 }
 
-// expectFixedPayload validates that a single-value fixed-width payload has the
-// right length for kind. Returns the size on success, or a wrapped error.
-func expectFixedPayload(payload []byte, kind types.VecKind, label string) (int, error) {
-	size, ok := fixedKindBytes(kind)
-	if !ok {
-		return 0, fmt.Errorf("%s codec unsupported kind %s", label, kind)
+// resizeSlice returns a slice of length n that reuses dst's backing array
+// when cap(dst) >= n, allocating fresh otherwise. Used by every codec's
+// DecodeInto path to amortize allocations across repeated decodes.
+func resizeSlice[S ~[]E, E any](dst S, n int) S {
+	if cap(dst) < n {
+		return make(S, n)
 	}
-	if len(payload) != size {
-		return 0, fmt.Errorf("%s %s payload length %d", label, kind, len(payload))
-	}
-	return size, nil
+	return dst[:n]
 }
 
-// clearVecCodecFields zeros every codec-specific field on v, preserving the
-// typed slice that matches keepKind so its capacity can be reused on the next
-// decode. Pass keepDict=true to keep DictIDs/DictValues for dictionary-decode
-// reuse. Constant/FOR/Run fields are always cleared.
-func clearVecCodecFields(v *types.Vec, keepKind types.VecKind, keepDict bool) {
+// expectFixedPayload validates that a single-value fixed-width payload has the
+// right length for kind.
+func expectFixedPayload(payload []byte, kind types.VecKind, label string) error {
+	size, ok := fixedKindBytes(kind)
+	if !ok {
+		return fmt.Errorf("%s codec unsupported kind %s", label, kind)
+	}
+	if len(payload) != size {
+		return fmt.Errorf("%s %s payload length %d", label, kind, len(payload))
+	}
+	return nil
+}
+
+// resetVecForDecode prepares a destination Vec for an in-place codec decode.
+// Every typed slice that doesn't match keepKind is dropped so the capacity it
+// holds can be GC'd, and v.Encoded is dropped unless keepEncoded is set (the
+// dictionary codec passes true so its DictIDs/DictValues backing arrays stay
+// available for reuse on the next decode).
+func resetVecForDecode(v *types.Vec, keepKind types.VecKind, keepEncoded bool) {
 	if keepKind != types.VecBool {
 		v.BoolBits = nil
 	}
@@ -65,16 +76,10 @@ func clearVecCodecFields(v *types.Vec, keepKind types.VecKind, keepDict bool) {
 	if keepKind != types.VecEnum32 {
 		v.U32 = nil
 	}
-	if keepKind != types.VecText && keepKind != types.VecBytes && keepKind != types.VecJSON {
+	if !keepKind.IsVarBytes() {
 		v.Var = types.VarBytes{}
 	}
-	if !keepDict {
-		v.DictIDs = nil
-		v.DictValues = types.VarBytes{}
+	if !keepEncoded {
+		v.Encoded = nil
 	}
-	v.ConstantBytes = nil
-	v.FORBase = 0
-	v.FORWidth = 0
-	v.FORData = nil
-	v.Runs = nil
 }

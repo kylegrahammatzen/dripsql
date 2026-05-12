@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/bits"
+	"unsafe"
 
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
@@ -55,11 +56,19 @@ func (p preparedFORBitPack) EncodeInto(scratch []byte) (Page, error) {
 	pos++
 	switch p.vec.Kind {
 	case types.VecInt16:
-		forBitPackPackInt16(payload[pos:], p.vec.I16[:p.vec.Len], p.vec.Valid, p.base, p.width)
+		forBitPackPack(payload[pos:], p.vec.I16[:p.vec.Len], p.vec.Valid, p.base, p.width)
 	case types.VecInt32, types.VecDate:
-		forBitPackPackInt32(payload[pos:], p.vec.I32[:p.vec.Len], p.vec.Valid, p.base, p.width)
+		forBitPackPack(payload[pos:], p.vec.I32[:p.vec.Len], p.vec.Valid, p.base, p.width)
 	case types.VecInt64, types.VecTimestamp, types.VecTime:
-		forBitPackPackInt64(payload[pos:], p.vec.I64[:p.vec.Len], p.vec.Valid, p.base, p.width)
+		forBitPackPack(payload[pos:], p.vec.I64[:p.vec.Len], p.vec.Valid, p.base, p.width)
+	case types.VecEnum32:
+		// Enum codes are stored as uint32; reinterpret as int32 since the
+		// FOR pack writes (value - base) as a width-bit unsigned offset and
+		// the sign of the input doesn't affect that arithmetic.
+		if p.vec.Len > 0 {
+			i32 := unsafe.Slice((*int32)(unsafe.Pointer(&p.vec.U32[0])), p.vec.Len)
+			forBitPackPack(payload[pos:], i32, p.vec.Valid, p.base, p.width)
+		}
 	}
 	return Page{Kind: p.vec.Kind, Encoding: types.EncodingFORBitPack, Rows: p.vec.Len, NullCount: types.NullCount(p.vec.Valid, p.vec.Len), Payload: payload}, nil
 }
@@ -76,7 +85,7 @@ func (FORBitPack) DecodeEncoded(page Page) (types.Vec, error) {
 	if page.Encoding != types.EncodingFORBitPack {
 		return types.Vec{}, fmt.Errorf("for+bitpack cannot decode encoded %s", page.Encoding)
 	}
-	if !forBitPackSupportedKind(page.Kind) {
+	if !page.Kind.IsFORPackable() {
 		return types.Vec{}, fmt.Errorf("for+bitpack unsupported kind %s", page.Kind)
 	}
 	valid, pos, err := readValidity(page.Payload, page.Rows, page.NullCount)
@@ -99,7 +108,7 @@ func (FORBitPack) DecodeEncoded(page Page) (types.Vec, error) {
 	}
 	data := make([]byte, packedBytes)
 	copy(data, page.Payload[pos:pos+packedBytes])
-	return types.Vec{Kind: page.Kind, Encoding: types.EncodingFORBitPack, Len: page.Rows, Valid: valid, FORBase: base, FORWidth: width, FORData: data}, nil
+	return types.Vec{Kind: page.Kind, Encoding: types.EncodingFORBitPack, Len: page.Rows, Valid: valid, Encoded: &types.EncodedState{FORBase: base, FORWidth: width, FORData: data}}, nil
 }
 
 func (FORBitPack) DecodeInto(page Page, dst *types.Vec) error {
@@ -109,7 +118,7 @@ func (FORBitPack) DecodeInto(page Page, dst *types.Vec) error {
 	if page.Encoding != types.EncodingFORBitPack {
 		return fmt.Errorf("for+bitpack cannot decode %s", page.Encoding)
 	}
-	if !forBitPackSupportedKind(page.Kind) {
+	if !page.Kind.IsFORPackable() {
 		return fmt.Errorf("for+bitpack unsupported kind %s", page.Kind)
 	}
 	valid, pos, err := readValidityInto(page.Payload, page.Rows, page.NullCount, dst.Valid)
@@ -130,7 +139,7 @@ func (FORBitPack) DecodeInto(page Page, dst *types.Vec) error {
 	if len(page.Payload)-pos < packedBytes {
 		return fmt.Errorf("for+bitpack values truncated")
 	}
-	preparePlainDecodeVec(dst, page.Kind)
+	resetVecForDecode(dst, page.Kind, false)
 	dst.Kind = page.Kind
 	dst.Encoding = types.EncodingFlat
 	dst.Len = page.Rows
@@ -139,15 +148,35 @@ func (FORBitPack) DecodeInto(page Page, dst *types.Vec) error {
 	switch page.Kind {
 	case types.VecInt16:
 		dst.I16 = resizeSlice(dst.I16, page.Rows)
-		forBitPackUnpackInt16(data, dst.I16, base, width)
+		forBitPackUnpack(data, dst.I16, base, width)
 	case types.VecInt32, types.VecDate:
 		dst.I32 = resizeSlice(dst.I32, page.Rows)
-		forBitPackUnpackInt32(data, dst.I32, base, width)
+		forBitPackUnpack(data, dst.I32, base, width)
 	case types.VecInt64, types.VecTimestamp, types.VecTime:
 		dst.I64 = resizeSlice(dst.I64, page.Rows)
-		forBitPackUnpackInt64(data, dst.I64, base, width)
+		forBitPackUnpack(data, dst.I64, base, width)
+	case types.VecEnum32:
+		dst.U32 = resizeSlice(dst.U32, page.Rows)
+		if page.Rows > 0 {
+			i32 := unsafe.Slice((*int32)(unsafe.Pointer(&dst.U32[0])), page.Rows)
+			forBitPackUnpack(data, i32, base, width)
+		}
 	}
 	return nil
+}
+
+// DecodeSelected bulk-decodes the page and ignores sel because the per-row offset-extraction path benchmarked 3-11× slower than DecodeInto at every density we measured.
+func (FORBitPack) DecodeSelected(page Page, sel types.SelectionMask) (types.Vec, error) {
+	if page.Encoding != types.EncodingFORBitPack {
+		return types.Vec{}, fmt.Errorf("for+bitpack cannot decode selected %s", page.Encoding)
+	}
+	if !page.Kind.IsFORPackable() {
+		return types.Vec{}, fmt.Errorf("for+bitpack unsupported kind %s", page.Kind)
+	}
+	if sel.Rows != page.Rows {
+		return types.Vec{}, fmt.Errorf("selection rows %d do not match page rows %d", sel.Rows, page.Rows)
+	}
+	return (FORBitPack{}).Decode(page)
 }
 
 func (FORBitPack) Estimate(v types.Vec) (int, bool) {
@@ -162,49 +191,42 @@ func (FORBitPack) Estimate(v types.Vec) (int, bool) {
 	return forBitPackPayloadSize(v.Len, v.Valid, width), true
 }
 
-func forBitPackSupportedKind(kind types.VecKind) bool {
-	switch kind {
-	case types.VecInt16, types.VecInt32, types.VecDate, types.VecInt64, types.VecTimestamp, types.VecTime:
-		return true
-	default:
-		return false
-	}
-}
-
-func forBitPackValue(v types.Vec, row int) int64 {
-	switch v.Kind {
-	case types.VecInt16:
-		return int64(v.I16[row])
-	case types.VecInt32, types.VecDate:
-		return int64(v.I32[row])
-	case types.VecInt64, types.VecTimestamp, types.VecTime:
-		return v.I64[row]
-	default:
-		panic("for+bitpack unsupported kind")
-	}
-}
-
 func forBitPackRange(v types.Vec) (int64, int64, bool) {
-	if v.Encoding != types.EncodingFlat || v.Len <= 0 || !forBitPackSupportedKind(v.Kind) {
+	if v.Encoding != types.EncodingFlat || v.Len <= 0 || !v.Kind.IsFORPackable() {
 		return 0, 0, false
 	}
+	switch v.Kind {
+	case types.VecInt16:
+		return rangeOver(v.I16[:v.Len], v.Valid)
+	case types.VecInt32, types.VecDate:
+		return rangeOver(v.I32[:v.Len], v.Valid)
+	case types.VecInt64, types.VecTimestamp, types.VecTime:
+		return rangeOver(v.I64[:v.Len], v.Valid)
+	case types.VecEnum32:
+		return rangeOver(v.U32[:v.Len], v.Valid)
+	}
+	return 0, 0, false
+}
+
+// rangeOver returns the min/max valid value in values, or (0,0,false) if no
+// row is valid. Hoists the kind switch out of the per-row loop so the inner
+// loop is a tight typed comparison.
+func rangeOver[T int16 | int32 | int64 | uint32](values []T, valid types.Validity) (int64, int64, bool) {
 	found := false
-	minValue := int64(0)
-	maxValue := int64(0)
-	for row := 0; row < v.Len; row++ {
-		if !types.IsValid(v.Valid, row) {
+	var minValue, maxValue T
+	for i, v := range values {
+		if !types.IsValid(valid, i) {
 			continue
 		}
-		value := forBitPackValue(v, row)
-		if !found || value < minValue {
-			minValue = value
+		if !found || v < minValue {
+			minValue = v
 		}
-		if !found || value > maxValue {
-			maxValue = value
+		if !found || v > maxValue {
+			maxValue = v
 		}
 		found = true
 	}
-	return minValue, maxValue, found
+	return int64(minValue), int64(maxValue), found
 }
 
 func forBitPackPayloadSize(rows int, valid types.Validity, width int) int {
@@ -234,79 +256,11 @@ func forBitPackGetNaive(payload []byte, row int, width int) uint64 {
 	return value
 }
 
-// forBitPackPackInt64 packs values into dst using width bits each, after
-// subtracting base. Mirrors the unpacker structure: aligned widths take
-// direct typed writes; widths 1-56 use a single-word window with read-OR-
-// write; widths 57-63 fall back to bit-by-bit. Null rows are skipped (the
-// payload is pre-zeroed by make).
-func forBitPackPackInt64(dst []byte, values []int64, valid types.Validity, base int64, width int) {
-	n := len(values)
-	switch width {
-	case 8:
-		for i := 0; i < n; i++ {
-			if !types.IsValid(valid, i) {
-				continue
-			}
-			dst[i] = byte(uint64(values[i]) - uint64(base))
-		}
-	case 16:
-		for i := 0; i < n; i++ {
-			if !types.IsValid(valid, i) {
-				continue
-			}
-			binary.LittleEndian.PutUint16(dst[i*2:i*2+2], uint16(uint64(values[i])-uint64(base)))
-		}
-	case 32:
-		for i := 0; i < n; i++ {
-			if !types.IsValid(valid, i) {
-				continue
-			}
-			binary.LittleEndian.PutUint32(dst[i*4:i*4+4], uint32(uint64(values[i])-uint64(base)))
-		}
-	case 64:
-		for i := 0; i < n; i++ {
-			if !types.IsValid(valid, i) {
-				continue
-			}
-			binary.LittleEndian.PutUint64(dst[i*8:i*8+8], uint64(values[i])-uint64(base))
-		}
-	default:
-		if width <= 56 {
-			mask := (uint64(1) << uint(width)) - 1
-			safe := n
-			for safe > 0 && ((safe-1)*width>>3)+8 > len(dst) {
-				safe--
-			}
-			for i := 0; i < safe; i++ {
-				if !types.IsValid(valid, i) {
-					continue
-				}
-				v := (uint64(values[i]) - uint64(base)) & mask
-				bitOff := i * width
-				byteOff := bitOff >> 3
-				shift := uint(bitOff & 7)
-				word := binary.LittleEndian.Uint64(dst[byteOff : byteOff+8])
-				word |= v << shift
-				binary.LittleEndian.PutUint64(dst[byteOff:byteOff+8], word)
-			}
-			for i := safe; i < n; i++ {
-				if !types.IsValid(valid, i) {
-					continue
-				}
-				forBitPackSet(dst, i, width, uint64(values[i])-uint64(base))
-			}
-		} else {
-			for i := 0; i < n; i++ {
-				if !types.IsValid(valid, i) {
-					continue
-				}
-				forBitPackSet(dst, i, width, uint64(values[i])-uint64(base))
-			}
-		}
-	}
-}
-
-func forBitPackPackInt32(dst []byte, values []int32, valid types.Validity, base int64, width int) {
+// forBitPackPack packs values into dst using width bits each, after
+// subtracting base. Aligned widths take direct typed writes; widths 1-56 use a
+// single-word window with read-OR-write; widths 57-63 fall back to bit-by-bit.
+// Null rows are skipped (the payload is pre-zeroed by make).
+func forBitPackPack[T ~int16 | ~int32 | ~int64](dst []byte, values []T, valid types.Validity, base int64, width int) {
 	n := len(values)
 	switch width {
 	case 8:
@@ -330,88 +284,61 @@ func forBitPackPackInt32(dst []byte, values []int32, valid types.Validity, base 
 			}
 			binary.LittleEndian.PutUint32(dst[i*4:i*4+4], uint32(uint64(int64(values[i]))-uint64(base)))
 		}
-	default:
-		mask := (uint64(1) << uint(width)) - 1
-		safe := n
-		for safe > 0 && ((safe-1)*width>>3)+8 > len(dst) {
-			safe--
-		}
-		for i := 0; i < safe; i++ {
-			if !types.IsValid(valid, i) {
-				continue
-			}
-			v := (uint64(int64(values[i])) - uint64(base)) & mask
-			bitOff := i * width
-			byteOff := bitOff >> 3
-			shift := uint(bitOff & 7)
-			word := binary.LittleEndian.Uint64(dst[byteOff : byteOff+8])
-			word |= v << shift
-			binary.LittleEndian.PutUint64(dst[byteOff:byteOff+8], word)
-		}
-		for i := safe; i < n; i++ {
-			if !types.IsValid(valid, i) {
-				continue
-			}
-			forBitPackSet(dst, i, width, uint64(int64(values[i]))-uint64(base))
-		}
-	}
-}
-
-func forBitPackPackInt16(dst []byte, values []int16, valid types.Validity, base int64, width int) {
-	n := len(values)
-	switch width {
-	case 8:
+	case 64:
 		for i := 0; i < n; i++ {
 			if !types.IsValid(valid, i) {
 				continue
 			}
-			dst[i] = byte(uint64(int64(values[i])) - uint64(base))
-		}
-	case 16:
-		for i := 0; i < n; i++ {
-			if !types.IsValid(valid, i) {
-				continue
-			}
-			binary.LittleEndian.PutUint16(dst[i*2:i*2+2], uint16(uint64(int64(values[i]))-uint64(base)))
+			binary.LittleEndian.PutUint64(dst[i*8:i*8+8], uint64(int64(values[i]))-uint64(base))
 		}
 	default:
-		mask := (uint64(1) << uint(width)) - 1
-		safe := n
-		for safe > 0 && ((safe-1)*width>>3)+8 > len(dst) {
-			safe--
-		}
-		for i := 0; i < safe; i++ {
-			if !types.IsValid(valid, i) {
-				continue
+		if width <= 56 {
+			mask := (uint64(1) << uint(width)) - 1
+			safe := n
+			for safe > 0 && ((safe-1)*width>>3)+8 > len(dst) {
+				safe--
 			}
-			v := (uint64(int64(values[i])) - uint64(base)) & mask
-			bitOff := i * width
-			byteOff := bitOff >> 3
-			shift := uint(bitOff & 7)
-			word := binary.LittleEndian.Uint64(dst[byteOff : byteOff+8])
-			word |= v << shift
-			binary.LittleEndian.PutUint64(dst[byteOff:byteOff+8], word)
-		}
-		for i := safe; i < n; i++ {
-			if !types.IsValid(valid, i) {
-				continue
+			for i := 0; i < safe; i++ {
+				if !types.IsValid(valid, i) {
+					continue
+				}
+				v := (uint64(int64(values[i])) - uint64(base)) & mask
+				bitOff := i * width
+				byteOff := bitOff >> 3
+				shift := uint(bitOff & 7)
+				word := binary.LittleEndian.Uint64(dst[byteOff : byteOff+8])
+				word |= v << shift
+				binary.LittleEndian.PutUint64(dst[byteOff:byteOff+8], word)
 			}
-			forBitPackSet(dst, i, width, uint64(int64(values[i]))-uint64(base))
+			for i := safe; i < n; i++ {
+				if !types.IsValid(valid, i) {
+					continue
+				}
+				forBitPackSet(dst, i, width, uint64(int64(values[i]))-uint64(base))
+			}
+		} else {
+			for i := 0; i < n; i++ {
+				if !types.IsValid(valid, i) {
+					continue
+				}
+				forBitPackSet(dst, i, width, uint64(int64(values[i]))-uint64(base))
+			}
 		}
 	}
 }
 
-// forBitPackUnpackInt64 decodes a bitpacked payload into dst, adding base.
-// Width is hoisted out of the row loop. Aligned widths (8/16/32/64) take
-// direct read paths; widths 1-56 use a single-word window (one uint64 read per
-// value); widths 57-63 fall back to bit-by-bit. Tail rows whose 8-byte read
-// would overrun the payload also use the bit-by-bit path.
-func forBitPackUnpackInt64(data []byte, dst []int64, base int64, width int) {
+// forBitPackUnpack decodes a bitpacked payload into dst, adding base. Width is
+// hoisted out of the row loop. Aligned widths (8/16/32/64) and the common
+// 10/12/24 widths take direct read paths; other widths 1-56 use a single-word
+// window (one uint64 read per value); widths 57-63 fall back to bit-by-bit.
+// Tail rows whose 8-byte read would overrun the payload also use the
+// bit-by-bit path.
+func forBitPackUnpack[T ~int16 | ~int32 | ~int64](data []byte, dst []T, base int64, width int) {
 	n := len(dst)
 	switch width {
 	case 8:
 		for i := 0; i < n; i++ {
-			dst[i] = base + int64(data[i])
+			dst[i] = T(base + int64(data[i]))
 		}
 	case 10:
 		forBitPackUnpackWidth10(data, dst, base)
@@ -419,17 +346,17 @@ func forBitPackUnpackInt64(data []byte, dst []int64, base int64, width int) {
 		forBitPackUnpackWidth12(data, dst, base)
 	case 16:
 		for i := 0; i < n; i++ {
-			dst[i] = base + int64(binary.LittleEndian.Uint16(data[i*2:i*2+2]))
+			dst[i] = T(base + int64(binary.LittleEndian.Uint16(data[i*2:i*2+2])))
 		}
 	case 24:
 		forBitPackUnpackWidth24(data, dst, base)
 	case 32:
 		for i := 0; i < n; i++ {
-			dst[i] = base + int64(binary.LittleEndian.Uint32(data[i*4:i*4+4]))
+			dst[i] = T(base + int64(binary.LittleEndian.Uint32(data[i*4:i*4+4])))
 		}
 	case 64:
 		for i := 0; i < n; i++ {
-			dst[i] = base + int64(binary.LittleEndian.Uint64(data[i*8:i*8+8]))
+			dst[i] = T(base + int64(binary.LittleEndian.Uint64(data[i*8:i*8+8])))
 		}
 	default:
 		if width <= 56 {
@@ -443,89 +370,15 @@ func forBitPackUnpackInt64(data []byte, dst []int64, base int64, width int) {
 				byteOff := bitOff >> 3
 				shift := uint(bitOff & 7)
 				word := binary.LittleEndian.Uint64(data[byteOff : byteOff+8])
-				dst[i] = base + int64((word>>shift)&mask)
+				dst[i] = T(base + int64((word>>shift)&mask))
 			}
 			for i := safe; i < n; i++ {
-				dst[i] = base + int64(forBitPackGetNaive(data, i, width))
+				dst[i] = T(base + int64(forBitPackGetNaive(data, i, width)))
 			}
 		} else {
 			for i := 0; i < n; i++ {
-				dst[i] = base + int64(forBitPackGetNaive(data, i, width))
+				dst[i] = T(base + int64(forBitPackGetNaive(data, i, width)))
 			}
-		}
-	}
-}
-
-func forBitPackUnpackInt32(data []byte, dst []int32, base int64, width int) {
-	n := len(dst)
-	switch width {
-	case 8:
-		for i := 0; i < n; i++ {
-			dst[i] = int32(base + int64(data[i]))
-		}
-	case 10:
-		forBitPackUnpackWidth10(data, dst, base)
-	case 12:
-		forBitPackUnpackWidth12(data, dst, base)
-	case 16:
-		for i := 0; i < n; i++ {
-			dst[i] = int32(base + int64(binary.LittleEndian.Uint16(data[i*2:i*2+2])))
-		}
-	case 24:
-		forBitPackUnpackWidth24(data, dst, base)
-	case 32:
-		for i := 0; i < n; i++ {
-			dst[i] = int32(base + int64(binary.LittleEndian.Uint32(data[i*4:i*4+4])))
-		}
-	default:
-		mask := (uint64(1) << uint(width)) - 1
-		safe := n
-		for safe > 0 && ((safe-1)*width>>3)+8 > len(data) {
-			safe--
-		}
-		for i := 0; i < safe; i++ {
-			bitOff := i * width
-			byteOff := bitOff >> 3
-			shift := uint(bitOff & 7)
-			word := binary.LittleEndian.Uint64(data[byteOff : byteOff+8])
-			dst[i] = int32(base + int64((word>>shift)&mask))
-		}
-		for i := safe; i < n; i++ {
-			dst[i] = int32(base + int64(forBitPackGetNaive(data, i, width)))
-		}
-	}
-}
-
-func forBitPackUnpackInt16(data []byte, dst []int16, base int64, width int) {
-	n := len(dst)
-	switch width {
-	case 8:
-		for i := 0; i < n; i++ {
-			dst[i] = int16(base + int64(data[i]))
-		}
-	case 10:
-		forBitPackUnpackWidth10(data, dst, base)
-	case 12:
-		forBitPackUnpackWidth12(data, dst, base)
-	case 16:
-		for i := 0; i < n; i++ {
-			dst[i] = int16(base + int64(binary.LittleEndian.Uint16(data[i*2:i*2+2])))
-		}
-	default:
-		mask := (uint64(1) << uint(width)) - 1
-		safe := n
-		for safe > 0 && ((safe-1)*width>>3)+8 > len(data) {
-			safe--
-		}
-		for i := 0; i < safe; i++ {
-			bitOff := i * width
-			byteOff := bitOff >> 3
-			shift := uint(bitOff & 7)
-			word := binary.LittleEndian.Uint64(data[byteOff : byteOff+8])
-			dst[i] = int16(base + int64((word>>shift)&mask))
-		}
-		for i := safe; i < n; i++ {
-			dst[i] = int16(base + int64(forBitPackGetNaive(data, i, width)))
 		}
 	}
 }
@@ -568,7 +421,7 @@ func forBitPackUnpackWidth12[T ~int16 | ~int32 | ~int64](data []byte, dst []T, b
 	}
 }
 
-func forBitPackUnpackWidth24[T ~int32 | ~int64](data []byte, dst []T, base int64) {
+func forBitPackUnpackWidth24[T ~int16 | ~int32 | ~int64](data []byte, dst []T, base int64) {
 	for i := 0; i < len(dst); i++ {
 		in := i * 3
 		value := uint64(data[in]) |

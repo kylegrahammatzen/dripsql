@@ -113,7 +113,7 @@ func (Dictionary) DecodeSelected(page Page, sel types.SelectionMask) (types.Vec,
 			ids[row] = encodedIDs[row]
 		}
 	})
-	return types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: page.Rows, Valid: valid, DictIDs: ids, DictValues: types.VarBytes{Offsets: offsets, Data: data}}, nil
+	return types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: page.Rows, Valid: valid, Encoded: &types.EncodedState{DictIDs: ids, DictValues: types.VarBytes{Offsets: offsets, Data: data}}}, nil
 }
 
 func (Dictionary) DecodeInto(page Page, dst *types.Vec) error {
@@ -127,11 +127,14 @@ func (Dictionary) DecodeInto(page Page, dst *types.Vec) error {
 	if err != nil {
 		return err
 	}
-	prepareDictionaryDecodeVec(dst)
+	resetVecForDecode(dst, 0, true)
 	dst.Kind = types.VecText
 	dst.Encoding = types.EncodingDictionary
 	dst.Len = page.Rows
 	dst.Valid = valid
+	if dst.Encoded == nil {
+		dst.Encoded = &types.EncodedState{}
+	}
 	if len(page.Payload)-pos < 2 {
 		return fmt.Errorf("dictionary payload missing count")
 	}
@@ -144,22 +147,20 @@ func (Dictionary) DecodeInto(page Page, dst *types.Vec) error {
 	if len(page.Payload)-pos < offsetBytes {
 		return fmt.Errorf("dictionary offsets truncated")
 	}
-	offsets := resizeSlice(dst.DictValues.Offsets, count+1)
-	for i := range offsets {
-		offsets[i] = binary.LittleEndian.Uint32(page.Payload[pos : pos+4])
-		pos += 4
-	}
+	offsets := resizeSlice(dst.Encoded.DictValues.Offsets, count+1)
+	decodeFixedSlice(offsets, page.Payload[pos:])
+	pos += offsetBytes
 	dataLen := int(offsets[count])
 	if len(page.Payload)-pos < dataLen+page.Rows {
 		return fmt.Errorf("dictionary payload truncated")
 	}
-	data := resizeSlice(dst.DictValues.Data, dataLen)
+	data := resizeSlice(dst.Encoded.DictValues.Data, dataLen)
 	copy(data, page.Payload[pos:pos+dataLen])
 	pos += dataLen
-	ids := resizeSlice(dst.DictIDs, page.Rows)
+	ids := resizeSlice(dst.Encoded.DictIDs, page.Rows)
 	copy(ids, page.Payload[pos:pos+page.Rows])
-	dst.DictIDs = ids
-	dst.DictValues = types.VarBytes{Offsets: offsets, Data: data}
+	dst.Encoded.DictIDs = ids
+	dst.Encoded.DictValues = types.VarBytes{Offsets: offsets, Data: data}
 	return nil
 }
 

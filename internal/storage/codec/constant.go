@@ -39,50 +39,36 @@ func (Constant) Decode(page Page) (types.Vec, error) {
 	return v, nil
 }
 
+// DecodeEncoded materializes a Constant page in non-flat form so consumers
+// (today: aggregate sinks like Sum/Min/Max over integer kinds) can read the
+// repeated value once instead of expanding it across rows. Only integer-shaped
+// kinds are supported because that's the only encoded surface any consumer
+// reads; non-int kinds are routed through plain decode by the segment reader.
 func (Constant) DecodeEncoded(page Page) (types.Vec, error) {
 	if page.Encoding != types.EncodingConstant {
 		return types.Vec{}, fmt.Errorf("constant codec cannot decode encoded %s", page.Encoding)
 	}
-	out := types.Vec{Kind: page.Kind, Encoding: types.EncodingConstant, Len: page.Rows, ConstantValid: true}
+	out := types.Vec{Kind: page.Kind, Encoding: types.EncodingConstant, Len: page.Rows, Encoded: &types.EncodedState{ConstantValid: true}}
 	if page.NullCount == page.Rows {
-		out.ConstantValid = false
-		out.Valid = types.NewValidity(page.Rows)
-		for row := 0; row < page.Rows; row++ {
-			types.SetInvalid(out.Valid, row)
-		}
+		out.Encoded.ConstantValid = false
+		out.Valid = make(types.Validity, types.ValidityWords(page.Rows))
 		return out, nil
 	}
 	if page.NullCount != 0 {
 		return types.Vec{}, fmt.Errorf("constant codec cannot expose partial-null page")
 	}
+	if err := expectFixedPayload(page.Payload, page.Kind, "constant"); err != nil {
+		return types.Vec{}, err
+	}
 	switch page.Kind {
-	case types.VecBool:
-		if len(page.Payload) != 1 {
-			return types.Vec{}, fmt.Errorf("constant bool payload length %d", len(page.Payload))
-		}
-		out.ConstantBool = page.Payload[0] != 0
-	case types.VecText, types.VecBytes, types.VecJSON:
-		out.ConstantBytes = append([]byte(nil), page.Payload...)
+	case types.VecInt16:
+		out.Encoded.ConstantI64 = int64(int16(binary.LittleEndian.Uint16(page.Payload)))
+	case types.VecInt32, types.VecDate:
+		out.Encoded.ConstantI64 = int64(int32(binary.LittleEndian.Uint32(page.Payload)))
+	case types.VecInt64, types.VecDecimal64, types.VecTimestamp, types.VecTime:
+		out.Encoded.ConstantI64 = int64(binary.LittleEndian.Uint64(page.Payload))
 	default:
-		if _, err := expectFixedPayload(page.Payload, page.Kind, "constant"); err != nil {
-			return types.Vec{}, err
-		}
-		switch page.Kind {
-		case types.VecInt16:
-			out.ConstantI64 = int64(int16(binary.LittleEndian.Uint16(page.Payload)))
-		case types.VecInt32, types.VecDate:
-			out.ConstantI64 = int64(int32(binary.LittleEndian.Uint32(page.Payload)))
-		case types.VecInt64, types.VecDecimal64, types.VecTimestamp, types.VecTime:
-			out.ConstantI64 = int64(binary.LittleEndian.Uint64(page.Payload))
-		case types.VecFloat32:
-			out.ConstantF64 = float64(math.Float32frombits(binary.LittleEndian.Uint32(page.Payload)))
-		case types.VecFloat64:
-			out.ConstantF64 = math.Float64frombits(binary.LittleEndian.Uint64(page.Payload))
-		case types.VecUUID:
-			copy(out.ConstantUUID[:], page.Payload)
-		case types.VecEnum32:
-			out.ConstantU32 = binary.LittleEndian.Uint32(page.Payload)
-		}
+		return types.Vec{}, fmt.Errorf("constant codec encoded form unsupported for kind %s", page.Kind)
 	}
 	return out, nil
 }
@@ -96,10 +82,7 @@ func (Constant) DecodeSelected(page Page, sel types.SelectionMask) (types.Vec, e
 	}
 	out := types.Vec{Kind: page.Kind, Encoding: types.EncodingFlat, Len: page.Rows}
 	if page.NullCount == page.Rows {
-		out.Valid = types.NewValidity(page.Rows)
-		for row := 0; row < page.Rows; row++ {
-			types.SetInvalid(out.Valid, row)
-		}
+		out.Valid = make(types.Validity, types.ValidityWords(page.Rows))
 		if err := fillConstantZero(&out, page.Kind, page.Rows); err != nil {
 			return types.Vec{}, err
 		}
@@ -127,39 +110,26 @@ func (Constant) DecodeSelected(page Page, sel types.SelectionMask) (types.Vec, e
 		}
 		out.Var = varBytes
 	default:
-		if _, err := expectFixedPayload(page.Payload, page.Kind, "constant"); err != nil {
+		if err := expectFixedPayload(page.Payload, page.Kind, "constant"); err != nil {
 			return types.Vec{}, err
 		}
 		switch page.Kind {
 		case types.VecInt16:
-			value := int16(binary.LittleEndian.Uint16(page.Payload))
-			out.I16 = make([]int16, page.Rows)
-			sel.IterSet(func(row int) { out.I16[row] = value })
+			out.I16 = fillConstantSelectedSlice(page.Rows, int16(binary.LittleEndian.Uint16(page.Payload)), sel)
 		case types.VecInt32, types.VecDate:
-			value := int32(binary.LittleEndian.Uint32(page.Payload))
-			out.I32 = make([]int32, page.Rows)
-			sel.IterSet(func(row int) { out.I32[row] = value })
+			out.I32 = fillConstantSelectedSlice(page.Rows, int32(binary.LittleEndian.Uint32(page.Payload)), sel)
 		case types.VecInt64, types.VecDecimal64, types.VecTimestamp, types.VecTime:
-			value := int64(binary.LittleEndian.Uint64(page.Payload))
-			out.I64 = make([]int64, page.Rows)
-			sel.IterSet(func(row int) { out.I64[row] = value })
+			out.I64 = fillConstantSelectedSlice(page.Rows, int64(binary.LittleEndian.Uint64(page.Payload)), sel)
 		case types.VecFloat32:
-			value := math.Float32frombits(binary.LittleEndian.Uint32(page.Payload))
-			out.F32 = make([]float32, page.Rows)
-			sel.IterSet(func(row int) { out.F32[row] = value })
+			out.F32 = fillConstantSelectedSlice(page.Rows, math.Float32frombits(binary.LittleEndian.Uint32(page.Payload)), sel)
 		case types.VecFloat64:
-			value := math.Float64frombits(binary.LittleEndian.Uint64(page.Payload))
-			out.F64 = make([]float64, page.Rows)
-			sel.IterSet(func(row int) { out.F64[row] = value })
+			out.F64 = fillConstantSelectedSlice(page.Rows, math.Float64frombits(binary.LittleEndian.Uint64(page.Payload)), sel)
 		case types.VecUUID:
 			var value types.UUID16
 			copy(value[:], page.Payload)
-			out.UUID = make([]types.UUID16, page.Rows)
-			sel.IterSet(func(row int) { out.UUID[row] = value })
+			out.UUID = fillConstantSelectedSlice(page.Rows, value, sel)
 		case types.VecEnum32:
-			value := binary.LittleEndian.Uint32(page.Payload)
-			out.U32 = make([]uint32, page.Rows)
-			sel.IterSet(func(row int) { out.U32[row] = value })
+			out.U32 = fillConstantSelectedSlice(page.Rows, binary.LittleEndian.Uint32(page.Payload), sel)
 		}
 	}
 	return out, nil
@@ -172,15 +142,12 @@ func (Constant) DecodeInto(page Page, dst *types.Vec) error {
 	if page.Encoding != types.EncodingConstant {
 		return fmt.Errorf("constant codec cannot decode %s", page.Encoding)
 	}
-	preparePlainDecodeVec(dst, page.Kind)
+	resetVecForDecode(dst, page.Kind, false)
 	dst.Kind = page.Kind
 	dst.Encoding = types.EncodingFlat
 	dst.Len = page.Rows
 	if page.NullCount == page.Rows {
-		dst.Valid = types.NewValidity(page.Rows)
-		for row := 0; row < page.Rows; row++ {
-			types.SetInvalid(dst.Valid, row)
-		}
+		dst.Valid = make(types.Validity, types.ValidityWords(page.Rows))
 		return fillConstantZero(dst, page.Kind, page.Rows)
 	}
 	dst.Valid = nil
@@ -200,7 +167,7 @@ func (Constant) DecodeInto(page Page, dst *types.Vec) error {
 	case types.VecText, types.VecBytes, types.VecJSON:
 		return fillConstantVarBytes(dst, page.Payload, page.Rows)
 	}
-	if _, err := expectFixedPayload(page.Payload, page.Kind, "constant"); err != nil {
+	if err := expectFixedPayload(page.Payload, page.Kind, "constant"); err != nil {
 		return err
 	}
 	switch page.Kind {
@@ -399,29 +366,21 @@ func constantPayload(v types.Vec) ([]byte, error) {
 func fillConstantZero(dst *types.Vec, kind types.VecKind, rows int) error {
 	switch kind {
 	case types.VecBool:
-		dst.BoolBits = resizeSlice(dst.BoolBits, types.ValidityWords(rows))
-		clear(dst.BoolBits)
+		dst.BoolBits = resizeAndZero(dst.BoolBits, types.ValidityWords(rows))
 	case types.VecInt16:
-		dst.I16 = resizeSlice(dst.I16, rows)
-		clear(dst.I16)
+		dst.I16 = resizeAndZero(dst.I16, rows)
 	case types.VecInt32, types.VecDate:
-		dst.I32 = resizeSlice(dst.I32, rows)
-		clear(dst.I32)
+		dst.I32 = resizeAndZero(dst.I32, rows)
 	case types.VecInt64, types.VecDecimal64, types.VecTimestamp, types.VecTime:
-		dst.I64 = resizeSlice(dst.I64, rows)
-		clear(dst.I64)
+		dst.I64 = resizeAndZero(dst.I64, rows)
 	case types.VecFloat32:
-		dst.F32 = resizeSlice(dst.F32, rows)
-		clear(dst.F32)
+		dst.F32 = resizeAndZero(dst.F32, rows)
 	case types.VecFloat64:
-		dst.F64 = resizeSlice(dst.F64, rows)
-		clear(dst.F64)
+		dst.F64 = resizeAndZero(dst.F64, rows)
 	case types.VecUUID:
-		dst.UUID = resizeSlice(dst.UUID, rows)
-		clear(dst.UUID)
+		dst.UUID = resizeAndZero(dst.UUID, rows)
 	case types.VecEnum32:
-		dst.U32 = resizeSlice(dst.U32, rows)
-		clear(dst.U32)
+		dst.U32 = resizeAndZero(dst.U32, rows)
 	case types.VecText, types.VecBytes, types.VecJSON:
 		dst.Var = types.NewVarBytes(rows, 0)
 	default:
@@ -430,8 +389,17 @@ func fillConstantZero(dst *types.Vec, kind types.VecKind, rows int) error {
 	return nil
 }
 
+// resizeAndZero returns a slice of length n that reuses dst's backing array
+// when possible, with all elements zeroed. Used by Constant.Decode* paths to
+// rebuild typed slices without leaking stale data through reused capacity.
+func resizeAndZero[S ~[]E, E any](dst S, n int) S {
+	out := resizeSlice(dst, n)
+	clear(out)
+	return out
+}
+
 func fillConstantVarBytes(dst *types.Vec, value []byte, rows int) error {
-	if rows < 0 || len(value) > codecMaxInt()/max(rows, 1) {
+	if rows < 0 || len(value) > int(^uint(0)>>1)/max(rows, 1) {
 		return fmt.Errorf("constant varbytes decoded size exceeds int capacity")
 	}
 	varBytes := types.NewVarBytes(rows, len(value)*rows)
@@ -442,6 +410,10 @@ func fillConstantVarBytes(dst *types.Vec, value []byte, rows int) error {
 	return nil
 }
 
-func codecMaxInt() int {
-	return int(^uint(0) >> 1)
+// fillConstantSelectedSlice scatters value into the selected rows of a fresh
+// length-rows slice, leaving unselected rows zero-valued.
+func fillConstantSelectedSlice[T any](rows int, value T, sel types.SelectionMask) []T {
+	out := make([]T, rows)
+	sel.IterSet(func(row int) { out[row] = value })
+	return out
 }

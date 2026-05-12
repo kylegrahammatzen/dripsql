@@ -12,9 +12,9 @@ func (c CandidateSet) Pick(v types.Vec) (PreparedEncoding, bool) {
 }
 
 func TextCandidates() CandidateSet {
-	return CandidateSet{Plain{}, Dictionary{}, Constant{}, Flate{}}
+	return CandidateSet{Plain{}, Dictionary{}, Constant{}, Flate{}, Zstd{}}
 }
 
 func FixedCandidates() CandidateSet {
-	return CandidateSet{Plain{}, Constant{}, FORBitPack{}}
+	return CandidateSet{Plain{}, Constant{}, FORBitPack{}, DeltaBitPack{}}
 }

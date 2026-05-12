@@ -17,7 +17,7 @@ func TestDictionaryRoundTripText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got.Encoding != types.EncodingDictionary || len(got.DictIDs) != 4 || got.DictIDs[0] != got.DictIDs[2] || got.DictValues.String(int(got.DictIDs[1])) != "checkout" {
+	if got.Encoding != types.EncodingDictionary || len(got.Encoded.DictIDs) != 4 || got.Encoded.DictIDs[0] != got.Encoded.DictIDs[2] || got.Encoded.DictValues.String(int(got.Encoded.DictIDs[1])) != "checkout" {
 		t.Fatalf("vec = %#v", got)
 	}
 }
@@ -35,16 +35,16 @@ func TestDictionaryDecodeIntoReusesBuffers(t *testing.T) {
 	if err := (Dictionary{}).DecodeInto(first, &dst); err != nil {
 		t.Fatalf("DecodeInto first: %v", err)
 	}
-	idsPtr := &dst.DictIDs[0]
-	offsetsPtr := &dst.DictValues.Offsets[0]
-	dataPtr := &dst.DictValues.Data[0]
+	idsPtr := &dst.Encoded.DictIDs[0]
+	offsetsPtr := &dst.Encoded.DictValues.Offsets[0]
+	dataPtr := &dst.Encoded.DictValues.Data[0]
 	if err := (Dictionary{}).DecodeInto(second, &dst); err != nil {
 		t.Fatalf("DecodeInto second: %v", err)
 	}
-	if &dst.DictIDs[0] != idsPtr || &dst.DictValues.Offsets[0] != offsetsPtr || &dst.DictValues.Data[0] != dataPtr {
+	if &dst.Encoded.DictIDs[0] != idsPtr || &dst.Encoded.DictValues.Offsets[0] != offsetsPtr || &dst.Encoded.DictValues.Data[0] != dataPtr {
 		t.Fatal("DecodeInto did not reuse dictionary buffers")
 	}
-	if dst.DictValues.String(int(dst.DictIDs[0])) != "login" {
+	if dst.Encoded.DictValues.String(int(dst.Encoded.DictIDs[0])) != "login" {
 		t.Fatalf("decoded dict = %#v", dst)
 	}
 }
@@ -77,7 +77,7 @@ func TestDictionaryRoundTripWithNull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if types.IsValid(got.Valid, 1) || got.DictValues.String(int(got.DictIDs[0])) != "signup" {
+	if types.IsValid(got.Valid, 1) || got.Encoded.DictValues.String(int(got.Encoded.DictIDs[0])) != "signup" {
 		t.Fatalf("vec = %#v", got)
 	}
 }
@@ -92,10 +92,10 @@ func TestDictionaryRoundTripOneDistinct(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got.DictValues.Rows() != 1 || got.DictValues.String(0) != "checkout" {
-		t.Fatalf("dict values = %#v", got.DictValues)
+	if got.Encoded.DictValues.Rows() != 1 || got.Encoded.DictValues.String(0) != "checkout" {
+		t.Fatalf("dict values = %#v", got.Encoded.DictValues)
 	}
-	for row, id := range got.DictIDs {
+	for row, id := range got.Encoded.DictIDs {
 		if id != 0 {
 			t.Fatalf("DictIDs[%d] = %d, want 0", row, id)
 		}
@@ -112,11 +112,11 @@ func TestDictionaryRoundTripFourDistinct(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got.DictValues.Rows() != 4 || got.DictIDs[0] != got.DictIDs[4] {
+	if got.Encoded.DictValues.Rows() != 4 || got.Encoded.DictIDs[0] != got.Encoded.DictIDs[4] {
 		t.Fatalf("vec = %#v", got)
 	}
-	if got.DictValues.String(int(got.DictIDs[3])) != "d" {
-		t.Fatalf("dict value for row 3 = %q", got.DictValues.String(int(got.DictIDs[3])))
+	if got.Encoded.DictValues.String(int(got.Encoded.DictIDs[3])) != "d" {
+		t.Fatalf("dict value for row 3 = %q", got.Encoded.DictValues.String(int(got.Encoded.DictIDs[3])))
 	}
 }
 
@@ -133,14 +133,14 @@ func TestDictionaryRoundTripMaxDistinct(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if got.DictValues.Rows() != DictMaxValues {
-		t.Fatalf("dict rows = %d, want %d", got.DictValues.Rows(), DictMaxValues)
+	if got.Encoded.DictValues.Rows() != DictMaxValues {
+		t.Fatalf("dict rows = %d, want %d", got.Encoded.DictValues.Rows(), DictMaxValues)
 	}
-	if got.DictIDs[0] != 0 || got.DictIDs[DictMaxValues-1] != uint8(DictMaxValues-1) {
-		t.Fatalf("dict ids first/last = %d/%d", got.DictIDs[0], got.DictIDs[DictMaxValues-1])
+	if got.Encoded.DictIDs[0] != 0 || got.Encoded.DictIDs[DictMaxValues-1] != uint8(DictMaxValues-1) {
+		t.Fatalf("dict ids first/last = %d/%d", got.Encoded.DictIDs[0], got.Encoded.DictIDs[DictMaxValues-1])
 	}
-	if got.DictValues.String(DictMaxValues-1) != "v255" {
-		t.Fatalf("last dict value = %q", got.DictValues.String(DictMaxValues-1))
+	if got.Encoded.DictValues.String(DictMaxValues-1) != "v255" {
+		t.Fatalf("last dict value = %q", got.Encoded.DictValues.String(DictMaxValues-1))
 	}
 }
 
