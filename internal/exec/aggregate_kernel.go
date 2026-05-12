@@ -202,14 +202,18 @@ func groupFlatStringCountSelected(v types.Vec, sel types.SelectionMask, counts m
 }
 
 func groupDictStringCountSelected(v types.Vec, sel types.SelectionMask, counts map[string]int64) error {
-	if len(v.DictIDs) < v.Len {
-		return fmt.Errorf("dictionary ids length %d is shorter than rows %d", len(v.DictIDs), v.Len)
+	if v.Encoded == nil {
+		return fmt.Errorf("dictionary vector missing encoded state")
+	}
+	enc := v.Encoded
+	if len(enc.DictIDs) < v.Len {
+		return fmt.Errorf("dictionary ids length %d is shorter than rows %d", len(enc.DictIDs), v.Len)
 	}
 	var idCounts [256]int64
 	if selectionAll(sel) {
 		for row := 0; row < sel.Rows; row++ {
 			if types.IsValid(v.Valid, row) {
-				idCounts[v.DictIDs[row]]++
+				idCounts[enc.DictIDs[row]]++
 			}
 		}
 	} else {
@@ -223,7 +227,7 @@ func groupDictStringCountSelected(v types.Vec, sel types.SelectionMask, counts m
 			for word != 0 {
 				row := base + bits.TrailingZeros64(word)
 				if types.IsValid(v.Valid, row) {
-					idCounts[v.DictIDs[row]]++
+					idCounts[enc.DictIDs[row]]++
 				}
 				word &= word - 1
 			}
@@ -233,10 +237,10 @@ func groupDictStringCountSelected(v types.Vec, sel types.SelectionMask, counts m
 		if count == 0 {
 			continue
 		}
-		if id >= v.DictValues.Rows() {
-			return fmt.Errorf("dictionary id %d exceeds dictionary size %d", id, v.DictValues.Rows())
+		if id >= enc.DictValues.Rows() {
+			return fmt.Errorf("dictionary id %d exceeds dictionary size %d", id, enc.DictValues.Rows())
 		}
-		addDictStringCount(counts, v.DictValues, id, count)
+		addDictStringCount(counts, enc.DictValues, id, count)
 	}
 	return nil
 }

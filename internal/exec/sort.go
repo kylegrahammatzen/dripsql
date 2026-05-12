@@ -178,8 +178,8 @@ func (s *Sort) compareKey(left sortItem, right sortItem, column string) int {
 	case types.VecFloat64:
 		return compareOrdered(leftCol.V.F64[left.row], rightCol.V.F64[right.row])
 	case types.VecText:
-		leftValue, _ := TextValueCopy(leftCol.V, left.row)
-		rightValue, _ := TextValueCopy(rightCol.V, right.row)
+		leftValue, _ := leftCol.V.TextCopy(left.row)
+		rightValue, _ := rightCol.V.TextCopy(right.row)
 		return strings.Compare(leftValue, rightValue)
 	default:
 		return 0
@@ -256,7 +256,7 @@ func (s *Sort) gatherColumn(colIndex int, template types.Column, rows int) (type
 	case types.VecText:
 		varText := types.NewVarBytes(rows, 0)
 		for outRow, item := range s.items {
-			value, ok := TextValueCopy(s.batches[item.batch].Columns[colIndex].V, item.row)
+			value, ok := s.batches[item.batch].Columns[colIndex].V.TextCopy(item.row)
 			if !ok {
 				return types.Column{}, fmt.Errorf("cannot gather text column %q", template.Name)
 			}

@@ -97,15 +97,9 @@ type CountNonNullSink struct {
 }
 
 func (s *CountNonNullSink) Consume(batch types.Batch, sel types.SelectionMask) error {
-	if s.Column == "" {
-		return fmt.Errorf("count column is required")
-	}
-	if err := validateBatchSelection(batch, sel); err != nil {
+	col, err := lookupSinkColumn(batch, sel, s.Column, "count", types.VecInvalid)
+	if err != nil {
 		return err
-	}
-	col, ok := columnByName(batch, s.Column)
-	if !ok {
-		return fmt.Errorf("missing count column %q", s.Column)
 	}
 	s.N += countValidSelected(col.V.Valid, sel)
 	return nil
@@ -131,18 +125,9 @@ type SumInt64Sink struct {
 }
 
 func (s *SumInt64Sink) Consume(batch types.Batch, sel types.SelectionMask) error {
-	if s.Column == "" {
-		return fmt.Errorf("sum int64 column is required")
-	}
-	if err := validateBatchSelection(batch, sel); err != nil {
+	col, err := lookupSinkColumn(batch, sel, s.Column, "sum int64", types.VecInt64)
+	if err != nil {
 		return err
-	}
-	col, ok := columnByName(batch, s.Column)
-	if !ok {
-		return fmt.Errorf("missing sum int64 column %q", s.Column)
-	}
-	if col.V.Kind != types.VecInt64 {
-		return fmt.Errorf("sum int64 column %q has kind %s", s.Column, col.V.Kind)
 	}
 	sum, count, overflow := sumInt64VectorSelected(col.V, sel, s.Sum)
 	if overflow {
@@ -168,18 +153,9 @@ type SumInt32Sink struct {
 }
 
 func (s *SumInt32Sink) Consume(batch types.Batch, sel types.SelectionMask) error {
-	if s.Column == "" {
-		return fmt.Errorf("sum int32 column is required")
-	}
-	if err := validateBatchSelection(batch, sel); err != nil {
+	col, err := lookupSinkColumn(batch, sel, s.Column, "sum int32", types.VecInt32)
+	if err != nil {
 		return err
-	}
-	col, ok := columnByName(batch, s.Column)
-	if !ok {
-		return fmt.Errorf("missing sum int32 column %q", s.Column)
-	}
-	if col.V.Kind != types.VecInt32 {
-		return fmt.Errorf("sum int32 column %q has kind %s", s.Column, col.V.Kind)
 	}
 	sum, count := sumInt32VectorSelected(col.V, sel)
 	s.Sum += sum
@@ -207,10 +183,7 @@ type MinInt64Sink struct {
 }
 
 func (s *MinInt64Sink) Consume(batch types.Batch, sel types.SelectionMask) error {
-	if s.Column == "" {
-		return fmt.Errorf("min int64 column is required")
-	}
-	col, err := int64Column(batch, sel, s.Column, "min")
+	col, err := lookupSinkColumn(batch, sel, s.Column, "min int64", types.VecInt64)
 	if err != nil {
 		return err
 	}
@@ -237,10 +210,7 @@ type MaxInt64Sink struct {
 }
 
 func (s *MaxInt64Sink) Consume(batch types.Batch, sel types.SelectionMask) error {
-	if s.Column == "" {
-		return fmt.Errorf("max int64 column is required")
-	}
-	col, err := int64Column(batch, sel, s.Column, "max")
+	col, err := lookupSinkColumn(batch, sel, s.Column, "max int64", types.VecInt64)
 	if err != nil {
 		return err
 	}
@@ -274,10 +244,7 @@ type AvgInt64Sink struct {
 }
 
 func (s *AvgInt64Sink) Consume(batch types.Batch, sel types.SelectionMask) error {
-	if s.Column == "" {
-		return fmt.Errorf("avg int64 column is required")
-	}
-	col, err := int64Column(batch, sel, s.Column, "avg")
+	col, err := lookupSinkColumn(batch, sel, s.Column, "avg int64", types.VecInt64)
 	if err != nil {
 		return err
 	}
@@ -387,60 +354,21 @@ func groupAnyKind(kind types.VecKind) bool {
 	}
 }
 
-func groupKey(v types.Vec, row int) (GroupKey, error) {
-	switch v.Kind {
-	case types.VecBool:
-		return GroupKey{Kind: v.Kind, Bool: v.BoolBits[row>>6]&(uint64(1)<<uint(row&63)) != 0}, nil
-	case types.VecInt16:
-		return GroupKey{Kind: v.Kind, I64: int64(v.I16[row])}, nil
-	case types.VecInt32, types.VecDate:
-		return GroupKey{Kind: v.Kind, I64: int64(v.I32[row])}, nil
-	case types.VecInt64, types.VecDecimal64, types.VecTimestamp, types.VecTime:
-		return GroupKey{Kind: v.Kind, I64: v.I64[row]}, nil
-	case types.VecUUID:
-		return GroupKey{Kind: v.Kind, UUID: v.UUID[row]}, nil
-	case types.VecEnum32:
-		return GroupKey{Kind: v.Kind, U32: v.U32[row]}, nil
-	case types.VecBytes:
-		if v.Encoding != types.EncodingFlat {
-			return GroupKey{}, fmt.Errorf("group bytes unsupported encoding %s", v.Encoding)
-		}
-		return GroupKey{Kind: v.Kind, Bytes: v.Var.StringCopy(row)}, nil
-	default:
-		return GroupKey{}, fmt.Errorf("unsupported group kind %s", v.Kind)
+func lookupSinkColumn(batch types.Batch, sel types.SelectionMask, name, op string, wantKind types.VecKind) (types.Column, error) {
+	if name == "" {
+		return types.Column{}, fmt.Errorf("%s column is required", op)
 	}
-}
-
-func int64Column(batch types.Batch, sel types.SelectionMask, name string, op string) (types.Column, error) {
 	if err := validateBatchSelection(batch, sel); err != nil {
 		return types.Column{}, err
 	}
 	col, ok := columnByName(batch, name)
 	if !ok {
-		return types.Column{}, fmt.Errorf("missing %s int64 column %q", op, name)
+		return types.Column{}, fmt.Errorf("missing %s column %q", op, name)
 	}
-	if col.V.Kind != types.VecInt64 {
-		return types.Column{}, fmt.Errorf("%s int64 column %q has kind %s", op, name, col.V.Kind)
+	if wantKind != types.VecInvalid && col.V.Kind != wantKind {
+		return types.Column{}, fmt.Errorf("%s column %q has kind %s", op, name, col.V.Kind)
 	}
 	return col, nil
-}
-
-func TextValueCopy(v types.Vec, row int) (string, bool) {
-	switch v.Encoding {
-	case types.EncodingFlat:
-		return v.Var.StringCopy(row), true
-	case types.EncodingDictionary:
-		if row >= len(v.DictIDs) {
-			return "", false
-		}
-		id := int(v.DictIDs[row])
-		if id >= v.DictValues.Rows() {
-			return "", false
-		}
-		return v.DictValues.StringCopy(id), true
-	default:
-		return "", false
-	}
 }
 
 func columnByName(batch types.Batch, name string) (types.Column, bool) {

@@ -1,8 +1,6 @@
 package exec
 
 import (
-	"encoding/binary"
-
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
@@ -33,23 +31,24 @@ func minMaxInt64VectorSelected(v types.Vec, sel types.SelectionMask, min bool) (
 	case types.EncodingFORBitPack:
 		return minMaxFORBitPackInt64Selected(v, sel, min)
 	case types.EncodingConstant:
-		if !v.ConstantValid || countValidSelected(v.Valid, sel) == 0 {
+		if v.Encoded == nil || !v.Encoded.ConstantValid || countValidSelected(v.Valid, sel) == 0 {
 			return 0, false
 		}
-		return v.ConstantI64, true
+		return v.Encoded.ConstantI64, true
 	default:
 		return minMaxInt64Selected(v.I64, v.Valid, sel, min)
 	}
 }
 
 func sumConstantInt64Selected(v types.Vec, sel types.SelectionMask, base int64) (int64, int64, bool) {
-	if !v.ConstantValid {
+	if v.Encoded == nil || !v.Encoded.ConstantValid {
 		return base, 0, false
 	}
 	count := countValidSelected(v.Valid, sel)
 	sum := base
+	value := v.Encoded.ConstantI64
 	for i := int64(0); i < count; i++ {
-		next, ok := AddInt64(sum, v.ConstantI64)
+		next, ok := AddInt64(sum, value)
 		if !ok {
 			return 0, 0, true
 		}
@@ -59,11 +58,11 @@ func sumConstantInt64Selected(v types.Vec, sel types.SelectionMask, base int64) 
 }
 
 func sumConstantInt32Selected(v types.Vec, sel types.SelectionMask) (int64, int64) {
-	if !v.ConstantValid {
+	if v.Encoded == nil || !v.Encoded.ConstantValid {
 		return 0, 0
 	}
 	count := countValidSelected(v.Valid, sel)
-	return v.ConstantI64 * count, count
+	return v.Encoded.ConstantI64 * count, count
 }
 
 func sumFORBitPackInt64Selected(v types.Vec, sel types.SelectionMask, base int64) (int64, int64, bool) {
@@ -111,55 +110,21 @@ func minMaxFORBitPackInt64Selected(v types.Vec, sel types.SelectionMask, min boo
 }
 
 func forEachFORBitPackSelected(v types.Vec, sel types.SelectionMask, visit func(int64)) {
+	if v.Encoded == nil {
+		return
+	}
+	enc := v.Encoded
 	if selectionAll(sel) {
 		for row := 0; row < sel.Rows; row++ {
 			if types.IsValid(v.Valid, row) {
-				visit(forBitPackEncodedValue(v, row))
+				visit(enc.FORValue(row))
 			}
 		}
 		return
 	}
 	sel.IterSet(func(row int) {
 		if types.IsValid(v.Valid, row) {
-			visit(forBitPackEncodedValue(v, row))
+			visit(enc.FORValue(row))
 		}
 	})
-}
-
-func forBitPackEncodedValue(v types.Vec, row int) int64 {
-	return v.FORBase + int64(forBitPackEncodedOffset(v, row))
-}
-
-func forBitPackEncodedOffset(v types.Vec, row int) uint64 {
-	width := v.FORWidth
-	switch width {
-	case 8:
-		return uint64(v.FORData[row])
-	case 16:
-		return uint64(binary.LittleEndian.Uint16(v.FORData[row*2 : row*2+2]))
-	case 32:
-		return uint64(binary.LittleEndian.Uint32(v.FORData[row*4 : row*4+4]))
-	case 64:
-		return binary.LittleEndian.Uint64(v.FORData[row*8 : row*8+8])
-	default:
-		return forBitPackEncodedOffsetBits(v.FORData, row, width)
-	}
-}
-
-func forBitPackEncodedOffsetBits(data []byte, row int, width int) uint64 {
-	bitOffset := row * width
-	if width <= 56 && (bitOffset>>3)+8 <= len(data) {
-		byteOffset := bitOffset >> 3
-		shift := uint(bitOffset & 7)
-		mask := (uint64(1) << uint(width)) - 1
-		return (binary.LittleEndian.Uint64(data[byteOffset:byteOffset+8]) >> shift) & mask
-	}
-	var value uint64
-	for bit := 0; bit < width; bit++ {
-		absoluteBit := bitOffset + bit
-		if data[absoluteBit>>3]&(byte(1)<<uint(absoluteBit&7)) != 0 {
-			value |= uint64(1) << uint(bit)
-		}
-	}
-	return value
 }

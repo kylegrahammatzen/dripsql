@@ -217,7 +217,7 @@ func assertTextColumn(t *testing.T, batch types.Batch, name string, want []strin
 		t.Fatalf("%s len = %d, want %d", name, col.V.Len, len(want))
 	}
 	for i, value := range want {
-		got, ok := TextValueCopy(col.V, i)
+		got, ok := col.V.TextCopy(i)
 		if !ok || got != value {
 			t.Fatalf("%s[%d] = %q, %v; want %q, true", name, i, got, ok, value)
 		}

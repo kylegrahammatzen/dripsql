@@ -487,7 +487,7 @@ func projectColumnValue(v types.Vec, row int) (any, bool, error) {
 	case types.VecFloat64:
 		return v.F64[row], true, nil
 	case types.VecText, types.VecBytes, types.VecJSON:
-		value, ok := TextValueCopy(v, row)
+		value, ok := v.TextCopy(row)
 		if !ok {
 			return nil, false, fmt.Errorf("project unsupported text encoding %s", v.Encoding)
 		}

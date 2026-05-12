@@ -237,6 +237,59 @@ func TestAggregateRequestsEncodedNumericColumns(t *testing.T) {
 	}
 }
 
+func TestTextGroupCountSumDictFastPath(t *testing.T) {
+	dict := types.NewVarBytes(3, 16)
+	for row, value := range []string{"US", "CA", "GB"} {
+		dict.AppendString(row, value)
+	}
+	ids := []uint8{0, 1, 0, 2, 0, 1, 2, 2, 0, 1}
+	amounts := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	batch, err := types.NewBatch([]types.Column{
+		{Name: "country", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: len(ids), Encoded: &types.EncodedState{DictIDs: ids, DictValues: dict}}},
+		{Name: "amount", Type: types.Int64, V: types.Vec{Kind: types.VecInt64, Encoding: types.EncodingFlat, Len: len(amounts), I64: amounts}},
+	})
+	if err != nil {
+		t.Fatalf("NewBatch: %v", err)
+	}
+	sink := &TextGroupCountSumSink{Group: "country", SumCol: "amount", Groups: map[string]TextGroupCountSumState{}}
+	sel := types.NewSelectionMask(batch.Len)
+	sel.FillAll()
+	if err := sink.Push(batch, sel); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	wantCounts := map[string]int64{"US": 4, "CA": 3, "GB": 3}
+	wantSums := map[string]int64{"US": 1 + 3 + 5 + 9, "CA": 2 + 6 + 10, "GB": 4 + 7 + 8}
+	for key, want := range wantCounts {
+		if got := sink.Groups[key].Count; got != want {
+			t.Fatalf("Groups[%q].Count = %d, want %d", key, got, want)
+		}
+		if got := sink.Groups[key].Sum; got != wantSums[key] {
+			t.Fatalf("Groups[%q].Sum = %d, want %d", key, got, wantSums[key])
+		}
+	}
+}
+
+func TestTextGroupCountSumDictDetectsCorruptID(t *testing.T) {
+	dict := types.NewVarBytes(2, 8)
+	dict.AppendString(0, "US")
+	dict.AppendString(1, "CA")
+	ids := []uint8{0, 1, 7}
+	amounts := []int64{1, 2, 3}
+	batch, err := types.NewBatch([]types.Column{
+		{Name: "country", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: len(ids), Encoded: &types.EncodedState{DictIDs: ids, DictValues: dict}}},
+		{Name: "amount", Type: types.Int64, V: types.Vec{Kind: types.VecInt64, Encoding: types.EncodingFlat, Len: len(amounts), I64: amounts}},
+	})
+	if err != nil {
+		t.Fatalf("NewBatch: %v", err)
+	}
+	sink := &TextGroupCountSumSink{Group: "country", SumCol: "amount", Groups: map[string]TextGroupCountSumState{}}
+	sel := types.NewSelectionMask(batch.Len)
+	sel.FillAll()
+	if err := sink.Push(batch, sel); err == nil {
+		t.Fatal("Push: expected corrupt-id error")
+	}
+}
+
 func TestMinInt64SinkAllNullResultUnset(t *testing.T) {
 	valid := types.NewValidity(2)
 	types.SetInvalid(valid, 0)
@@ -355,7 +408,7 @@ func TestGroupStringCountSinkCopiesDictKeys(t *testing.T) {
 	if err := sink.Consume(batch, sel); err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
-	copy(batch.Columns[0].V.DictValues.Data, []byte("MUTATION"))
+	copy(batch.Columns[0].V.Encoded.DictValues.Data, []byte("MUTATION"))
 	if sink.Counts["checkout"] != 1 {
 		t.Fatalf("counts = %#v, want stable checkout key", sink.Counts)
 	}
@@ -489,7 +542,7 @@ func execFORInt64Batch(t testing.TB, values []int64, valid types.Validity) types
 
 func execConstantInt64Batch(t testing.TB, value int64, rows int, valid types.Validity) types.Batch {
 	t.Helper()
-	batch, err := types.NewBatch([]types.Column{{Name: "amount", Type: types.Int64, V: types.Vec{Kind: types.VecInt64, Encoding: types.EncodingConstant, Len: rows, Valid: valid, ConstantI64: value, ConstantValid: true}}})
+	batch, err := types.NewBatch([]types.Column{{Name: "amount", Type: types.Int64, V: types.Vec{Kind: types.VecInt64, Encoding: types.EncodingConstant, Len: rows, Valid: valid, Encoded: &types.EncodedState{ConstantI64: value, ConstantValid: true}}}})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
@@ -524,7 +577,7 @@ func execDictTextBatch(t testing.TB, ids []uint8, values []string, valid types.V
 	for row, value := range values {
 		dict.AppendString(row, value)
 	}
-	batch, err := types.NewBatch([]types.Column{{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: len(ids), Valid: valid, DictIDs: append([]uint8(nil), ids...), DictValues: dict}}})
+	batch, err := types.NewBatch([]types.Column{{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: len(ids), Valid: valid, Encoded: &types.EncodedState{DictIDs: append([]uint8(nil), ids...), DictValues: dict}}}})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
