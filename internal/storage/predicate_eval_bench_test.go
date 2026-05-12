@@ -152,6 +152,26 @@ func BenchmarkPredicateInt64EqSelectedSparse(b *testing.B) {
 	predicateBenchSink = sink
 }
 
+func BenchmarkPredicateFORBitPackEqFull(b *testing.B) {
+	batch := benchmarkFORBitPackBatch(b)
+	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 42})
+	sel := types.NewSelectionMask(batch.Len)
+	if _, err := eval.Eval(batch, &sel); err != nil {
+		b.Fatalf("prewarm Eval: %v", err)
+	}
+	var sink int
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		matched, err := eval.Eval(batch, &sel)
+		if err != nil {
+			b.Fatal(err)
+		}
+		sink += matched
+	}
+	predicateBenchSink = sink
+}
+
 func BenchmarkPredicateInt64InSmall(b *testing.B) {
 	batch := benchmarkInt64Batch(b)
 	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpIn, Int64s: []int64{7, 42, 99, 1234}})
@@ -258,7 +278,7 @@ func benchmarkTextBatch(tb testing.TB, enc types.Encoding) types.Batch {
 		for row := 0; row < rows; row++ {
 			ids[row] = uint8(row & 3)
 		}
-		vec = types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: rows, DictIDs: ids, DictValues: dict}
+		vec = types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: rows, Encoded: &types.EncodedState{DictIDs: ids, DictValues: dict}}
 	default:
 		tb.Fatalf("unsupported encoding %s", enc)
 	}
@@ -295,6 +315,43 @@ func benchmarkInt64Batch(tb testing.TB) types.Batch {
 		values[row] = int64(row & 255)
 	}
 	batch, err := types.NewBatch([]types.Column{{Name: "tenant_id", Type: types.Int64, V: types.Vec{Kind: types.VecInt64, Encoding: types.EncodingFlat, Len: rows, I64: values}}})
+	if err != nil {
+		tb.Fatalf("NewBatch: %v", err)
+	}
+	return batch
+}
+
+// benchmarkFORBitPackBatch builds an int64 column encoded as FORBitPack so
+// the predicate hot path exercises the bit-extraction fast path. The values
+// fit in width 9 (matches structured-profile tenant_id range).
+func benchmarkFORBitPackBatch(tb testing.TB) types.Batch {
+	tb.Helper()
+	const rows = types.StandardBatchRows
+	const base int64 = 0
+	const width = 9
+	values := make([]int64, rows)
+	for row := range values {
+		values[row] = int64(row & 511)
+	}
+	bytes := (rows*width + 7) / 8
+	data := make([]byte, bytes)
+	for row, value := range values {
+		offset := uint64(value - base)
+		for bit := 0; bit < width; bit++ {
+			if offset&(uint64(1)<<uint(bit)) == 0 {
+				continue
+			}
+			absoluteBit := row*width + bit
+			data[absoluteBit>>3] |= byte(1) << uint(absoluteBit&7)
+		}
+	}
+	vec := types.Vec{
+		Kind:     types.VecInt64,
+		Encoding: types.EncodingFORBitPack,
+		Len:      rows,
+		Encoded:  &types.EncodedState{FORBase: base, FORWidth: width, FORData: data},
+	}
+	batch, err := types.NewBatch([]types.Column{{Name: "tenant_id", Type: types.Int64, V: vec}})
 	if err != nil {
 		tb.Fatalf("NewBatch: %v", err)
 	}

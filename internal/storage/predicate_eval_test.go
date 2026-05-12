@@ -60,6 +60,56 @@ func TestFORBitPackInt64SelectedEvaluator(t *testing.T) {
 	assertMaskRows(t, sel, []int{2})
 }
 
+func TestFORBitPackInt64EqWithNulls(t *testing.T) {
+	valid := types.NewValidity(4)
+	types.SetInvalid(valid, 2)
+	page, err := (codec.FORBitPack{}).Encode(types.Vec{Kind: types.VecInt64, Encoding: types.EncodingFlat, Len: 4, I64: []int64{42, 7, 42, 8}, Valid: valid})
+	if err != nil {
+		t.Fatalf("FOR Encode: %v", err)
+	}
+	vec, err := (codec.FORBitPack{}).DecodeEncoded(page)
+	if err != nil {
+		t.Fatalf("DecodeEncoded: %v", err)
+	}
+	batch, err := types.NewBatch([]types.Column{{Name: "tenant_id", Type: types.Int64, V: vec}})
+	if err != nil {
+		t.Fatalf("NewBatch: %v", err)
+	}
+	var sel types.SelectionMask
+	if _, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 42}).Eval(batch, &sel); err != nil {
+		t.Fatalf("Eval: %v", err)
+	}
+	assertMaskRows(t, sel, []int{0})
+}
+
+func TestFORBitPackInt64BetweenAndInFastPaths(t *testing.T) {
+	encoded := forBitPackPredicateVec(t)
+	batch, err := types.NewBatch([]types.Column{{Name: "tenant_id", Type: types.Int64, V: encoded}})
+	if err != nil {
+		t.Fatalf("NewBatch: %v", err)
+	}
+	cases := []struct {
+		name string
+		pred Predicate
+		want []int
+	}{
+		{"between_inclusive", Predicate{Column: "tenant_id", Op: PredicateOpBetween, Lo: 7, Hi: 42}, []int{0, 1, 2, 3}},
+		{"between_narrow", Predicate{Column: "tenant_id", Op: PredicateOpBetween, Lo: 8, Hi: 42}, []int{0, 2, 3}},
+		{"compare_lt", Predicate{Column: "tenant_id", Op: PredicateOpLess, Int64: 9}, []int{1, 3}},
+		{"in_set", Predicate{Column: "tenant_id", Op: PredicateOpIn, Int64s: []int64{7, 42}}, []int{0, 1, 2}},
+		{"not_in_set", Predicate{Column: "tenant_id", Op: PredicateOpNotIn, Int64s: []int64{7, 42}}, []int{3}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sel types.SelectionMask
+			if _, err := NewPredicateEvaluator(tc.pred).Eval(batch, &sel); err != nil {
+				t.Fatalf("Eval: %v", err)
+			}
+			assertMaskRows(t, sel, tc.want)
+		})
+	}
+}
+
 func TestFORBitPackInt64EqMissingRHS(t *testing.T) {
 	encoded := forBitPackPredicateVec(t)
 	batch, err := types.NewBatch([]types.Column{{Name: "tenant_id", Type: types.Int64, V: encoded}})
@@ -213,7 +263,7 @@ func TestDictTextAllNullPage(t *testing.T) {
 func TestDictTextRejectsShortIDs(t *testing.T) {
 	dict := types.NewVarBytes(1, 0)
 	dict.AppendString(0, "checkout")
-	batch, err := types.NewBatch([]types.Column{{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: 4, DictIDs: []uint8{0}, DictValues: dict}}})
+	batch, err := types.NewBatch([]types.Column{{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: 4, Encoded: &types.EncodedState{DictIDs: []uint8{0}, DictValues: dict}}}})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
@@ -336,7 +386,7 @@ func dictPredicateBatch(t *testing.T) types.Batch {
 	dict.AppendString(0, "checkout")
 	dict.AppendString(1, "login")
 	batch, err := types.NewBatch([]types.Column{
-		{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: 4, Valid: valid, DictIDs: []uint8{0, 0, 1, 0}, DictValues: dict}},
+		{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: 4, Valid: valid, Encoded: &types.EncodedState{DictIDs: []uint8{0, 0, 1, 0}, DictValues: dict}}},
 	})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
@@ -349,7 +399,7 @@ func dictSingleValueBatch(t *testing.T) types.Batch {
 	dict := types.NewVarBytes(1, 0)
 	dict.AppendString(0, "checkout")
 	batch, err := types.NewBatch([]types.Column{
-		{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: 4, DictIDs: []uint8{0, 0, 0, 0}, DictValues: dict}},
+		{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: 4, Encoded: &types.EncodedState{DictIDs: []uint8{0, 0, 0, 0}, DictValues: dict}}},
 	})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
@@ -366,7 +416,7 @@ func dictAllNullBatch(t *testing.T) types.Batch {
 	dict := types.NewVarBytes(1, 0)
 	dict.AppendString(0, "checkout")
 	batch, err := types.NewBatch([]types.Column{
-		{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: 4, Valid: valid, DictIDs: []uint8{0, 0, 0, 0}, DictValues: dict}},
+		{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: 4, Valid: valid, Encoded: &types.EncodedState{DictIDs: []uint8{0, 0, 0, 0}, DictValues: dict}}},
 	})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)

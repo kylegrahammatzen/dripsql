@@ -618,23 +618,27 @@ func evalTextIn(v types.Vec, matcher textMatcher, invert bool, input *types.Sele
 }
 
 func evalDictTextLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) (int, error) {
-	if len(v.DictIDs) < v.Len {
-		return 0, fmt.Errorf("dictionary ids length %d is shorter than rows %d", len(v.DictIDs), v.Len)
+	if v.Encoded == nil {
+		return 0, fmt.Errorf("dictionary vector missing encoded state")
+	}
+	enc := v.Encoded
+	if len(enc.DictIDs) < v.Len {
+		return 0, fmt.Errorf("dictionary ids length %d is shorter than rows %d", len(enc.DictIDs), v.Len)
 	}
 	var ids [256]bool
 	wantPresent := true
 	matchedIDs := 0
 	switch pred.op {
 	case PredicateOpEq, PredicateOpNotEq:
-		id, ok := dictTextID(v.DictValues, pred.textValue)
+		id, ok := dictTextID(enc.DictValues, pred.textValue)
 		if ok {
 			ids[id] = true
 			matchedIDs = 1
 		}
 		wantPresent = pred.op == PredicateOpEq
 	case PredicateOpIn, PredicateOpNotIn:
-		for row := 0; row < v.DictValues.Rows(); row++ {
-			if pred.textSet.Has(v.DictValues.String(row)) {
+		for row := 0; row < enc.DictValues.Rows(); row++ {
+			if pred.textSet.Has(enc.DictValues.String(row)) {
 				ids[row] = true
 				matchedIDs++
 			}
@@ -652,7 +656,7 @@ func evalDictTextLeafBound(v types.Vec, pred boundNode, input *types.SelectionMa
 	matched := 0
 	if input == nil {
 		for row := 0; row < v.Len; row++ {
-			if types.IsValid(v.Valid, row) && ids[v.DictIDs[row]] == wantPresent {
+			if types.IsValid(v.Valid, row) && ids[enc.DictIDs[row]] == wantPresent {
 				out.SetUnsafe(row)
 				matched++
 			}
@@ -660,7 +664,7 @@ func evalDictTextLeafBound(v types.Vec, pred boundNode, input *types.SelectionMa
 		return matched, nil
 	}
 	input.IterSet(func(row int) {
-		if types.IsValid(v.Valid, row) && ids[v.DictIDs[row]] == wantPresent {
+		if types.IsValid(v.Valid, row) && ids[enc.DictIDs[row]] == wantPresent {
 			out.SetUnsafe(row)
 			matched++
 		}
