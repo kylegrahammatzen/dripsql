@@ -56,6 +56,9 @@ func TestInt64BloomRoundTripsThroughFooter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
+	if err := reopened.LoadAllColumns(); err != nil {
+		t.Fatalf("LoadAllColumns: %v", err)
+	}
 	originalSeg := meta.Columns[0].Int64Values
 	roundtripSeg := reopened.Columns[0].Int64Values
 	if originalSeg == nil || roundtripSeg == nil {

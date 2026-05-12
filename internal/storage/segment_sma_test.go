@@ -38,6 +38,9 @@ func TestTextStatsGroupSumsRoundTripV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unmarshalSegmentMeta: %v", err)
 	}
+	if err := decoded.LoadAllColumns(); err != nil {
+		t.Fatalf("LoadAllColumns: %v", err)
+	}
 	got := decoded.Columns[0].Text
 	want := original.Columns[0].Text
 	if !reflect.DeepEqual(got.GroupSums, want.GroupSums) {
@@ -74,6 +77,9 @@ func TestTextStatsTruncatedSkipsGroupSums(t *testing.T) {
 	decoded, err := unmarshalSegmentMeta(encoded)
 	if err != nil {
 		t.Fatalf("unmarshalSegmentMeta: %v", err)
+	}
+	if err := decoded.LoadAllColumns(); err != nil {
+		t.Fatalf("LoadAllColumns: %v", err)
 	}
 	if decoded.Columns[0].Text.GroupSums != nil {
 		t.Fatalf("truncated stats kept GroupSums = %v", decoded.Columns[0].Text.GroupSums)
@@ -112,6 +118,9 @@ func TestTextStatsGroupCountsRoundTripV2(t *testing.T) {
 	decoded, err := unmarshalSegmentMeta(encoded)
 	if err != nil {
 		t.Fatalf("unmarshalSegmentMeta: %v", err)
+	}
+	if err := decoded.LoadAllColumns(); err != nil {
+		t.Fatalf("LoadAllColumns: %v", err)
 	}
 	got := decoded.Columns[0].Text.GroupCounts
 	want := original.Columns[0].Text.GroupCounts
@@ -362,9 +371,12 @@ func smaTextIntBatch(t *testing.T, values []string, amounts []int64) types.Batch
 
 func smaFindColumn(t *testing.T, meta SegmentMeta, name string) ColumnMeta {
 	t.Helper()
-	for _, col := range meta.Columns {
+	for i, col := range meta.Columns {
 		if col.Name == name {
-			return col
+			if err := meta.LoadColumn(i); err != nil {
+				t.Fatalf("LoadColumn(%d): %v", i, err)
+			}
+			return meta.Columns[i]
 		}
 	}
 	t.Fatalf("column %q not in segment meta", name)

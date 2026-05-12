@@ -25,6 +25,9 @@ func TestWriteReadSegmentFooterRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
+	if err := got.LoadAllColumns(); err != nil {
+		t.Fatalf("LoadAllColumns: %v", err)
+	}
 	if !reflect.DeepEqual(got, meta) {
 		t.Fatalf("meta = %#v, want %#v", got, meta)
 	}
@@ -334,6 +337,9 @@ func TestWriteSegmentStoresSummaryStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
+	if err := got.LoadAllColumns(); err != nil {
+		t.Fatalf("LoadAllColumns: %v", err)
+	}
 	if got.Columns[0].Int64 == nil || got.Columns[0].Int64.Min != 2 || got.Columns[0].Int64.Max != 30 || got.Columns[0].Int64.Sum != 42 || !got.Columns[0].Int64.SumValid {
 		t.Fatalf("int64 column stats = %#v", got.Columns[0].Int64)
 	}
@@ -403,6 +409,9 @@ func TestWriteSegmentStoresBoolAndInt16Stats(t *testing.T) {
 	got, _, err := ReadSegmentFooter(path)
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
+	}
+	if err := got.LoadAllColumns(); err != nil {
+		t.Fatalf("LoadAllColumns: %v", err)
 	}
 	if got.Columns[0].Bool == nil || !got.Columns[0].Bool.HasTrue || !got.Columns[0].Bool.HasFalse {
 		t.Fatalf("bool column stats = %#v", got.Columns[0].Bool)
