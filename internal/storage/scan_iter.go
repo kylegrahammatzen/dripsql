@@ -197,11 +197,7 @@ func (it *SegmentScanIterator) forEachLateMaterialized(ctx context.Context, segm
 func (it *SegmentScanIterator) observeSkippedSegment(segment *ScanSegment) error {
 	infos := segment.PageInfos
 	if len(infos) == 0 {
-		built, err := buildSegmentPageInfos(segment.Meta, nil)
-		if err != nil {
-			return err
-		}
-		infos = built
+		infos = synthesizeSegmentPageInfos(segment.Meta)
 	}
 	for _, info := range infos {
 		it.Stats.ObservePage(int(info.Rows), 0, 0, false)

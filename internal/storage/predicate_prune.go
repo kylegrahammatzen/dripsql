@@ -98,24 +98,45 @@ func pruneSegmentLeafCandidate(meta SegmentMeta, pred boundNode) bool {
 		return true
 	}
 	col := meta.Columns[pred.colIndex]
-	return pruneStatsCandidate(pruneStatsScope{
-		allNull:     col.AllNull,
-		boolStats:   col.Bool,
-		int64Stats:  col.Int64,
-		int32Stats:  col.Int32,
-		int64Vals:   col.Int64Values,
-		int32Vals:   col.Int32Values,
-		textStats:   col.Text,
-		uuidStats:   col.UUID,
-		pruneText:   pruneTextSegmentCandidate,
-		pruneUUID:   pruneUUIDSegmentCandidate,
-		pruneInt64V: pruneInt64ValueSegmentCandidate,
-		pruneInt32V: pruneInt32ValueSegmentCandidate,
-	}, pred)
+	// Eager checks first so pruned segments never trigger LoadColumn.
+	if col.AllNull {
+		return false
+	}
+	if col.Bool != nil && !pruneBoolCandidate(*col.Bool, pred) {
+		return false
+	}
+	if col.Int64 != nil && !pruneInt64RangeCandidate(*col.Int64, pred) {
+		return false
+	}
+	if col.Int32 != nil && !pruneInt64RangeCandidate(Int64Stats{Min: int64(col.Int32.Min), Max: int64(col.Int32.Max)}, pred) {
+		return false
+	}
+	// Heavy stats may give tighter pruning. Conservatively keep the segment
+	// if the load fails so a scan can settle correctness.
+	if err := meta.LoadColumn(pred.colIndex); err != nil {
+		return true
+	}
+	col = meta.Columns[pred.colIndex]
+	if col.Int64Values != nil && !pruneInt64ValueSegmentCandidate(*col.Int64Values, pred) {
+		return false
+	}
+	if col.Int32Values != nil && !pruneInt32ValueSegmentCandidate(*col.Int32Values, pred) {
+		return false
+	}
+	if col.Text != nil && !pruneTextSegmentCandidate(*col.Text, pred) {
+		return false
+	}
+	if col.UUID != nil && !pruneUUIDSegmentCandidate(*col.UUID, pred) {
+		return false
+	}
+	return true
 }
 
 func prunePageLeafCandidate(meta SegmentMeta, pageIndex int, pred boundNode) bool {
 	if pred.colIndex < 0 || pred.colIndex >= len(meta.Columns) {
+		return true
+	}
+	if err := meta.LoadColumn(pred.colIndex); err != nil {
 		return true
 	}
 	col := meta.Columns[pred.colIndex]

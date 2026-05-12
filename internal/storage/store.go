@@ -260,11 +260,7 @@ func populateStoredSegmentCache(s *storedSegment, fileCache *segmentFileCache) e
 		s.size = info.Size()
 	}
 	if s.pageInfos == nil {
-		infos, err := buildSegmentPageInfos(s.meta, nil)
-		if err != nil {
-			return err
-		}
-		s.pageInfos = infos
+		s.pageInfos = synthesizeSegmentPageInfos(s.meta)
 	}
 	fileCache.Prewarm(s.path)
 	return nil

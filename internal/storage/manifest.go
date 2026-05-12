@@ -235,12 +235,7 @@ func readManifest(dir string) ([]storedSegment, error) {
 					recordErr(err)
 					return
 				}
-				infos, err := buildSegmentPageInfos(footer, nil)
-				if err != nil {
-					recordErr(err)
-					return
-				}
-				segments[i] = storedSegment{path: path, meta: footer, size: size, pageInfos: infos}
+				segments[i] = storedSegment{path: path, meta: footer, size: size, pageInfos: synthesizeSegmentPageInfos(footer)}
 			}
 		}()
 	}

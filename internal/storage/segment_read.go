@@ -505,23 +505,29 @@ func buildSegmentPageInfos(meta SegmentMeta, indexes []int) ([]SegmentPageInfo, 
 	if pages == 0 {
 		return infos, nil
 	}
-	firstColumnIndex := 0
+	if indexes != nil && len(indexes) == 0 {
+		return nil, fmt.Errorf("segment read requires at least one column")
+	}
 	if indexes != nil {
-		if len(indexes) == 0 {
-			return nil, fmt.Errorf("segment read requires at least one column")
-		}
-		firstColumnIndex = indexes[0]
-		if firstColumnIndex < 0 || firstColumnIndex >= len(meta.Columns) {
-			return nil, fmt.Errorf("column index %d out of range", firstColumnIndex)
+		for _, colIndex := range indexes {
+			if colIndex < 0 || colIndex >= len(meta.Columns) {
+				return nil, fmt.Errorf("column index %d out of range", colIndex)
+			}
 		}
 	}
-	for pageIndex, page := range meta.Columns[firstColumnIndex].Pages {
-		infos[pageIndex].RowStart = page.RowStart
-		infos[pageIndex].Rows = page.Rows
+	rowStart := uint32(0)
+	for pageIndex := range infos {
+		infos[pageIndex].RowStart = rowStart
+		rows := uint32(0)
+		if pageIndex < len(meta.PageRowCounts) {
+			rows = meta.PageRowCounts[pageIndex]
+		}
+		infos[pageIndex].Rows = rows
+		rowStart += rows
 	}
 	walk := func(colIndex int) error {
-		if colIndex < 0 || colIndex >= len(meta.Columns) {
-			return fmt.Errorf("column index %d out of range", colIndex)
+		if err := meta.LoadColumn(colIndex); err != nil {
+			return err
 		}
 		col := meta.Columns[colIndex]
 		if len(col.Pages) != len(infos) {
@@ -555,15 +561,24 @@ func buildSegmentPageInfos(meta SegmentMeta, indexes []int) ([]SegmentPageInfo, 
 	return infos, nil
 }
 
+// synthesizeSegmentPageInfos builds PageInfos using only eager metadata so
+// pruned segments and cold-open stats accounting don't trigger LoadColumn for
+// every column. PayloadBytes stays zero — fill it in lazily when an actual
+// read is performed.
+func synthesizeSegmentPageInfos(meta SegmentMeta) []SegmentPageInfo {
+	infos := make([]SegmentPageInfo, len(meta.PageRowCounts))
+	rowStart := uint32(0)
+	for i, rows := range meta.PageRowCounts {
+		infos[i].RowStart = rowStart
+		infos[i].Rows = rows
+		rowStart += rows
+	}
+	return infos
+}
+
 func segmentPageCount(meta SegmentMeta) (int, error) {
 	if len(meta.Columns) == 0 {
 		return 0, fmt.Errorf("segment has no columns")
 	}
-	pages := len(meta.Columns[0].Pages)
-	for _, col := range meta.Columns[1:] {
-		if len(col.Pages) != pages {
-			return 0, fmt.Errorf("column %q page count %d does not match %d", col.Name, len(col.Pages), pages)
-		}
-	}
-	return pages, nil
+	return len(meta.PageRowCounts), nil
 }
