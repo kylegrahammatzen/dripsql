@@ -187,6 +187,12 @@ func readManifest(dir string) ([]storedSegment, error) {
 		return nil, nil
 	}
 
+	if shouldMigrateManifest(len(data), len(records)) {
+		if err := rewriteManifestSlim(dir, records); err != nil {
+			return nil, fmt.Errorf("migrate manifest: %w", err)
+		}
+	}
+
 	segments := make([]storedSegment, len(records))
 	workers := runtime.GOMAXPROCS(0)
 	if workers > len(records) {
@@ -269,6 +275,55 @@ func validateManifestSegmentMeta(line int, manifest manifestSegmentSignature, fo
 		}
 	}
 	return nil
+}
+
+// shouldMigrateManifest detects legacy manifests written with the full
+// SegmentMeta inline. A slim record is on the order of a few hundred bytes;
+// the legacy format weighed in at megabytes per record. Anything averaging
+// more than 4 KiB per record is treated as legacy and rewritten.
+func shouldMigrateManifest(onDiskBytes, recordCount int) bool {
+	if recordCount == 0 {
+		return false
+	}
+	return onDiskBytes/recordCount > 4096
+}
+
+func rewriteManifestSlim(dir string, records []manifestRecord) (err error) {
+	path := filepath.Join(dir, manifestFileName)
+	tmpPath := path + ".tmp"
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	cleanup := func() {
+		_ = file.Close()
+		_ = os.Remove(tmpPath)
+	}
+	for _, rec := range records {
+		data, marshalErr := json.Marshal(rec.record)
+		if marshalErr != nil {
+			cleanup()
+			return marshalErr
+		}
+		data = append(data, '\n')
+		if _, writeErr := file.Write(data); writeErr != nil {
+			cleanup()
+			return writeErr
+		}
+	}
+	if syncErr := file.Sync(); syncErr != nil {
+		cleanup()
+		return syncErr
+	}
+	if closeErr := file.Close(); closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return closeErr
+	}
+	if renameErr := os.Rename(tmpPath, path); renameErr != nil {
+		_ = os.Remove(tmpPath)
+		return renameErr
+	}
+	return syncDir(dir)
 }
 
 func truncatePartialManifestTail(file *os.File) error {
