@@ -25,6 +25,8 @@ const (
 	segmentFooterFlateMagic   = "DRIPFTZ1"
 	segmentFooterPlainMagicV2 = "DRIPFTR2"
 	segmentFooterFlateMagicV2 = "DRIPFTZ3"
+	segmentFooterPlainMagicV3 = "DRIPFTR4"
+	segmentFooterFlateMagicV3 = "DRIPFTZ5"
 )
 
 // v2 footer encoding adds TextStats.GroupSums for SMA-style metadata-only
@@ -58,19 +60,21 @@ type PageMeta struct {
 }
 
 type ColumnMeta struct {
-	Name       string
-	Type       types.Type
-	EnumLabels []string
-	Rows       uint32
-	NullCount  uint32
-	AllValid   bool
-	AllNull    bool
-	Bool       *BoolStats
-	Int32      *Int32Stats
-	Int64      *Int64Stats
-	UUID       *UUIDStats
-	Text       *TextStats
-	Pages      []PageMeta
+	Name        string
+	Type        types.Type
+	EnumLabels  []string
+	Rows        uint32
+	NullCount   uint32
+	AllValid    bool
+	AllNull     bool
+	Bool        *BoolStats
+	Int32       *Int32Stats
+	Int64       *Int64Stats
+	Int32Values *Int32ValueStats
+	Int64Values *Int64ValueStats
+	UUID        *UUIDStats
+	Text        *TextStats
+	Pages       []PageMeta
 }
 
 type SegmentMeta struct {
@@ -146,6 +150,8 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 		colMeta.AllNull = colMeta.NullCount == colMeta.Rows
 		finalizeColumnTextBlooms(colMeta)
 		finalizeColumnUUIDBlooms(colMeta)
+		finalizeColumnInt64Blooms(colMeta)
+		finalizeColumnInt32Blooms(colMeta)
 	}
 	if sma != nil {
 		sma.finalize(meta.Columns)
@@ -341,6 +347,8 @@ func marshalSegmentMetaRaw(meta SegmentMeta) ([]byte, error) {
 		writeInt64Stats(&w, col.Int64)
 		writeUUIDStats(&w, col.UUID)
 		writeTextStats(&w, col.Text)
+		writeInt32ValueStats(&w, col.Int32Values)
+		writeInt64ValueStats(&w, col.Int64Values)
 		writeU32(&w, uint32(len(col.Pages)))
 		for _, page := range col.Pages {
 			writeU32(&w, page.RowStart)
@@ -367,9 +375,9 @@ func marshalSegmentMetaRaw(meta SegmentMeta) ([]byte, error) {
 func encodeSegmentFooter(raw []byte) ([]byte, error) {
 	compressed, err := compressSegmentFooter(raw)
 	if err == nil && len(compressed) < len(raw) {
-		return segmentFooterEnvelope(segmentFooterFlateMagicV2, uint64(len(raw)), compressed), nil
+		return segmentFooterEnvelope(segmentFooterFlateMagicV3, uint64(len(raw)), compressed), nil
 	}
-	return segmentFooterEnvelope(segmentFooterPlainMagicV2, uint64(len(raw)), raw), nil
+	return segmentFooterEnvelope(segmentFooterPlainMagicV3, uint64(len(raw)), raw), nil
 }
 
 // decodeSegmentFooter returns the raw footer body and the format version. v1
@@ -414,6 +422,20 @@ func decodeSegmentFooter(data []byte) ([]byte, int, error) {
 			return nil, 0, fmt.Errorf("segment footer expanded to %d bytes, want %d", len(raw), rawLen)
 		}
 		return raw, 2, nil
+	case segmentFooterPlainMagicV3:
+		if uint64(len(body)) != rawLen {
+			return nil, 0, fmt.Errorf("segment footer raw length %d does not match body length %d", rawLen, len(body))
+		}
+		return body, 3, nil
+	case segmentFooterFlateMagicV3:
+		raw, err := decompressSegmentFooter(body)
+		if err != nil {
+			return nil, 0, err
+		}
+		if len(raw) != int(rawLen) {
+			return nil, 0, fmt.Errorf("segment footer expanded to %d bytes, want %d", len(raw), rawLen)
+		}
+		return raw, 3, nil
 	default:
 		return nil, 0, fmt.Errorf("segment footer has unknown encoding %q", magic)
 	}
@@ -495,6 +517,10 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 		col.Int64 = r.readInt64Stats()
 		col.UUID = r.readUUIDStats()
 		col.Text = r.readTextStats()
+		if r.version >= 3 {
+			col.Int32Values = r.readInt32ValueStats()
+			col.Int64Values = r.readInt64ValueStats()
+		}
 		pages := r.readU32()
 		if r.err != nil {
 			return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
@@ -612,6 +638,25 @@ func (r *segmentMetaReader) readInt32ValueStats() *Int32ValueStats {
 	if r.err != nil {
 		return nil
 	}
+	if r.version >= 3 {
+		bloomCount := r.readU32()
+		if r.err != nil {
+			return nil
+		}
+		if uint64(bloomCount) > uint64(r.r.Len()/8) {
+			r.err = io.ErrUnexpectedEOF
+			return nil
+		}
+		if bloomCount != 0 {
+			out.HashBloom = make([]uint64, 0, int(bloomCount))
+			for i := uint32(0); i < bloomCount; i++ {
+				out.HashBloom = append(out.HashBloom, r.readU64())
+			}
+		}
+		if r.err != nil {
+			return nil
+		}
+	}
 	return out
 }
 
@@ -634,6 +679,25 @@ func (r *segmentMetaReader) readInt64ValueStats() *Int64ValueStats {
 	}
 	if r.err != nil {
 		return nil
+	}
+	if r.version >= 3 {
+		bloomCount := r.readU32()
+		if r.err != nil {
+			return nil
+		}
+		if uint64(bloomCount) > uint64(r.r.Len()/8) {
+			r.err = io.ErrUnexpectedEOF
+			return nil
+		}
+		if bloomCount != 0 {
+			out.HashBloom = make([]uint64, 0, int(bloomCount))
+			for i := uint32(0); i < bloomCount; i++ {
+				out.HashBloom = append(out.HashBloom, r.readU64())
+			}
+		}
+		if r.err != nil {
+			return nil
+		}
 	}
 	return out
 }
@@ -904,6 +968,10 @@ func writeInt32ValueStats(w *segmentMetaWriter, stats *Int32ValueStats) {
 	for _, value := range stats.Values {
 		writeU32(w, uint32(value))
 	}
+	writeU32(w, uint32(len(stats.HashBloom)))
+	for _, word := range stats.HashBloom {
+		writeU64(w, word)
+	}
 }
 
 func writeInt64ValueStats(w *segmentMetaWriter, stats *Int64ValueStats) {
@@ -915,6 +983,10 @@ func writeInt64ValueStats(w *segmentMetaWriter, stats *Int64ValueStats) {
 	writeU32(w, uint32(len(stats.Values)))
 	for _, value := range stats.Values {
 		writeU64(w, uint64(value))
+	}
+	writeU32(w, uint32(len(stats.HashBloom)))
+	for _, word := range stats.HashBloom {
+		writeU64(w, word)
 	}
 }
 

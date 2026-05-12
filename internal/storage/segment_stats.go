@@ -45,10 +45,14 @@ type BoolStats struct {
 // ValueStats records up to ValueStatsMaxValues distinct numeric values seen in
 // a page, used by predicate pruning to skip pages that cannot contain a
 // matching value. Truncated signals the writer gave up before reaching the
-// cap, in which case the values list is unreliable for membership checks.
+// cap; HashBloom is the per-page or per-segment bloom built from the row
+// values once the column overflows that cap, so equality predicates can still
+// prune high-cardinality int columns.
 type ValueStats[T int32 | int64] struct {
 	Values    []T
+	HashBloom []uint64
 	Truncated bool
+	hashes    []uint32
 }
 
 type Int32ValueStats = ValueStats[int32]
@@ -255,7 +259,7 @@ func int32ValueStats[T ~int16 | ~int32](values []T, valid types.Validity) *Int32
 			continue
 		}
 		ok = true
-		addValueStat(out, seen, int32(value))
+		addValueStat(out, seen, int32(value), int64(value))
 	}
 	if !ok {
 		return nil
@@ -272,7 +276,7 @@ func int64ValueStats(values []int64, valid types.Validity) *Int64ValueStats {
 			continue
 		}
 		ok = true
-		addValueStat(out, seen, value)
+		addValueStat(out, seen, value, value)
 	}
 	if !ok {
 		return nil
@@ -280,8 +284,12 @@ func int64ValueStats(values []int64, valid types.Validity) *Int64ValueStats {
 	return out
 }
 
-func addValueStat[T int32 | int64](out *ValueStats[T], seen map[T]struct{}, value T) {
+// addValueStat dedupes by typed value. Once the per-page Values cap
+// overflows, it discards Values and starts appending hashes (the writer turns
+// those into a per-page bloom for sparse-int pruning).
+func addValueStat[T int32 | int64](out *ValueStats[T], seen map[T]struct{}, value T, hashValue int64) {
 	if out.Truncated {
+		out.hashes = append(out.hashes, intHash32(hashValue))
 		return
 	}
 	if _, ok := seen[value]; ok {
@@ -289,11 +297,31 @@ func addValueStat[T int32 | int64](out *ValueStats[T], seen map[T]struct{}, valu
 	}
 	if len(out.Values) >= ValueStatsMaxValues {
 		out.Truncated = true
+		hashes := make([]uint32, 0, len(out.Values)+1)
+		for _, existing := range out.Values {
+			hashes = append(hashes, intHash32(int64(existing)))
+		}
+		hashes = append(hashes, intHash32(hashValue))
+		out.hashes = hashes
 		out.Values = nil
 		return
 	}
 	seen[value] = struct{}{}
 	out.Values = append(out.Values, value)
+}
+
+func intHash32(value int64) uint32 {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	hash := uint64(offset64)
+	u := uint64(value)
+	for shift := 0; shift < 64; shift += 8 {
+		hash ^= (u >> shift) & 0xff
+		hash *= prime64
+	}
+	return uint32(hash ^ (hash >> 32))
 }
 
 func addInt64Stat(left int64, right int64) (int64, bool) {
@@ -523,6 +551,159 @@ func mergeUUIDStats(left *UUIDStats, right *UUIDStats) *UUIDStats {
 	}
 	left.hashes = append(left.hashes, right.hashes...)
 	return left
+}
+
+// finalizeColumnInt64Blooms walks the column's pages and builds per-page and
+// per-segment blooms when at least one page truncated. Mirrors
+// finalizeColumnTextBlooms; non-truncated pages contribute their distinct
+// Values to the segment bloom but skip the per-page bloom (their Values list
+// answers Eq exactly).
+func finalizeColumnInt64Blooms(col *ColumnMeta) {
+	if !anyPageInt64Truncated(col) {
+		clearInt64ValueStatHashes(col)
+		return
+	}
+	valueCount, ok := countTruncatedInt64Hashes(col)
+	if !ok {
+		clearInt64ValueStatHashes(col)
+		return
+	}
+	bloom := newTextHashBloom(valueCount)
+	for i := range col.Pages {
+		page := &col.Pages[i]
+		if page.Int64Values == nil {
+			continue
+		}
+		if page.Int64Values.Truncated {
+			pageBloom := newTextPageHashBloom(len(page.Int64Values.hashes))
+			for _, hash := range page.Int64Values.hashes {
+				hashBloomAdd(bloom, hash, textSegmentBloomProbes)
+				hashBloomAdd(pageBloom, hash, textPageBloomProbes)
+			}
+			page.Int64Values.HashBloom = pageBloom
+		} else {
+			for _, value := range page.Int64Values.Values {
+				hashBloomAdd(bloom, intHash32(value), textSegmentBloomProbes)
+			}
+		}
+		page.Int64Values.hashes = nil
+	}
+	col.Int64Values = &Int64ValueStats{Truncated: true, HashBloom: bloom}
+}
+
+func finalizeColumnInt32Blooms(col *ColumnMeta) {
+	if !anyPageInt32Truncated(col) {
+		clearInt32ValueStatHashes(col)
+		return
+	}
+	valueCount, ok := countTruncatedInt32Hashes(col)
+	if !ok {
+		clearInt32ValueStatHashes(col)
+		return
+	}
+	bloom := newTextHashBloom(valueCount)
+	for i := range col.Pages {
+		page := &col.Pages[i]
+		if page.Int32Values == nil {
+			continue
+		}
+		if page.Int32Values.Truncated {
+			pageBloom := newTextPageHashBloom(len(page.Int32Values.hashes))
+			for _, hash := range page.Int32Values.hashes {
+				hashBloomAdd(bloom, hash, textSegmentBloomProbes)
+				hashBloomAdd(pageBloom, hash, textPageBloomProbes)
+			}
+			page.Int32Values.HashBloom = pageBloom
+		} else {
+			for _, value := range page.Int32Values.Values {
+				hashBloomAdd(bloom, intHash32(int64(value)), textSegmentBloomProbes)
+			}
+		}
+		page.Int32Values.hashes = nil
+	}
+	col.Int32Values = &Int32ValueStats{Truncated: true, HashBloom: bloom}
+}
+
+func anyPageInt64Truncated(col *ColumnMeta) bool {
+	for _, page := range col.Pages {
+		if page.Int64Values != nil && page.Int64Values.Truncated {
+			return true
+		}
+	}
+	return false
+}
+
+func anyPageInt32Truncated(col *ColumnMeta) bool {
+	for _, page := range col.Pages {
+		if page.Int32Values != nil && page.Int32Values.Truncated {
+			return true
+		}
+	}
+	return false
+}
+
+func countTruncatedInt64Hashes(col *ColumnMeta) (int, bool) {
+	total := 0
+	for _, page := range col.Pages {
+		if page.Int64Values == nil {
+			continue
+		}
+		if page.Int64Values.Truncated {
+			if len(page.Int64Values.hashes) == 0 {
+				return 0, false
+			}
+			total += len(page.Int64Values.hashes)
+			continue
+		}
+		total += len(page.Int64Values.Values)
+	}
+	if total == 0 {
+		return 0, false
+	}
+	return total, true
+}
+
+func countTruncatedInt32Hashes(col *ColumnMeta) (int, bool) {
+	total := 0
+	for _, page := range col.Pages {
+		if page.Int32Values == nil {
+			continue
+		}
+		if page.Int32Values.Truncated {
+			if len(page.Int32Values.hashes) == 0 {
+				return 0, false
+			}
+			total += len(page.Int32Values.hashes)
+			continue
+		}
+		total += len(page.Int32Values.Values)
+	}
+	if total == 0 {
+		return 0, false
+	}
+	return total, true
+}
+
+func clearInt64ValueStatHashes(col *ColumnMeta) {
+	if col.Int64Values != nil {
+		col.Int64Values.hashes = nil
+	}
+	for i := range col.Pages {
+		if col.Pages[i].Int64Values != nil {
+			col.Pages[i].Int64Values.hashes = nil
+		}
+	}
+}
+
+func clearInt32ValueStatHashes(col *ColumnMeta) {
+	if col.Int32Values != nil {
+		col.Int32Values.hashes = nil
+	}
+	for i := range col.Pages {
+		if col.Pages[i].Int32Values != nil {
+			col.Pages[i].Int32Values.hashes = nil
+		}
+	}
 }
 
 func finalizeColumnUUIDBlooms(col *ColumnMeta) {

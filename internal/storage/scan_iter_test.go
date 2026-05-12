@@ -899,7 +899,7 @@ func TestTextSegmentBloomSizing(t *testing.T) {
 	}
 }
 
-func TestSegmentScanIteratorDoesNotPruneTruncatedInt64ValueStats(t *testing.T) {
+func TestSegmentScanIteratorBloomPrunesTruncatedInt64ValueStats(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "segment.dsv3")
 	ids := make([]int64, ValueStatsMaxValues+1)
 	for i := range ids {
@@ -909,8 +909,12 @@ func TestSegmentScanIteratorDoesNotPruneTruncatedInt64ValueStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	if meta.Columns[0].Pages[0].Int64Values == nil || !meta.Columns[0].Pages[0].Int64Values.Truncated {
-		t.Fatalf("int64 value stats = %#v", meta.Columns[0].Pages[0].Int64Values)
+	page := meta.Columns[0].Pages[0]
+	if page.Int64Values == nil || !page.Int64Values.Truncated {
+		t.Fatalf("int64 value stats = %#v", page.Int64Values)
+	}
+	if len(page.Int64Values.HashBloom) == 0 {
+		t.Fatalf("expected per-page bloom on truncated int64 value stats")
 	}
 	stats := &ExecStats{}
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 1}
@@ -923,8 +927,8 @@ func TestSegmentScanIteratorDoesNotPruneTruncatedInt64ValueStats(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ForEach: %v", err)
 	}
-	if visits != 0 || stats.PagesCandidate != 1 || stats.RowsMatched != 0 {
-		t.Fatalf("visits = %d stats = %#v", visits, stats)
+	if visits != 0 || stats.PagesCandidate != 0 || stats.RowsMatched != 0 || stats.PayloadBytesRead != 0 {
+		t.Fatalf("expected bloom-driven prune: visits = %d stats = %#v", visits, stats)
 	}
 }
 

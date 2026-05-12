@@ -357,6 +357,23 @@ func (m int64Matcher) Has(value int64) bool {
 	return false
 }
 
+// Each invokes fn for every value in the set; ordering is unspecified.
+func (m int64Matcher) Each(fn func(int64) bool) {
+	if m.large != nil {
+		for value := range m.large {
+			if !fn(value) {
+				return
+			}
+		}
+		return
+	}
+	for _, value := range m.small {
+		if !fn(value) {
+			return
+		}
+	}
+}
+
 func (m int64Matcher) AnyBetween(min int64, max int64) bool {
 	if m.large != nil {
 		for value := range m.large {

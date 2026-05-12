@@ -13,16 +13,18 @@ type PredicatePrunePlan struct {
 }
 
 type pruneStatsScope struct {
-	allNull    bool
-	boolStats  *BoolStats
-	int64Stats *Int64Stats
-	int32Stats *Int32Stats
-	int64Vals  *Int64ValueStats
-	int32Vals  *Int32ValueStats
-	textStats  *TextStats
-	uuidStats  *UUIDStats
-	pruneText  func(TextStats, boundNode) bool
-	pruneUUID  func(UUIDStats, boundNode) bool
+	allNull     bool
+	boolStats   *BoolStats
+	int64Stats  *Int64Stats
+	int32Stats  *Int32Stats
+	int64Vals   *Int64ValueStats
+	int32Vals   *Int32ValueStats
+	textStats   *TextStats
+	uuidStats   *UUIDStats
+	pruneText   func(TextStats, boundNode) bool
+	pruneUUID   func(UUIDStats, boundNode) bool
+	pruneInt64V func(Int64ValueStats, boundNode) bool
+	pruneInt32V func(Int32ValueStats, boundNode) bool
 }
 
 func BindPrunePredicate(pred Predicate, meta SegmentMeta) PredicatePrunePlan {
@@ -97,14 +99,18 @@ func pruneSegmentLeafCandidate(meta SegmentMeta, pred boundNode) bool {
 	}
 	col := meta.Columns[pred.colIndex]
 	return pruneStatsCandidate(pruneStatsScope{
-		allNull:    col.AllNull,
-		boolStats:  col.Bool,
-		int64Stats: col.Int64,
-		int32Stats: col.Int32,
-		textStats:  col.Text,
-		uuidStats:  col.UUID,
-		pruneText:  pruneTextSegmentCandidate,
-		pruneUUID:  pruneUUIDSegmentCandidate,
+		allNull:     col.AllNull,
+		boolStats:   col.Bool,
+		int64Stats:  col.Int64,
+		int32Stats:  col.Int32,
+		int64Vals:   col.Int64Values,
+		int32Vals:   col.Int32Values,
+		textStats:   col.Text,
+		uuidStats:   col.UUID,
+		pruneText:   pruneTextSegmentCandidate,
+		pruneUUID:   pruneUUIDSegmentCandidate,
+		pruneInt64V: pruneInt64ValueSegmentCandidate,
+		pruneInt32V: pruneInt32ValueSegmentCandidate,
 	}, pred)
 }
 
@@ -118,16 +124,18 @@ func prunePageLeafCandidate(meta SegmentMeta, pageIndex int, pred boundNode) boo
 	}
 	page := col.Pages[pageIndex]
 	return pruneStatsCandidate(pruneStatsScope{
-		allNull:    page.AllNull,
-		boolStats:  page.Bool,
-		int64Stats: page.Int64,
-		int32Stats: page.Int32,
-		int64Vals:  page.Int64Values,
-		int32Vals:  page.Int32Values,
-		textStats:  page.Text,
-		uuidStats:  page.UUID,
-		pruneText:  pruneTextPageCandidate,
-		pruneUUID:  pruneUUIDPageCandidate,
+		allNull:     page.AllNull,
+		boolStats:   page.Bool,
+		int64Stats:  page.Int64,
+		int32Stats:  page.Int32,
+		int64Vals:   page.Int64Values,
+		int32Vals:   page.Int32Values,
+		textStats:   page.Text,
+		uuidStats:   page.UUID,
+		pruneText:   pruneTextPageCandidate,
+		pruneUUID:   pruneUUIDPageCandidate,
+		pruneInt64V: pruneInt64ValuePageCandidate,
+		pruneInt32V: pruneInt32ValuePageCandidate,
 	}, pred)
 }
 
@@ -141,13 +149,13 @@ func pruneStatsCandidate(stats pruneStatsScope, pred boundNode) bool {
 	if stats.int64Stats != nil && !pruneInt64RangeCandidate(*stats.int64Stats, pred) {
 		return false
 	}
-	if stats.int64Vals != nil && !pruneInt64ValueCandidate(*stats.int64Vals, pred) {
+	if stats.int64Vals != nil && stats.pruneInt64V != nil && !stats.pruneInt64V(*stats.int64Vals, pred) {
 		return false
 	}
 	if stats.int32Stats != nil && !pruneInt64RangeCandidate(Int64Stats{Min: int64(stats.int32Stats.Min), Max: int64(stats.int32Stats.Max)}, pred) {
 		return false
 	}
-	if stats.int32Vals != nil && !pruneInt32ValueCandidate(*stats.int32Vals, pred) {
+	if stats.int32Vals != nil && stats.pruneInt32V != nil && !stats.pruneInt32V(*stats.int32Vals, pred) {
 		return false
 	}
 	if stats.textStats != nil && !stats.pruneText(*stats.textStats, pred) {
@@ -195,8 +203,11 @@ func pruneInt64RangeCandidate(stats Int64Stats, pred boundNode) bool {
 	}
 }
 
-func pruneInt64ValueCandidate(stats Int64ValueStats, pred boundNode) bool {
-	if stats.Truncated || len(stats.Values) == 0 {
+func pruneInt64ValuePageCandidate(stats Int64ValueStats, pred boundNode) bool {
+	if stats.Truncated {
+		return pruneInt64ValueBloom(stats.HashBloom, pred, textPageBloomProbes)
+	}
+	if len(stats.Values) == 0 {
 		return true
 	}
 	switch pred.op {
@@ -214,8 +225,33 @@ func pruneInt64ValueCandidate(stats Int64ValueStats, pred boundNode) bool {
 	}
 }
 
-func pruneInt32ValueCandidate(stats Int32ValueStats, pred boundNode) bool {
-	if stats.Truncated || len(stats.Values) == 0 {
+func pruneInt64ValueSegmentCandidate(stats Int64ValueStats, pred boundNode) bool {
+	if stats.Truncated {
+		return pruneInt64ValueBloom(stats.HashBloom, pred, textSegmentBloomProbes)
+	}
+	if len(stats.Values) == 0 {
+		return true
+	}
+	switch pred.op {
+	case PredicateOpEq:
+		return slices.Contains(stats.Values, pred.int64Value)
+	case PredicateOpIn:
+		for _, value := range stats.Values {
+			if pred.intSet.Has(value) {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
+}
+
+func pruneInt32ValuePageCandidate(stats Int32ValueStats, pred boundNode) bool {
+	if stats.Truncated {
+		return pruneInt32ValueBloom(stats.HashBloom, pred, textPageBloomProbes)
+	}
+	if len(stats.Values) == 0 {
 		return true
 	}
 	switch pred.op {
@@ -229,6 +265,81 @@ func pruneInt32ValueCandidate(stats Int32ValueStats, pred boundNode) bool {
 			}
 		}
 		return false
+	default:
+		return true
+	}
+}
+
+func pruneInt32ValueSegmentCandidate(stats Int32ValueStats, pred boundNode) bool {
+	if stats.Truncated {
+		return pruneInt32ValueBloom(stats.HashBloom, pred, textSegmentBloomProbes)
+	}
+	if len(stats.Values) == 0 {
+		return true
+	}
+	switch pred.op {
+	case PredicateOpEq:
+		value, ok := int64ToInt32Value(pred.int64Value)
+		return ok && slices.Contains(stats.Values, value)
+	case PredicateOpIn:
+		for _, value := range stats.Values {
+			if pred.intSet.Has(int64(value)) {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
+}
+
+func pruneInt64ValueBloom(bloom []uint64, pred boundNode, probes uint64) bool {
+	if len(bloom) == 0 {
+		return true
+	}
+	switch pred.op {
+	case PredicateOpEq:
+		return hashBloomHas(bloom, intHash32(pred.int64Value), probes)
+	case PredicateOpIn:
+		hit := false
+		pred.intSet.Each(func(value int64) bool {
+			if hashBloomHas(bloom, intHash32(value), probes) {
+				hit = true
+				return false
+			}
+			return true
+		})
+		return hit
+	default:
+		return true
+	}
+}
+
+func pruneInt32ValueBloom(bloom []uint64, pred boundNode, probes uint64) bool {
+	if len(bloom) == 0 {
+		return true
+	}
+	switch pred.op {
+	case PredicateOpEq:
+		value, ok := int64ToInt32Value(pred.int64Value)
+		if !ok {
+			return false
+		}
+		return hashBloomHas(bloom, intHash32(int64(value)), probes)
+	case PredicateOpIn:
+		hit := false
+		pred.intSet.Each(func(value int64) bool {
+			scoped, ok := int64ToInt32Value(value)
+			if !ok {
+				return true
+			}
+			if hashBloomHas(bloom, intHash32(int64(scoped)), probes) {
+				hit = true
+				return false
+			}
+			return true
+		})
+		return hit
 	default:
 		return true
 	}
