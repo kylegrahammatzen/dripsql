@@ -60,7 +60,50 @@ type TextStats struct {
 	Counts    []uint32
 	HashBloom []uint64
 	Truncated bool
-	hashes    []uint32
+	// GroupSums holds rolled-up sums for sibling int columns, keyed by sibling
+	// column name. Each entry is parallel to Values: GroupSums[col][i] is the
+	// sum of col across rows where this column equals Values[i]. Populated
+	// only on segment-level stats and only when !Truncated.
+	GroupSums map[string][]int64
+	// GroupCounts holds per-(sibling text col, sibling text value) row counts
+	// keyed by this column's Values. GroupCounts[col][value][i] is the count
+	// of rows where this column equals Values[i] AND col equals value. Powers
+	// `GROUP BY this WHERE col = value`-style metadata-only queries.
+	GroupCounts map[string]map[string][]int64
+	hashes      []uint32
+}
+
+// SumByValue returns the rolled-up sum of intCol for the row group where this
+// text column equals Values[idx]. ok=false when stats are truncated, missing,
+// out of range, or the int column wasn't tracked at write time.
+func (s *TextStats) SumByValue(intCol string, idx int) (int64, bool) {
+	if s == nil || s.Truncated {
+		return 0, false
+	}
+	sums, ok := s.GroupSums[intCol]
+	if !ok || idx < 0 || idx >= len(sums) {
+		return 0, false
+	}
+	return sums[idx], true
+}
+
+// CountByValueAndPeer returns the count of rows where this column equals
+// Values[idx] AND siblingCol equals siblingValue. ok=false when stats are
+// truncated, the cross-counts weren't tracked, or the indices are out of
+// range.
+func (s *TextStats) CountByValueAndPeer(siblingCol string, siblingValue string, idx int) (int64, bool) {
+	if s == nil || s.Truncated {
+		return 0, false
+	}
+	bySibling, ok := s.GroupCounts[siblingCol]
+	if !ok {
+		return 0, false
+	}
+	parallel, ok := bySibling[siblingValue]
+	if !ok || idx < 0 || idx >= len(parallel) {
+		return 0, false
+	}
+	return parallel[idx], true
 }
 
 type UUIDStats struct {
