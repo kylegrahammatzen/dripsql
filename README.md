@@ -96,7 +96,16 @@ Snapshot (2026-05-12), `structured` profile, 10M rows, 2M-row segments, `sort_by
 
 Every query is sub-millisecond on this profile.
 
-Pass `-mode cold-ish` to close and reopen the database between every sample, so each measurement starts with an empty in-process state. On this profile cold-ish for `user id lookup` lands at **150 ms best / 168 ms avg** — within the open path, not the query path. The cost decomposes into reading and parsing the manifest, then loading per-segment footers in parallel; the predicate-evaluation work after that stays in the microsecond range observed warm. OS file cache is not dropped (no portable way without admin), so this still measures "first query after process restart" rather than truly cold disk.
+Four query modes decompose the latency picture:
+
+- `same-process`: everything warm in the running process.
+- `warm-reopen`: DB closed and reopened once before the timed samples.
+- `byte-cold`: DB stays open; the in-process byte cache is cleared between samples.
+- `cold-ish`: DB closed and reopened between every sample.
+
+On this profile, `user id lookup` cold-ish lands at **44 ms best / 51 ms avg** at 5-segment scale (10M rows, 2M-row segments). Scaling up the same profile to 100M rows (764 default-sized segments) puts cold-ish at **~1.0 s avg**, dominated by per-segment footer decompression in parallel. Cold-ish cost is in the open path, not the query path: `byte-cold` for the same query is 100–200 µs, which is the actual query-and-byte-cache-miss work.
+
+OS file cache is not dropped (no portable way without admin), so cold-ish still measures "first query after process restart" rather than truly cold disk.
 
 Full usage in [`cmd/bench/README.md`](cmd/bench/README.md). The driver exercises segment build, predicate pushdown, and aggregate execution end-to-end.
 
