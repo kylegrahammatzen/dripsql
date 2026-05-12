@@ -4,3 +4,4 @@
 *.prof
 *.out
 db/
+*.pprof
