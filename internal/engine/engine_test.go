@@ -909,6 +909,51 @@ func TestEngineReopensCatalogAndSegments(t *testing.T) {
 	)
 }
 
+func TestEngineSortByOrdersInsertedRows(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+
+	if _, err := db.Exec(ctx, `CREATE TABLE events (tenant_id INT64 NOT NULL, amount INT64 NOT NULL) WITH (sort_by = 'tenant_id')`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO events VALUES
+		(7, 70),
+		(3, 30),
+		(9, 90),
+		(1, 10),
+		(5, 50)`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	if err := db.FlushBuffered(ctx, "events"); err != nil {
+		t.Fatalf("FlushBuffered: %v", err)
+	}
+
+	assertQueryRows(t, ctx, db,
+		"SELECT tenant_id, amount FROM events",
+		[]string{"tenant_id", "amount"},
+		[][]any{
+			{int64(1), int64(10)},
+			{int64(3), int64(30)},
+			{int64(5), int64(50)},
+			{int64(7), int64(70)},
+			{int64(9), int64(90)},
+		},
+	)
+	assertQueryRows(t, ctx, db,
+		"SELECT count(*) FROM events WHERE tenant_id = 5",
+		[]string{"count"},
+		[][]any{{int64(1)}},
+	)
+}
+
 func openEventsDB(t *testing.T, ctx context.Context) *DB {
 	t.Helper()
 	db, err := Open(ctx, t.TempDir())

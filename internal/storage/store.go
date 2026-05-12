@@ -172,6 +172,13 @@ func (s *Store) appendBatchesToStateWithID(ctx context.Context, state *tableStat
 	if err := ctx.Err(); err != nil {
 		return SegmentMeta{}, err
 	}
+	if len(state.spec.Options.SortBy) > 0 {
+		sorted, err := sortBatchesBy(batches, state.spec.Options.SortBy)
+		if err != nil {
+			return SegmentMeta{}, err
+		}
+		batches = sorted
+	}
 	relPath := filepath.Join("segments", fmt.Sprintf("%016d.dsv3", id))
 	finalPath := filepath.Join(state.dir, relPath)
 	tmpPath := finalPath + ".tmp"
