@@ -10,13 +10,46 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+
+	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 const manifestFileName = "manifest.jsonl"
 
+// manifestSegment is the on-disk JSONL record per segment. Meta carries only
+// the fields needed to enumerate the segment and sanity-check it against the
+// segment file's footer; the footer remains the source of truth for stats,
+// blooms, dictionaries, and per-page metadata. Older manifests written with
+// the full SegmentMeta inline still decode here: encoding/json silently drops
+// the extra fields, so legacy databases keep loading without migration.
 type manifestSegment struct {
-	Path string      `json:"path"`
-	Meta SegmentMeta `json:"meta"`
+	Path string                `json:"path"`
+	Meta manifestSegmentSignature `json:"meta"`
+}
+
+type manifestSegmentSignature struct {
+	ID       SegmentID
+	Rows     uint32
+	PageRows uint32
+	Columns  []manifestColumnSignature
+}
+
+type manifestColumnSignature struct {
+	Name string
+	Type types.Type
+}
+
+func signatureFromMeta(meta SegmentMeta) manifestSegmentSignature {
+	sig := manifestSegmentSignature{
+		ID:       meta.ID,
+		Rows:     meta.Rows,
+		PageRows: meta.PageRows,
+		Columns:  make([]manifestColumnSignature, len(meta.Columns)),
+	}
+	for i, col := range meta.Columns {
+		sig.Columns[i] = manifestColumnSignature{Name: col.Name, Type: col.Type}
+	}
+	return sig
 }
 
 func appendManifest(dir string, segment storedSegment) (err error) {
@@ -41,7 +74,7 @@ func appendManifest(dir string, segment storedSegment) (err error) {
 	if err != nil {
 		return err
 	}
-	record := manifestSegment{Path: filepath.ToSlash(relPath), Meta: segment.meta}
+	record := manifestSegment{Path: filepath.ToSlash(relPath), Meta: signatureFromMeta(segment.meta)}
 	data, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -67,7 +100,12 @@ type manifestRecord struct {
 func parseManifestRecords(data []byte) ([]manifestRecord, error) {
 	complete := bytes.HasSuffix(data, []byte{'\n'})
 	lines := bytes.Split(data, []byte{'\n'})
-	records := make([]manifestRecord, 0, len(lines))
+
+	type pendingLine struct {
+		line int
+		body []byte
+	}
+	pending := make([]pendingLine, 0, len(lines))
 	for i, line := range lines {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
@@ -75,14 +113,57 @@ func parseManifestRecords(data []byte) ([]manifestRecord, error) {
 		if i == len(lines)-1 && !complete {
 			break
 		}
-		var record manifestSegment
-		if err := json.Unmarshal(line, &record); err != nil {
-			return nil, fmt.Errorf("manifest line %d: %w", i+1, err)
-		}
-		if record.Path == "" {
-			return nil, fmt.Errorf("manifest line %d: segment path is required", i+1)
-		}
-		records = append(records, manifestRecord{line: i + 1, record: record})
+		pending = append(pending, pendingLine{line: i + 1, body: line})
+	}
+	if len(pending) == 0 {
+		return nil, nil
+	}
+
+	records := make([]manifestRecord, len(pending))
+	workers := min(runtime.GOMAXPROCS(0), len(pending))
+	if workers < 1 {
+		workers = 1
+	}
+
+	var next atomic.Int64
+	var failed atomic.Bool
+	var firstErr error
+	var errOnce sync.Once
+	var wg sync.WaitGroup
+	total := int64(len(pending))
+	recordErr := func(err error) {
+		errOnce.Do(func() { firstErr = err })
+		failed.Store(true)
+	}
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				if failed.Load() {
+					return
+				}
+				i := next.Add(1) - 1
+				if i >= total {
+					return
+				}
+				p := pending[i]
+				var record manifestSegment
+				if err := json.Unmarshal(p.body, &record); err != nil {
+					recordErr(fmt.Errorf("manifest line %d: %w", p.line, err))
+					return
+				}
+				if record.Path == "" {
+					recordErr(fmt.Errorf("manifest line %d: segment path is required", p.line))
+					return
+				}
+				records[i] = manifestRecord{line: p.line, record: record}
+			}
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return records, nil
 }
@@ -164,7 +245,7 @@ func readManifest(dir string) ([]storedSegment, error) {
 	return segments, nil
 }
 
-func validateManifestSegmentMeta(line int, manifest SegmentMeta, footer SegmentMeta) error {
+func validateManifestSegmentMeta(line int, manifest manifestSegmentSignature, footer SegmentMeta) error {
 	if footer.ID != manifest.ID {
 		return fmt.Errorf("manifest line %d segment id %d does not match footer id %d", line, manifest.ID, footer.ID)
 	}
