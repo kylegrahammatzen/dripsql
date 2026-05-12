@@ -82,6 +82,17 @@ type SegmentMeta struct {
 	Rows     uint32
 	PageRows uint32
 	Columns  []ColumnMeta
+
+	// PageRowCounts is the per-page row count, kept eager so cold-open can
+	// size SegmentPageInfo without loading col.Pages from the heavy section.
+	PageRowCounts []uint32
+
+	// Lazy heavy-field decoding state. See segment_lazy.go.
+	lazyBody    []byte
+	lazyRanges  []byteRange
+	lazyOnce    []sync.Once
+	lazyErrs    []error
+	lazyVersion int
 }
 
 func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta, error) {
@@ -107,7 +118,7 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 		return SegmentMeta{}, err
 	}
 	offset := uint64(len(segmentMagic))
-	meta := SegmentMeta{ID: id, Rows: uint32(totalBatchRows(batches)), PageRows: types.StandardBatchRows, Columns: make([]ColumnMeta, len(batches[0].Columns))}
+	meta := SegmentMeta{ID: id, Rows: uint32(totalBatchRows(batches)), PageRows: types.StandardBatchRows, Columns: make([]ColumnMeta, len(batches[0].Columns)), PageRowCounts: make([]uint32, 0, len(batches))}
 	for colIndex, firstCol := range batches[0].Columns {
 		meta.Columns[colIndex] = ColumnMeta{Name: firstCol.Name, Type: firstCol.Type, EnumLabels: append([]string(nil), firstCol.EnumLabels...), Rows: meta.Rows}
 	}
@@ -142,6 +153,7 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 		if sma != nil {
 			sma.observeBatch(batch)
 		}
+		meta.PageRowCounts = append(meta.PageRowCounts, uint32(batch.Len))
 		rowStart += batch.Len
 	}
 	for i := range meta.Columns {
@@ -504,11 +516,11 @@ func decompressSegmentFooter(body []byte, rawLen int) ([]byte, error) {
 }
 
 func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
-	data, version, err := decodeSegmentFooter(data)
+	body, version, err := decodeSegmentFooter(data)
 	if err != nil {
 		return SegmentMeta{}, err
 	}
-	r := segmentMetaReader{data: data, version: version}
+	r := segmentMetaReader{data: body, version: version}
 	meta := SegmentMeta{ID: SegmentID(r.readU64()), Rows: r.readU32(), PageRows: r.readU32()}
 	cols := r.readU32()
 	if r.err != nil {
@@ -518,6 +530,11 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 		return SegmentMeta{}, fmt.Errorf("segment footer column count %d exceeds remaining metadata", cols)
 	}
 	meta.Columns = make([]ColumnMeta, int(cols))
+	meta.lazyBody = body
+	meta.lazyRanges = make([]byteRange, int(cols))
+	meta.lazyOnce = make([]sync.Once, int(cols))
+	meta.lazyErrs = make([]error, int(cols))
+	meta.lazyVersion = version
 	for i := uint32(0); i < cols; i++ {
 		col := &meta.Columns[i]
 		col.Name = r.readString()
@@ -542,11 +559,15 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 		col.Bool = r.readBoolStats()
 		col.Int32 = r.readInt32Stats()
 		col.Int64 = r.readInt64Stats()
-		col.UUID = r.readUUIDStats()
-		col.Text = r.readTextStats()
+		if r.err != nil {
+			return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
+		}
+		heavyStart := r.pos
+		r.skipUUIDStats()
+		r.skipTextStats()
 		if r.version >= 3 {
-			col.Int32Values = r.readInt32ValueStats()
-			col.Int64Values = r.readInt64ValueStats()
+			r.skipInt32ValueStats()
+			r.skipInt64ValueStats()
 		}
 		pages := r.readU32()
 		if r.err != nil {
@@ -555,32 +576,22 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 		if uint64(pages) > uint64(r.remaining()/segmentPageMetaFooterBytes) {
 			return SegmentMeta{}, fmt.Errorf("segment footer column %d page count %d exceeds remaining metadata", i, pages)
 		}
-		col.Pages = make([]PageMeta, int(pages))
-		for j := range col.Pages {
-			page := &col.Pages[j]
-			page.RowStart = r.readU32()
-			page.Rows = r.readU32()
-			page.NullCount = r.readU32()
-			page.Offset = r.readU64()
-			page.Length = r.readU64()
-			page.Kind = types.VecKind(r.readByte())
-			page.Encoding = types.Encoding(r.readByte())
+		if i == 0 {
+			meta.PageRowCounts = make([]uint32, int(pages))
+		}
+		for j := uint32(0); j < pages; j++ {
+			rows := r.skipPageMetaCapturingRows()
 			if r.err != nil {
 				return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
 			}
-			page.AllValid = r.readBool()
-			page.AllNull = r.readBool()
-			page.Bool = r.readBoolStats()
-			page.Int32 = r.readInt32Stats()
-			page.Int64 = r.readInt64Stats()
-			page.Int32Values = r.readInt32ValueStats()
-			page.Int64Values = r.readInt64ValueStats()
-			page.UUID = r.readUUIDStats()
-			page.Text = r.readTextStats()
-			if r.err != nil {
-				return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
+			if i == 0 {
+				meta.PageRowCounts[j] = rows
 			}
 		}
+		meta.lazyRanges[i] = byteRange{start: heavyStart, end: r.pos}
+	}
+	if r.err != nil {
+		return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
 	}
 	if r.remaining() != 0 {
 		return SegmentMeta{}, fmt.Errorf("segment footer has %d trailing bytes", r.remaining())
@@ -589,10 +600,8 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 }
 
 // segmentMetaReader is a byte-slice cursor over the decompressed footer body.
-// The footer is read field-by-field many millions of times during cold open,
-// so going through bytes.Reader + io.ReadFull (with its interface dispatch and
-// per-call buffer setup) showed up as ~24% of cold-open CPU at 100M-row scale.
-// A direct slice with a single bounds check per read shaves that down.
+// One bounds check per read is meaningfully faster than bytes.Reader at
+// cold-open scale.
 type segmentMetaReader struct {
 	data    []byte
 	pos     int
