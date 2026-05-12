@@ -377,9 +377,15 @@ func marshalSegmentMetaRaw(meta SegmentMeta) ([]byte, error) {
 	return w.bytes()
 }
 
+// encodeSegmentFooter only invokes flate when the compressed payload is at
+// least 4× smaller than the raw payload. Bloom-heavy footers (high-cardinality
+// columns like user_id, event_uuid) are essentially random and compress ~1.0×;
+// paying the per-segment flate decode at cold-open time to "save" near-zero
+// bytes shows up as ~60% of cold-ish CPU at 100M scale. Footers dominated by
+// dictionaries / small stats still hit the 4× ratio and keep being flate'd.
 func encodeSegmentFooter(raw []byte) ([]byte, error) {
 	compressed, err := compressSegmentFooter(raw)
-	if err == nil && len(compressed) < len(raw) {
+	if err == nil && len(compressed)*4 < len(raw) {
 		return segmentFooterEnvelope(segmentFooterFlateMagicV3, uint64(len(raw)), compressed), nil
 	}
 	return segmentFooterEnvelope(segmentFooterPlainMagicV3, uint64(len(raw)), raw), nil

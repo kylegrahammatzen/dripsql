@@ -1099,11 +1099,10 @@ func (db *DB) groupedAggregateBatch(ctx context.Context, plan *v3sql.AggregatePl
 	if aggSpec.Func != v3sql.AggregateCount || !aggSpec.Star || len(plan.Hidden) != 0 {
 		return db.groupedGenericAggregateBatch(ctx, plan, trace)
 	}
-	if batch, ok, err := db.groupedTextCountMetadataBatch(ctx, plan.Source, group, aggSpec, trace); err != nil || ok {
-		return batch, err
-	}
-	if batch, ok, err := db.groupedTextCountFilteredMetadataBatch(ctx, plan.Source, group, aggSpec, trace); err != nil || ok {
-		return batch, err
+	if aggSpec.Func == v3sql.AggregateCount && aggSpec.Star {
+		if batch, ok, err := db.groupedTextCountMetadataBatch(ctx, plan.Source, group, "", []v3sql.AggSpec{aggSpec}, trace); err != nil || ok {
+			return batch, err
+		}
 	}
 	if batch, ok, err := db.parallelGroupedCountBatch(ctx, plan.Source, group, aggSpec, trace); err != nil || ok {
 		return batch, err
@@ -1153,7 +1152,7 @@ func (db *DB) groupedTextCountSumBatch(ctx context.Context, plan *v3sql.Aggregat
 		return types.Batch{}, false, nil
 	}
 	sumCol := plan.Aggregates[sumIndex].ArgName
-	if batch, ok, err := db.groupedTextCountSumMetadataBatch(ctx, plan.Source, group, sumCol, plan.Aggregates, trace); err != nil || ok {
+	if batch, ok, err := db.groupedTextCountMetadataBatch(ctx, plan.Source, group, sumCol, plan.Aggregates, trace); err != nil || ok {
 		return batch, true, err
 	}
 	if batch, ok, err := db.parallelGroupedTextCountSumBatch(ctx, plan.Source, group, sumCol, plan.Aggregates, trace); err != nil || ok {
@@ -1281,20 +1280,89 @@ func countStarTextPredicateMetadata(segments []storage.ScanSegment, pred storage
 	return count, stats, true
 }
 
-func (db *DB) groupedTextCountMetadataBatch(ctx context.Context, source v3sql.Plan, group v3sql.BoundExpr, spec v3sql.AggSpec, trace *executionTrace) (types.Batch, bool, error) {
-	if group.Kind != v3sql.BoundExprColumn || group.Type.Kind != types.KindText || spec.Func != v3sql.AggregateCount || !spec.Star {
+// groupedTextCountMetadataBatch answers three flavors of GROUP BY <text> from
+// segment-level TextStats with no payload reads:
+//
+//   - SELECT <text>, count(*) FROM t GROUP BY <text>
+//   - SELECT <text>, count(*) FROM t WHERE <other_text> = '...' GROUP BY <text>
+//     (via TextStats.GroupCounts cross-counts)
+//   - SELECT <text>, count(*), sum(<int>) FROM t GROUP BY <text>
+//     (via TextStats.GroupSums; only when no WHERE)
+//
+// sumCol is empty for the count-only variants and names the int column for the
+// SUM-extended variant. specs must include exactly the aggregate(s) being
+// answered. All-or-nothing per query: any segment missing the requested
+// cross-counts/sums forces the caller to fall back to a scan-based path.
+func (db *DB) groupedTextCountMetadataBatch(ctx context.Context, source v3sql.Plan, group v3sql.BoundExpr, sumCol string, specs []v3sql.AggSpec, trace *executionTrace) (types.Batch, bool, error) {
+	if group.Kind != v3sql.BoundExprColumn || group.Type.Kind != types.KindText {
 		return types.Batch{}, false, nil
 	}
 	scan, segments, ok, err := db.metadataSegmentsForScan(ctx, source)
-	if !ok || err != nil || scan.Where != nil {
+	if !ok || err != nil {
 		return types.Batch{}, false, err
 	}
+
+	// Optional sibling-text predicate (count-filtered case).
+	var siblingCol, siblingText string
+	if scan.Where != nil {
+		if sumCol != "" {
+			// SUM-extended path doesn't currently combine with a WHERE — fall back.
+			return types.Batch{}, false, nil
+		}
+		pred, pushed, err := predicateFromBoundExpr(scan.Where)
+		if err != nil || !pushed {
+			return types.Batch{}, false, err
+		}
+		if pred.Op != storage.PredicateOpEq || pred.Text == "" {
+			return types.Batch{}, false, nil
+		}
+		if normalizeName(pred.Column) == normalizeName(group.Column) {
+			return types.Batch{}, false, nil
+		}
+		siblingCol = pred.Column
+		siblingText = pred.Text
+	}
+
 	counts := make(map[string]int64)
+	var sums map[string]int64
+	if sumCol != "" {
+		sums = make(map[string]int64)
+	}
 	stats := storage.ExecStats{}
 	for _, segment := range segments {
 		text, _, ok := textStatsForColumn(segment.Meta, group.Column)
-		if !ok || !mergeTextStatsCounts(counts, text) {
+		if !ok || !textStatsExact(text) {
 			return types.Batch{}, false, nil
+		}
+		switch {
+		case siblingCol != "":
+			bySibling, ok := text.GroupCounts[siblingCol]
+			if !ok {
+				return types.Batch{}, false, nil
+			}
+			// siblingText may be absent from this segment (zero-count contribution);
+			// that's not a fast-path failure as long as the sibling was tracked.
+			if parallel := bySibling[siblingText]; parallel != nil {
+				for i, value := range text.Values {
+					if parallel[i] == 0 {
+						continue
+					}
+					counts[value] += parallel[i]
+				}
+			}
+		case sumCol != "":
+			groupSums, ok := text.GroupSums[sumCol]
+			if !ok || len(groupSums) != len(text.Values) {
+				return types.Batch{}, false, nil
+			}
+			for i, value := range text.Values {
+				counts[value] += int64(text.Counts[i])
+				sums[value] += groupSums[i]
+			}
+		default:
+			for i, value := range text.Values {
+				counts[value] += int64(text.Counts[i])
+			}
 		}
 		stats.ObserveSegment(true)
 		for _, info := range segment.PageInfos {
@@ -1302,7 +1370,16 @@ func (db *DB) groupedTextCountMetadataBatch(ctx context.Context, source v3sql.Pl
 		}
 	}
 	trace.recordScan(scan, stats)
-	batch, err := groupStringCountBatch(group, spec, counts)
+
+	if sums != nil {
+		groups := make(map[string]v3exec.TextGroupCountSumState, len(counts))
+		for key, count := range counts {
+			groups[key] = v3exec.TextGroupCountSumState{Count: count, Sum: sums[key]}
+		}
+		batch, err := groupTextCountSumBatch(group, specs, groups)
+		return batch, true, err
+	}
+	batch, err := groupStringCountBatch(group, specs[0], counts)
 	return batch, true, err
 }
 
@@ -1333,127 +1410,6 @@ func textStatsPredicateCount(stats *storage.TextStats, pred storage.Predicate) (
 	default:
 		return 0, false
 	}
-}
-
-func mergeTextStatsCounts(dst map[string]int64, stats *storage.TextStats) bool {
-	if !textStatsExact(stats) {
-		return false
-	}
-	for i, value := range stats.Values {
-		dst[value] += int64(stats.Counts[i])
-	}
-	return true
-}
-
-// groupedTextCountFilteredMetadataBatch answers
-// `SELECT <text>, count(*) FROM t WHERE <other_text> = 'X' GROUP BY <text>`
-// from TextStats.GroupCounts cross-counts when the writer recorded them for
-// the sibling column. All-or-nothing per query: any segment missing the
-// cross-counts for the requested predicate column forces fallback to scan.
-func (db *DB) groupedTextCountFilteredMetadataBatch(ctx context.Context, source v3sql.Plan, group v3sql.BoundExpr, spec v3sql.AggSpec, trace *executionTrace) (types.Batch, bool, error) {
-	if group.Kind != v3sql.BoundExprColumn || group.Type.Kind != types.KindText || spec.Func != v3sql.AggregateCount || !spec.Star {
-		return types.Batch{}, false, nil
-	}
-	scan, segments, ok, err := db.metadataSegmentsForScan(ctx, source)
-	if !ok || err != nil || scan.Where == nil {
-		return types.Batch{}, false, err
-	}
-	pred, pushed, err := predicateFromBoundExpr(scan.Where)
-	if err != nil || !pushed {
-		return types.Batch{}, false, err
-	}
-	if pred.Op != storage.PredicateOpEq || pred.Text == "" {
-		return types.Batch{}, false, nil
-	}
-	siblingCol := pred.Column
-	if normalizeName(siblingCol) == normalizeName(group.Column) {
-		return types.Batch{}, false, nil
-	}
-	counts := make(map[string]int64)
-	stats := storage.ExecStats{}
-	for _, segment := range segments {
-		text, _, ok := textStatsForColumn(segment.Meta, group.Column)
-		if !ok || !textStatsExact(text) {
-			return types.Batch{}, false, nil
-		}
-		bySibling, ok := text.GroupCounts[siblingCol]
-		if !ok {
-			return types.Batch{}, false, nil
-		}
-		// pred.Text may be absent from this segment (zero-count contribution);
-		// that's not a fast-path failure as long as the sibling was tracked.
-		if parallel := bySibling[pred.Text]; parallel != nil {
-			for i, value := range text.Values {
-				if parallel[i] == 0 {
-					continue
-				}
-				counts[value] += parallel[i]
-			}
-		}
-		stats.ObserveSegment(true)
-		for _, info := range segment.PageInfos {
-			stats.ObservePage(int(info.Rows), 0, int(info.Rows), true)
-		}
-	}
-	trace.recordScan(scan, stats)
-	batch, err := groupStringCountBatch(group, spec, counts)
-	return batch, true, err
-}
-
-// mergeTextStatsCountSums extends mergeTextStatsCounts with the per-int-column
-// rolled-up sums from TextStats.GroupSums. Returns false when stats are
-// truncated, missing, or the requested sumCol wasn't recorded at write time —
-// any of those force the caller to fall back to scan-based aggregation.
-func mergeTextStatsCountSums(counts map[string]int64, sums map[string]int64, stats *storage.TextStats, sumCol string) bool {
-	if !textStatsExact(stats) {
-		return false
-	}
-	groupSums, ok := stats.GroupSums[sumCol]
-	if !ok || len(groupSums) != len(stats.Values) {
-		return false
-	}
-	for i, value := range stats.Values {
-		counts[value] += int64(stats.Counts[i])
-		sums[value] += groupSums[i]
-	}
-	return true
-}
-
-// groupedTextCountSumMetadataBatch is the SUM-extended sibling of
-// groupedTextCountMetadataBatch. Fires only when the writer sealed segment-
-// level GroupSums for the requested int column AND there is no WHERE clause,
-// answering the GROUP BY entirely from metadata with no payload reads.
-func (db *DB) groupedTextCountSumMetadataBatch(ctx context.Context, source v3sql.Plan, group v3sql.BoundExpr, sumCol string, specs []v3sql.AggSpec, trace *executionTrace) (types.Batch, bool, error) {
-	if group.Kind != v3sql.BoundExprColumn || group.Type.Kind != types.KindText || sumCol == "" {
-		return types.Batch{}, false, nil
-	}
-	scan, segments, ok, err := db.metadataSegmentsForScan(ctx, source)
-	if !ok || err != nil || scan.Where != nil {
-		return types.Batch{}, false, err
-	}
-	if len(segments) == 0 {
-		return types.Batch{}, false, nil
-	}
-	counts := make(map[string]int64)
-	sums := make(map[string]int64)
-	stats := storage.ExecStats{}
-	for _, segment := range segments {
-		text, _, ok := textStatsForColumn(segment.Meta, group.Column)
-		if !ok || !mergeTextStatsCountSums(counts, sums, text, sumCol) {
-			return types.Batch{}, false, nil
-		}
-		stats.ObserveSegment(true)
-		for _, info := range segment.PageInfos {
-			stats.ObservePage(int(info.Rows), 0, int(info.Rows), true)
-		}
-	}
-	trace.recordScan(scan, stats)
-	groups := make(map[string]v3exec.TextGroupCountSumState, len(counts))
-	for key, count := range counts {
-		groups[key] = v3exec.TextGroupCountSumState{Count: count, Sum: sums[key]}
-	}
-	batch, err := groupTextCountSumBatch(group, specs, groups)
-	return batch, true, err
 }
 
 func textStatsExact(stats *storage.TextStats) bool {

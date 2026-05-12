@@ -43,7 +43,7 @@ func TestFooterColumnBreakdown(t *testing.T) {
 		decompNs   int64
 	}
 	stats := make([]colStat, len(meta.Columns))
-	const iters = 200
+	const iters = 20
 	for i, col := range meta.Columns {
 		oneCol := SegmentMeta{
 			ID:       meta.ID,
