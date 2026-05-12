@@ -414,7 +414,7 @@ func pruneStrategy(expr v3sql.BoundExpr, kind types.Kind) (string, bool) {
 		case types.KindBool:
 			return "bool summary prune", expr.Op == v3sql.BoundOpEqual || expr.Op == v3sql.BoundOpNotEqual
 		case types.KindInt16, types.KindInt32, types.KindInt64, types.KindDate, types.KindTimestamp, types.KindTime:
-			return "min/max prune", isComparisonOp(expr.Op)
+			return intPruneStrategy(expr.Op), isComparisonOp(expr.Op)
 		case types.KindText, types.KindBytes:
 			return "text summary prune", expr.Op == v3sql.BoundOpEqual
 		case types.KindUUID:
@@ -429,7 +429,7 @@ func pruneStrategy(expr v3sql.BoundExpr, kind types.Kind) (string, bool) {
 		case types.KindBool:
 			return "bool summary prune", true
 		case types.KindInt16, types.KindInt32, types.KindInt64, types.KindDate, types.KindTimestamp, types.KindTime:
-			return "min/max prune", true
+			return "min/max + value prune", true
 		case types.KindText, types.KindBytes:
 			return "text summary prune", !expr.Not
 		case types.KindUUID:
@@ -437,6 +437,17 @@ func pruneStrategy(expr v3sql.BoundExpr, kind types.Kind) (string, bool) {
 		}
 	}
 	return "metadata prune", false
+}
+
+// intPruneStrategy reports the actual pruning families that can fire on this
+// predicate. Eq is the only binary op where the per-page distinct values or
+// hash bloom can prune in addition to min/max; the inequalities have no
+// value-level fallback so they only get min/max.
+func intPruneStrategy(op v3sql.BoundOp) string {
+	if op == v3sql.BoundOpEqual {
+		return "min/max + value prune"
+	}
+	return "min/max prune"
 }
 
 func isComparisonOp(op v3sql.BoundOp) bool {

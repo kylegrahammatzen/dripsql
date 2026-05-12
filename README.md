@@ -85,12 +85,12 @@ Snapshot (2026-05-12), `structured` profile, 10M rows, 2M-row segments, `sort_by
 | `SELECT count(*) WHERE path = '/checkout/confirm'` | 63 µs | text summary prune |
 | `SELECT count(*), sum(amount), min(amount), max(amount)` | 13 µs | metadata aggregates |
 | `SELECT country, count(*), sum(amount) GROUP BY country` | 15 µs | per-segment SMA |
-| `SELECT count(*) WHERE tenant_id = 42 AND event_type = 'checkout'` | 216 µs | min/max prune (sort_by) |
-| `SELECT count(*) WHERE tenant_id = 999999` | 6 µs | min/max prune (sort_by) |
-| `SELECT sum(amount) WHERE tenant_id = 42 AND event_type = 'checkout'` | 307 µs | min/max prune (sort_by) |
+| `SELECT count(*) WHERE tenant_id = 42 AND event_type = 'checkout'` | 216 µs | min/max + value prune (sort_by) |
+| `SELECT count(*) WHERE tenant_id = 999999` | 6 µs | min/max + value prune (sort_by) |
+| `SELECT sum(amount) WHERE tenant_id = 42 AND event_type = 'checkout'` | 307 µs | min/max + value prune (sort_by) |
 | `SELECT country, count(*) WHERE event_type = 'checkout' GROUP BY country` | 6 µs | cross-count SMA |
-| `SELECT count(*) WHERE user_id = 778` | 167 µs | min/max + int bloom prune |
-| `SELECT count(*) WHERE created_at = ...` | 143 µs | min/max + int bloom prune |
+| `SELECT count(*) WHERE user_id = 778` | 167 µs | min/max + value prune (int bloom) |
+| `SELECT count(*) WHERE created_at = ...` | 143 µs | min/max + value prune (int bloom) |
 | `SELECT count(*) WHERE event_uuid = '...'` | 250 µs | uuid summary prune |
 | `SELECT count(*) WHERE url = '...'` | 336 µs | text summary prune |
 
