@@ -22,30 +22,62 @@ go test -count=1 ./...
 
 `-count=1` bypasses Go's test cache so every invocation re-runs.
 
-## Performance commands
+## Benchmarks
 
-```
-go test ./internal/storage ./internal/storage/codec ./internal/sql -run ^$ -bench . -benchmem -benchtime=100ms -count=1
-```
+All benchmark commands assume `AMD Ryzen 7 3700X` / `Windows amd64`. Numbers shift on other hardware; the relative shape (and the comparisons in tables below) holds.
 
 Use longer `-benchtime` and higher `-count` for noisy paths.
 
-## Workload benchmark
+### Codec benchmarks (single page, 2048 rows)
 
-Benchmark usage and workflow are documented in [`cmd/bench/README.md`](cmd/bench/README.md).
+```
+go test ./internal/storage/codec -run ^$ -bench . -benchmem -benchtime=1s -count=1
+```
 
-### Baseline snapshot (2026-05-10)
+Snapshot (2026-05-11):
 
-Hardware: `AMD Ryzen 7 3700X`, `Windows amd64`.
-
-| Scope | Command / profile | Snapshot metric |
+| Bench | ns/op | allocs |
 | --- | --- | --- |
-| Event type count metadata | `go run ./cmd/bench -runs 3 -profile structured` (10,000,000-row point in sweep) | `count(*) WHERE event_type = 'checkout'` best `3.254ms`, avg `3.439ms`, payload `0 B`, result `2,500,000`. |
-| Text summary group scan | `go run ./cmd/bench -runs 3 -profile structured` (10,000,000-row point in sweep) | `event_type, count(*) GROUP BY event_type` best `2.666ms`, avg `2.684ms`, payload `0 B`, result `4` rows. |
-| Grouped text count + sum | `go run ./cmd/bench -runs 5 -profile structured -query "country aggregate summary"` (1,000,000-row point in sweep) | first `51.9ms`, best `8.040ms`, avg `17.3ms`, p95 `51.9ms`, payload `1.82 MiB`. |
-| Multi-aggregate coverage | `go run ./cmd/bench -runs 3 -profile all` (100,000-row point in sweep) | `count(*), sum(amount), min(amount), max(amount)` and `country, count(*), sum(amount) GROUP BY country` now report p95 + fractional bytes/match in output. |
+| `PlainDecodeInt64/DecodeInto_reuse` | 165 | 0 |
+| `PlainEncodeInt64/EncodeInto_reuse` | 309 | 0 |
+| `PlainDecodeText` | 913 | 0 |
+| `PlainEncodeText` | 1,461 | 0 |
+| `DictionaryDecodeText/DecodeInto_reuse` | 48 | 0 |
+| `DictionaryEncodeText` (`EncodeInto` only) | 78 | 0 |
+| `FORBitPackDecodeInt64` (widths 10-31) | 1,300-2,600 | 0 |
+| `FORBitPackEncodeInt64` (widths 10-31) | ~9,000 | 0 |
+| `ConstantDecodeInt64` | 964 | 0 |
+| `FlatePrepareText` (klauspost) | 395,000 | 24 |
+| `FlateDecodeText` (klauspost) | 258,000 | 71 |
+| `ZstdPrepareText` | 224,000 | 4 |
+| `ZstdDecodeText` | 81,000 | 1 |
 
-These are baseline reference points, not new benchmark claims.
+### Segment scan benchmarks (131,072 rows, full segment)
+
+```
+go test ./internal/storage -run ^$ -bench BenchmarkStorageReadSegmentDecode -benchtime=3s -count=1
+```
+
+Snapshot (2026-05-11):
+
+| Bench | ns/op | rows/s | allocs/op |
+| --- | --- | --- | --- |
+| `all_columns` | 21.7 ms | 6.0 M | 796 |
+| `flat_text` (high-cardinality, compressed) | 20.2 ms | 6.5 M | 798 |
+| `encoded_numeric` (FOR/Constant) | 1.9 ms | 70 M | 128 |
+| `dictionary_text` | 1.0 ms | 129 M | 128 |
+
+### Workload benchmark
+
+End-to-end query workload via the bench driver:
+
+```
+go run ./cmd/bench -runs 3 -profile structured
+```
+
+Full usage in [`cmd/bench/README.md`](cmd/bench/README.md). The driver exercises segment build, predicate pushdown, and aggregate execution end-to-end.
+
+These are reference points, not regression gates. Re-baseline with `-count=5` or higher for any comparison work.
 
 ## CLI
 
