@@ -76,6 +76,9 @@ func (db *DB) StorageStats(ctx context.Context, tableName string) (StorageStats,
 	for _, segment := range segments {
 		stats.Rows += int64(segment.Meta.Rows)
 		stats.TableBytes += segment.Size
+		if err := segment.Meta.LoadAllColumns(); err != nil {
+			return StorageStats{}, err
+		}
 		for _, col := range segment.Meta.Columns {
 			agg, ok := colAggs[col.Name]
 			if !ok {

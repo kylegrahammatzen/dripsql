@@ -821,8 +821,12 @@ func (db *DB) metadataSegmentsForScan(ctx context.Context, source v3sql.Plan) (*
 // is exact enough to drive metadata-only answers (the page-level hash filter
 // in particular needs exact counts). Returns nil/false otherwise.
 func textStatsForColumn(meta storage.SegmentMeta, column string) (*storage.TextStats, []storage.PageMeta, bool) {
-	for _, col := range meta.Columns {
+	for i, col := range meta.Columns {
 		if normalizeName(col.Name) == normalizeName(column) && col.Type.Kind == types.KindText {
+			if err := meta.LoadColumn(i); err != nil {
+				return nil, nil, false
+			}
+			col = meta.Columns[i]
 			if !textStatsExact(col.Text) {
 				return nil, nil, false
 			}
@@ -968,49 +972,45 @@ func (db *DB) parallelScalarAggregateBatch(ctx context.Context, source v3sql.Pla
 	if !ok || len(specs) == 0 {
 		return types.Batch{}, false, nil
 	}
-	base, pushPred, hasPushPred, ok, err := db.parallelScanIterator(ctx, scan)
-	if err != nil || !ok {
-		return types.Batch{}, false, err
-	}
-	workers := min(len(base.Segments), runtime.GOMAXPROCS(0))
-	if workers < 2 {
-		return types.Batch{}, false, nil
-	}
 	master, err := db.aggregateSinks(source, specs)
 	if err != nil {
 		return types.Batch{}, false, err
 	}
-	base.OutputColumns = columnNamesForIDs(scan.Table, scan.Columns)
-	base.EncodedOutputColumns = columnSet((&v3exec.Aggregate{Sinks: master}).EncodedColumns())
-
-	workerSinks := make([][]v3exec.AggregateSink, workers)
-	for w := range workerSinks {
-		sinks, err := db.aggregateSinks(source, specs)
-		if err != nil {
-			return types.Batch{}, false, err
-		}
-		workerSinks[w] = sinks
+	var factoryErr error
+	states, stats, ok, err := runParallelAggregate(ctx, db, scan,
+		func(base *storage.SegmentScanIterator) {
+			base.OutputColumns = columnNamesForIDs(scan.Table, scan.Columns)
+			base.EncodedOutputColumns = columnSet((&v3exec.Aggregate{Sinks: master}).EncodedColumns())
+		},
+		func() []v3exec.AggregateSink {
+			if factoryErr != nil {
+				return nil
+			}
+			sinks, fErr := db.aggregateSinks(source, specs)
+			if fErr != nil {
+				factoryErr = fErr
+			}
+			return sinks
+		},
+		func(it storage.SegmentScanIterator, sinks []v3exec.AggregateSink) error {
+			return consumeAggregateIterator(it, sinks)
+		},
+	)
+	if factoryErr != nil {
+		return types.Batch{}, false, factoryErr
 	}
-	stats, err := base.RunParallel(ctx, workers, func(w int, it storage.SegmentScanIterator) error {
-		if hasPushPred {
-			it.Predicate = storage.NewPredicateEvaluator(pushPred)
-		}
-		return consumeAggregateIterator(it, workerSinks[w])
-	})
-	if err != nil {
-		return types.Batch{}, true, err
+	if !ok || err != nil {
+		return types.Batch{}, ok, err
 	}
-	mergedStats := storage.ExecStats{}
-	for w, sinks := range workerSinks {
+	for _, sinks := range states {
 		if sinks == nil {
 			continue
 		}
 		if err := mergeAggregateSinks(master, sinks, specs); err != nil {
 			return types.Batch{}, true, err
 		}
-		mergeExecStats(&mergedStats, stats[w])
 	}
-	trace.recordScan(scan, mergedStats)
+	trace.recordScan(scan, stats)
 	batch, err := scalarAggregateBatch(specs, master)
 	return batch, true, err
 }
@@ -1079,6 +1079,48 @@ func mergeExecStats(dst *storage.ExecStats, src storage.ExecStats) {
 	dst.RowsCandidate += src.RowsCandidate
 	dst.RowsMatched += src.RowsMatched
 	dst.PayloadBytesRead += src.PayloadBytesRead
+}
+
+// runParallelAggregate fans a scan across workers, each owning the state
+// produced by factory(). ok=false (no error) means the plan cannot be
+// parallelized; callers fall through to the serial path. configure runs
+// after eligibility check so callers can set OutputColumns / EncodedOutputColumns.
+func runParallelAggregate[S any](
+	ctx context.Context,
+	db *DB,
+	scan *v3sql.ScanPlan,
+	configure func(base *storage.SegmentScanIterator),
+	factory func() S,
+	consume func(it storage.SegmentScanIterator, state S) error,
+) (states []S, stats storage.ExecStats, ok bool, err error) {
+	base, pushPred, hasPushPred, ok, err := db.parallelScanIterator(ctx, scan)
+	if err != nil || !ok {
+		return nil, storage.ExecStats{}, false, err
+	}
+	workers := min(len(base.Segments), runtime.GOMAXPROCS(0))
+	if workers < 2 {
+		return nil, storage.ExecStats{}, false, nil
+	}
+	if configure != nil {
+		configure(&base)
+	}
+	states = make([]S, workers)
+	for w := range states {
+		states[w] = factory()
+	}
+	perWorkerStats, err := base.RunParallel(ctx, workers, func(w int, it storage.SegmentScanIterator) error {
+		if hasPushPred {
+			it.Predicate = storage.NewPredicateEvaluator(pushPred)
+		}
+		return consume(it, states[w])
+	})
+	if err != nil {
+		return states, storage.ExecStats{}, true, err
+	}
+	for w := range states {
+		mergeExecStats(&stats, perWorkerStats[w])
+	}
+	return states, stats, true, nil
 }
 
 func (db *DB) groupedAggregateBatch(ctx context.Context, plan *v3sql.AggregatePlan, trace *executionTrace) (types.Batch, error) {
@@ -1176,35 +1218,24 @@ func (db *DB) parallelGroupedTextCountSumBatch(ctx context.Context, source v3sql
 	if !ok {
 		return types.Batch{}, false, nil
 	}
-	base, pushPred, hasPushPred, ok, err := db.parallelScanIterator(ctx, scan)
-	if err != nil || !ok {
-		return types.Batch{}, false, err
-	}
-	workers := min(len(base.Segments), runtime.GOMAXPROCS(0))
-	if workers < 2 {
-		return types.Batch{}, false, nil
-	}
-	base.OutputColumns = []string{group.Column, sumCol}
-
-	workerSinks := make([]*v3exec.TextGroupCountSumSink, workers)
-	for w := range workerSinks {
-		workerSinks[w] = &v3exec.TextGroupCountSumSink{Group: group.Column, SumCol: sumCol, Groups: make(map[string]v3exec.TextGroupCountSumState)}
-	}
-	stats, err := base.RunParallel(ctx, workers, func(w int, it storage.SegmentScanIterator) error {
-		if hasPushPred {
-			it.Predicate = storage.NewPredicateEvaluator(pushPred)
-		}
-		sink := workerSinks[w]
-		return it.ForEach(func(batch types.Batch, sel types.SelectionMask) error {
-			return sink.Push(batch, sel)
-		})
-	})
-	if err != nil {
-		return types.Batch{}, true, err
+	sinks, stats, ok, err := runParallelAggregate(ctx, db, scan,
+		func(base *storage.SegmentScanIterator) {
+			base.OutputColumns = []string{group.Column, sumCol}
+		},
+		func() *v3exec.TextGroupCountSumSink {
+			return &v3exec.TextGroupCountSumSink{Group: group.Column, SumCol: sumCol, Groups: make(map[string]v3exec.TextGroupCountSumState)}
+		},
+		func(it storage.SegmentScanIterator, sink *v3exec.TextGroupCountSumSink) error {
+			return it.ForEach(func(batch types.Batch, sel types.SelectionMask) error {
+				return sink.Push(batch, sel)
+			})
+		},
+	)
+	if !ok || err != nil {
+		return types.Batch{}, ok, err
 	}
 	merged := make(map[string]v3exec.TextGroupCountSumState)
-	mergedStats := storage.ExecStats{}
-	for w, sink := range workerSinks {
+	for _, sink := range sinks {
 		for key, state := range sink.Groups {
 			cur := merged[key]
 			next, ok := v3exec.AddInt64(cur.Sum, state.Sum)
@@ -1215,9 +1246,8 @@ func (db *DB) parallelGroupedTextCountSumBatch(ctx context.Context, source v3sql
 			cur.Sum = next
 			merged[key] = cur
 		}
-		mergeExecStats(&mergedStats, stats[w])
 	}
-	trace.recordScan(scan, mergedStats)
+	trace.recordScan(scan, stats)
 	batch, err := groupTextCountSumBatch(group, specs, merged)
 	return batch, true, err
 }
@@ -1421,67 +1451,49 @@ func (db *DB) parallelGroupedCountBatch(ctx context.Context, source v3sql.Plan, 
 	if !ok || group.Kind != v3sql.BoundExprColumn || spec.Func != v3sql.AggregateCount || !spec.Star {
 		return types.Batch{}, false, nil
 	}
-	base, pushPred, hasPushPred, ok, err := db.parallelScanIterator(ctx, scan)
-	if err != nil || !ok {
-		return types.Batch{}, false, err
+	configure := func(base *storage.SegmentScanIterator) {
+		base.OutputColumns = []string{group.Column}
 	}
-	workers := min(len(base.Segments), runtime.GOMAXPROCS(0))
-	if workers < 2 {
-		return types.Batch{}, false, nil
-	}
-	base.OutputColumns = []string{group.Column}
 
 	if group.Type.Kind == types.KindText {
-		counts := make([]map[string]int64, workers)
-		for w := range counts {
-			counts[w] = make(map[string]int64)
-		}
-		stats, err := base.RunParallel(ctx, workers, func(w int, it storage.SegmentScanIterator) error {
-			if hasPushPred {
-				it.Predicate = storage.NewPredicateEvaluator(pushPred)
-			}
-			sink := &v3exec.GroupStringCountSink{Column: group.Column, Counts: counts[w]}
-			return consumeAggregateIterator(it, []v3exec.AggregateSink{sink})
-		})
-		if err != nil {
-			return types.Batch{}, true, err
+		counts, stats, ok, err := runParallelAggregate(ctx, db, scan, configure,
+			func() map[string]int64 { return make(map[string]int64) },
+			func(it storage.SegmentScanIterator, c map[string]int64) error {
+				sink := &v3exec.GroupStringCountSink{Column: group.Column, Counts: c}
+				return consumeAggregateIterator(it, []v3exec.AggregateSink{sink})
+			},
+		)
+		if !ok || err != nil {
+			return types.Batch{}, ok, err
 		}
 		merged := make(map[string]int64)
-		mergedStats := storage.ExecStats{}
-		for w, partial := range counts {
+		for _, partial := range counts {
 			for key, count := range partial {
 				merged[key] += count
 			}
-			mergeExecStats(&mergedStats, stats[w])
 		}
-		trace.recordScan(scan, mergedStats)
+		trace.recordScan(scan, stats)
 		batch, err := groupStringCountBatch(group, spec, merged)
 		return batch, true, err
 	}
 
-	counts := make([]map[v3exec.GroupKey]int64, workers)
-	for w := range counts {
-		counts[w] = make(map[v3exec.GroupKey]int64)
-	}
-	stats, err := base.RunParallel(ctx, workers, func(w int, it storage.SegmentScanIterator) error {
-		if hasPushPred {
-			it.Predicate = storage.NewPredicateEvaluator(pushPred)
-		}
-		sink := &v3exec.GroupAnyCountSink{Column: group.Column, Counts: counts[w]}
-		return consumeAggregateIterator(it, []v3exec.AggregateSink{sink})
-	})
-	if err != nil {
-		return types.Batch{}, true, err
+	counts, stats, ok, err := runParallelAggregate(ctx, db, scan, configure,
+		func() map[v3exec.GroupKey]int64 { return make(map[v3exec.GroupKey]int64) },
+		func(it storage.SegmentScanIterator, c map[v3exec.GroupKey]int64) error {
+			sink := &v3exec.GroupAnyCountSink{Column: group.Column, Counts: c}
+			return consumeAggregateIterator(it, []v3exec.AggregateSink{sink})
+		},
+	)
+	if !ok || err != nil {
+		return types.Batch{}, ok, err
 	}
 	merged := make(map[v3exec.GroupKey]int64)
-	mergedStats := storage.ExecStats{}
-	for w, partial := range counts {
+	for _, partial := range counts {
 		for key, count := range partial {
 			merged[key] += count
 		}
-		mergeExecStats(&mergedStats, stats[w])
 	}
-	trace.recordScan(scan, mergedStats)
+	trace.recordScan(scan, stats)
 	col, ok := sourceColumnDef(source, group.Column)
 	if !ok {
 		return types.Batch{}, true, fmt.Errorf("missing GROUP BY column %q", group.Column)
