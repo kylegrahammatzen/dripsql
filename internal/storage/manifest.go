@@ -7,6 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"sync/atomic"
 )
 
 const manifestFileName = "manifest.jsonl"
@@ -56,20 +59,15 @@ func appendManifest(dir string, segment storedSegment) (err error) {
 	return nil
 }
 
-func readManifest(dir string) ([]storedSegment, error) {
-	data, err := os.ReadFile(filepath.Join(dir, manifestFileName))
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if len(data) == 0 {
-		return nil, nil
-	}
+type manifestRecord struct {
+	line   int
+	record manifestSegment
+}
+
+func parseManifestRecords(data []byte) ([]manifestRecord, error) {
 	complete := bytes.HasSuffix(data, []byte{'\n'})
 	lines := bytes.Split(data, []byte{'\n'})
-	segments := make([]storedSegment, 0, len(lines))
+	records := make([]manifestRecord, 0, len(lines))
 	for i, line := range lines {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
@@ -84,15 +82,84 @@ func readManifest(dir string) ([]storedSegment, error) {
 		if record.Path == "" {
 			return nil, fmt.Errorf("manifest line %d: segment path is required", i+1)
 		}
-		path := filepath.Join(dir, filepath.FromSlash(record.Path))
-		footer, size, err := ReadSegmentFooter(path)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateManifestSegmentMeta(i+1, record.Meta, footer); err != nil {
-			return nil, err
-		}
-		segments = append(segments, storedSegment{path: path, meta: footer, size: size})
+		records = append(records, manifestRecord{line: i + 1, record: record})
+	}
+	return records, nil
+}
+
+func readManifest(dir string) ([]storedSegment, error) {
+	data, err := os.ReadFile(filepath.Join(dir, manifestFileName))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	records, err := parseManifestRecords(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+
+	segments := make([]storedSegment, len(records))
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(records) {
+		workers = len(records)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	var next atomic.Int64
+	var failed atomic.Bool
+	var firstErr error
+	var errOnce sync.Once
+	var wg sync.WaitGroup
+	total := int64(len(records))
+	recordErr := func(err error) {
+		errOnce.Do(func() { firstErr = err })
+		failed.Store(true)
+	}
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				if failed.Load() {
+					return
+				}
+				i := next.Add(1) - 1
+				if i >= total {
+					return
+				}
+				rec := records[i]
+				path := filepath.Join(dir, filepath.FromSlash(rec.record.Path))
+				footer, size, err := ReadSegmentFooter(path)
+				if err != nil {
+					recordErr(err)
+					return
+				}
+				if err := validateManifestSegmentMeta(rec.line, rec.record.Meta, footer); err != nil {
+					recordErr(err)
+					return
+				}
+				infos, err := buildSegmentPageInfos(footer, nil)
+				if err != nil {
+					recordErr(err)
+					return
+				}
+				segments[i] = storedSegment{path: path, meta: footer, size: size, pageInfos: infos}
+			}
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return segments, nil
 }

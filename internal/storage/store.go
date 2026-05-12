@@ -673,18 +673,7 @@ func validateStoreBatch(table types.TableSpec, batch types.Batch) error {
 }
 
 func loadTableSegments(dir string) ([]storedSegment, error) {
-	segments, err := readManifest(dir)
-	if err != nil {
-		return nil, err
-	}
-	for i := range segments {
-		infos, err := buildSegmentPageInfos(segments[i].meta, nil)
-		if err != nil {
-			return nil, err
-		}
-		segments[i].pageInfos = infos
-	}
-	return segments, nil
+	return readManifest(dir)
 }
 
 func nextSegmentID(segments []storedSegment) SegmentID {
