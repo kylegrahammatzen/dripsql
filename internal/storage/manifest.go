@@ -85,14 +85,14 @@ func readManifest(dir string) ([]storedSegment, error) {
 			return nil, fmt.Errorf("manifest line %d: segment path is required", i+1)
 		}
 		path := filepath.Join(dir, filepath.FromSlash(record.Path))
-		footer, err := ReadSegmentFooter(path)
+		footer, size, err := ReadSegmentFooter(path)
 		if err != nil {
 			return nil, err
 		}
 		if err := validateManifestSegmentMeta(i+1, record.Meta, footer); err != nil {
 			return nil, err
 		}
-		segments = append(segments, storedSegment{path: path, meta: footer})
+		segments = append(segments, storedSegment{path: path, meta: footer, size: size})
 	}
 	return segments, nil
 }

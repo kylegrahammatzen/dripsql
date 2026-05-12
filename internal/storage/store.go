@@ -454,7 +454,7 @@ func (s *Store) ensureTableState(table types.TableSpec, create bool) (*tableStat
 			return nil, err
 		}
 	}
-	segments, err := loadTableSegments(dir, s.files)
+	segments, err := loadTableSegments(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -672,15 +672,17 @@ func validateStoreBatch(table types.TableSpec, batch types.Batch) error {
 	return nil
 }
 
-func loadTableSegments(dir string, fileCache *segmentFileCache) ([]storedSegment, error) {
+func loadTableSegments(dir string) ([]storedSegment, error) {
 	segments, err := readManifest(dir)
 	if err != nil {
 		return nil, err
 	}
 	for i := range segments {
-		if err := populateStoredSegmentCache(&segments[i], fileCache); err != nil {
+		infos, err := buildSegmentPageInfos(segments[i].meta, nil)
+		if err != nil {
 			return nil, err
 		}
+		segments[i].pageInfos = infos
 	}
 	return segments, nil
 }

@@ -21,7 +21,7 @@ func TestWriteReadSegmentFooterRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	got, err := ReadSegmentFooter(path)
+	got, _, err := ReadSegmentFooter(path)
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestWriteSegmentStoresSummaryStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	got, err := ReadSegmentFooter(path)
+	got, _, err := ReadSegmentFooter(path)
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestWriteSegmentStoresBoolAndInt16Stats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	got, err := ReadSegmentFooter(path)
+	got, _, err := ReadSegmentFooter(path)
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestReadSegmentFooterRejectsCorruption(t *testing.T) {
 			if err := os.WriteFile(corruptPath, tt.data, 0o644); err != nil {
 				t.Fatalf("WriteFile: %v", err)
 			}
-			if _, err := ReadSegmentFooter(corruptPath); err == nil {
+			if _, _, err := ReadSegmentFooter(corruptPath); err == nil {
 				t.Fatal("expected error")
 			}
 		})
@@ -489,7 +489,7 @@ func TestReadSegmentConcurrentReaders(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := ReadSegmentFooter(path); err != nil {
+			if _, _, err := ReadSegmentFooter(path); err != nil {
 				errs <- err
 				return
 			}

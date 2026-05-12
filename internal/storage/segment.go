@@ -224,46 +224,51 @@ func encodeSegmentBatchPage(col types.Column, rowStart int, scratch []byte, out 
 	out.scratch = nextScratch
 }
 
-func ReadSegmentFooter(path string) (SegmentMeta, error) {
+func ReadSegmentFooter(path string) (SegmentMeta, int64, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return SegmentMeta{}, err
+		return SegmentMeta{}, 0, err
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return SegmentMeta{}, err
+		return SegmentMeta{}, 0, err
 	}
+	size := info.Size()
 	minSize := int64(len(segmentMagic)*2 + 8)
-	if info.Size() < minSize {
-		return SegmentMeta{}, fmt.Errorf("segment %q is too small", path)
+	if size < minSize {
+		return SegmentMeta{}, 0, fmt.Errorf("segment %q is too small", path)
 	}
 	header := make([]byte, len(segmentMagic))
 	if _, err := readAt(file, header, 0); err != nil {
-		return SegmentMeta{}, err
+		return SegmentMeta{}, 0, err
 	}
 	if string(header) != segmentMagic {
-		return SegmentMeta{}, fmt.Errorf("segment %q has invalid header", path)
+		return SegmentMeta{}, 0, fmt.Errorf("segment %q has invalid header", path)
 	}
 	tail := make([]byte, len(segmentMagic)+8)
-	if _, err := readAt(file, tail, info.Size()-int64(len(tail))); err != nil {
-		return SegmentMeta{}, err
+	if _, err := readAt(file, tail, size-int64(len(tail))); err != nil {
+		return SegmentMeta{}, 0, err
 	}
 	if string(tail[8:]) != segmentMagic {
-		return SegmentMeta{}, fmt.Errorf("segment %q has invalid footer magic", path)
+		return SegmentMeta{}, 0, fmt.Errorf("segment %q has invalid footer magic", path)
 	}
 	footerLen := binary.LittleEndian.Uint64(tail[:8])
-	dataEnd := info.Size() - int64(len(tail))
+	dataEnd := size - int64(len(tail))
 	footerCapacity := dataEnd - int64(len(segmentMagic))
 	if footerCapacity < 0 || footerLen > uint64(footerCapacity) || footerLen > uint64(math.MaxInt) {
-		return SegmentMeta{}, fmt.Errorf("segment %q has invalid footer length", path)
+		return SegmentMeta{}, 0, fmt.Errorf("segment %q has invalid footer length", path)
 	}
 	footerStart := dataEnd - int64(footerLen)
 	footer := make([]byte, int(footerLen))
 	if _, err := readAt(file, footer, footerStart); err != nil {
-		return SegmentMeta{}, err
+		return SegmentMeta{}, 0, err
 	}
-	return unmarshalSegmentMeta(footer)
+	meta, err := unmarshalSegmentMeta(footer)
+	if err != nil {
+		return SegmentMeta{}, 0, err
+	}
+	return meta, size, nil
 }
 
 func encodeSegmentPageInto(v types.Vec, scratch []byte) (codec.Page, []byte, error) {

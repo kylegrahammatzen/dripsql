@@ -191,7 +191,7 @@ func TestWriteSegmentPopulatesSMAForLowCardText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	got, err := ReadSegmentFooter(path)
+	got, _, err := ReadSegmentFooter(path)
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestWriteSegmentPopulatesCrossCounts(t *testing.T) {
 	if _, err := WriteSegment(path, 1, []types.Batch{batch}); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	got, err := ReadSegmentFooter(path)
+	got, _, err := ReadSegmentFooter(path)
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestWriteSegmentSMAHandlesInt32(t *testing.T) {
 	if _, err := WriteSegment(path, 1, []types.Batch{batch}); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	got, err := ReadSegmentFooter(path)
+	got, _, err := ReadSegmentFooter(path)
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestWriteSegmentSkipsSMAForTruncatedText(t *testing.T) {
 	if _, err := WriteSegment(path, 1, []types.Batch{batch}); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	got, err := ReadSegmentFooter(path)
+	got, _, err := ReadSegmentFooter(path)
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}

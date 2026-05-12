@@ -52,7 +52,7 @@ func TestInt64BloomRoundTripsThroughFooter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	reopened, err := ReadSegmentFooter(path)
+	reopened, _, err := ReadSegmentFooter(path)
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
