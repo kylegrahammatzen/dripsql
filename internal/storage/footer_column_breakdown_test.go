@@ -15,7 +15,7 @@ import (
 // It reads a real segment file from the structured bench DB so the numbers
 // reflect production-shaped metadata. Skipped if the file is missing.
 func TestFooterColumnBreakdown(t *testing.T) {
-	const path = `..\..\db\bench\structured\seg-default\tables\events\segments\0000000000000001.dsv3`
+	const path = `..\..\db\bench\structured\seg-2097152\tables\events\segments\0000000000000001.dsv3`
 	if _, err := os.Stat(path); err != nil {
 		t.Skipf("bench segment not available at %s: %v", path, err)
 	}

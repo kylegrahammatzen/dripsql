@@ -885,14 +885,16 @@ func TestSegmentScanIteratorPrunesUUIDStatsWithBloom(t *testing.T) {
 }
 
 func TestTextSegmentBloomSizing(t *testing.T) {
-	if got := textPageBloomWordsFor(types.StandardBatchRows); got != 512 {
-		t.Fatalf("page bloom words = %d, want %d", got, 512)
+	wantPage := nextPowerOfTwo((types.StandardBatchRows*textPageBloomBitsPerValue + 63) / 64)
+	if got := textPageBloomWordsFor(types.StandardBatchRows); got != wantPage {
+		t.Fatalf("page bloom words = %d, want %d", got, wantPage)
 	}
 	if got := textSegmentBloomWordsFor(TextStatsMaxValues + 1); got != textSegmentBloomMinWords {
 		t.Fatalf("small bloom words = %d, want %d", got, textSegmentBloomMinWords)
 	}
-	if got := textSegmentBloomWordsFor(DefaultSegmentRows); got != 32*1024 {
-		t.Fatalf("default segment bloom words = %d, want %d", got, 32*1024)
+	wantDefault := nextPowerOfTwo((DefaultSegmentRows*textSegmentBloomBitsPerValue + 63) / 64)
+	if got := textSegmentBloomWordsFor(DefaultSegmentRows); got != wantDefault {
+		t.Fatalf("default segment bloom words = %d, want %d", got, wantDefault)
 	}
 	if got := textSegmentBloomWordsFor(2_097_152); got != textSegmentBloomMaxWords {
 		t.Fatalf("large segment bloom words = %d, want %d", got, textSegmentBloomMaxWords)

@@ -15,9 +15,26 @@ const (
 )
 
 const (
-	textSegmentBloomBitsPerValue = 16
+	// Bloom-filter sizing. We size in bits-per-distinct-value; standard bloom
+	// math gives FPR ≈ (1 - e^(-k/(m/n)))^k.
+	//
+	// Segment-level bloom: at 8 bits/value with 3 probes the FPR is ~3%,
+	// which is fine for the "min/max already pruned most segments, bloom
+	// catches the rest" role. The previous 16 bits/value at 3 probes was
+	// ~0.5% FPR but 2× the storage; the high-cardinality int/UUID columns
+	// (user_id, event_uuid, etc.) carried ~500 KB blooms per segment as a
+	// result. Halving bits-per-value halves the on-disk bloom footprint
+	// and cuts ~50% off the per-segment flate-decompress work during cold
+	// open.
+	//
+	// Page-level bloom stays at 16 bits/value with 8 probes (~0.06% FPR).
+	// Page blooms are what gate actual page payload reads, so a false
+	// positive directly costs a page-payload decode; the page blooms are
+	// also already tiny in absolute terms (~4 KB per page) so shrinking
+	// them buys little.
+	textSegmentBloomBitsPerValue = 8
 	textPageBloomBitsPerValue    = 16
-	textSegmentBloomMinWords     = 1024
+	textSegmentBloomMinWords     = 64
 	textSegmentBloomMaxWords     = 128 * 1024
 	textSegmentBloomProbes       = 3
 	textPageBloomProbes          = 8
