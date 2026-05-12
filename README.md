@@ -79,24 +79,24 @@ Snapshot (2026-05-12), `structured` profile, 10M rows, 2M-row segments, `sort_by
 
 | Query | best | strategy |
 | --- | --- | --- |
-| `SELECT count(*) WHERE event_type = 'checkout'` | 28 µs | text summary + metadata count |
-| `SELECT event_type, count(*) GROUP BY event_type` | 8 µs | metadata group |
-| `SELECT status, count(*) GROUP BY status` | 8 µs | metadata group |
-| `SELECT count(*) WHERE path = '/checkout/confirm'` | 63 µs | text summary prune |
-| `SELECT count(*), sum(amount), min(amount), max(amount)` | 13 µs | metadata aggregates |
-| `SELECT country, count(*), sum(amount) GROUP BY country` | 15 µs | per-segment SMA |
-| `SELECT count(*) WHERE tenant_id = 42 AND event_type = 'checkout'` | 216 µs | min/max + value prune (sort_by) |
-| `SELECT count(*) WHERE tenant_id = 999999` | 6 µs | min/max + value prune (sort_by) |
-| `SELECT sum(amount) WHERE tenant_id = 42 AND event_type = 'checkout'` | 307 µs | min/max + value prune (sort_by) |
+| `SELECT count(*) WHERE event_type = 'checkout'` | 45 µs | text summary + metadata count |
+| `SELECT event_type, count(*) GROUP BY event_type` | 5 µs | metadata group |
+| `SELECT status, count(*) GROUP BY status` | 4 µs | metadata group |
+| `SELECT count(*) WHERE path = '/checkout/confirm'` | 27 µs | text summary prune |
+| `SELECT count(*), sum(amount), min(amount), max(amount)` | 6 µs | metadata aggregates |
+| `SELECT country, count(*), sum(amount) GROUP BY country` | 4 µs | per-segment SMA |
+| `SELECT count(*) WHERE tenant_id = 42 AND event_type = 'checkout'` | 168 µs | min/max + value prune (sort_by) |
+| `SELECT count(*) WHERE tenant_id = 999999` | 3 µs | min/max + value prune (sort_by) |
+| `SELECT sum(amount) WHERE tenant_id = 42 AND event_type = 'checkout'` | 168 µs | min/max + value prune (sort_by) |
 | `SELECT country, count(*) WHERE event_type = 'checkout' GROUP BY country` | 6 µs | cross-count SMA |
-| `SELECT count(*) WHERE user_id = 778` | 167 µs | min/max + value prune (int bloom) |
-| `SELECT count(*) WHERE created_at = ...` | 143 µs | min/max + value prune (int bloom) |
-| `SELECT count(*) WHERE event_uuid = '...'` | 250 µs | uuid summary prune |
-| `SELECT count(*) WHERE url = '...'` | 336 µs | text summary prune |
+| `SELECT count(*) WHERE user_id = 778` | 170 µs | min/max + value prune (int bloom) |
+| `SELECT count(*) WHERE created_at = ...` | 168 µs | min/max + value prune (int bloom) |
+| `SELECT count(*) WHERE event_uuid = '...'` | 174 µs | uuid summary prune |
+| `SELECT count(*) WHERE url = '...'` | 253 µs | text summary prune |
 
-Every query is now sub-millisecond on this profile.
+Every query is sub-millisecond on this profile.
 
-Pass `-mode cold-ish` to close and reopen the database between every sample, so each measurement starts with an empty in-process page cache. OS file cache is not dropped (no portable way without admin), so this measures "first query after process restart" rather than truly cold disk — and shows that cold-cache cost is dominated by segment-footer loading at open time, not by the queries themselves.
+Pass `-mode cold-ish` to close and reopen the database between every sample, so each measurement starts with an empty in-process state. On this profile cold-ish for `user id lookup` lands at **150 ms best / 168 ms avg** — within the open path, not the query path. The cost decomposes into reading and parsing the manifest, then loading per-segment footers in parallel; the predicate-evaluation work after that stays in the microsecond range observed warm. OS file cache is not dropped (no portable way without admin), so this still measures "first query after process restart" rather than truly cold disk.
 
 Full usage in [`cmd/bench/README.md`](cmd/bench/README.md). The driver exercises segment build, predicate pushdown, and aggregate execution end-to-end.
 
