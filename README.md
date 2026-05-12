@@ -103,7 +103,7 @@ Four query modes decompose the latency picture:
 - `byte-cold`: DB stays open; the in-process byte cache is cleared between samples.
 - `cold-ish`: DB closed and reopened between every sample.
 
-On this profile, `user id lookup` cold-ish lands at **~30 ms best / ~35 ms avg** at 5-segment scale (10M rows, 2M-row segments). Scaling up to 100M rows (763 default-sized segments) puts cold-ish at **~700 ms best / ~780 ms avg**, dominated by per-segment footer decompression in parallel. Cold-ish cost is in the open path, not the query path: `byte-cold` for the same query is 100–200 µs, which is the actual query-and-byte-cache-miss work.
+On this profile, `user id lookup` cold-ish lands at **~30 ms best / ~40 ms avg** at 5-segment scale (10M rows, 2M-row segments). Scaling up to 100M rows (763 default-sized segments) puts cold-ish at **~465 ms best / ~490 ms avg**. Cold-ish cost is in the open path, not the query path: `byte-cold` for the same query is 100–200 µs, which is the actual query-and-byte-cache-miss work.
 
 OS file cache is not dropped (no portable way without admin), so cold-ish still measures "first query after process restart" rather than truly cold disk.
 

@@ -835,14 +835,6 @@ func createBenchTable(ctx context.Context, db *engine.DB, profile profileSpec, s
 	return db.CreateTable(ctx, spec)
 }
 
-func (p profileSpec) createTableSQL(table string) string {
-	cols := make([]string, len(p.columns))
-	for i, col := range p.columns {
-		cols[i] = col.name + " " + col.typ.String() + " NOT NULL"
-	}
-	return "CREATE TABLE " + table + " (" + strings.Join(cols, ", ") + ")"
-}
-
 func (p profileSpec) lookupValues(rows int64) profileLookupQueries {
 	lookupRow := benchmarkRowForLookup(rows)
 	values := profileLookupQueries{

@@ -392,19 +392,6 @@ func textStats(values types.VarBytes, valid types.Validity) *TextStats {
 	return out
 }
 
-func compactSortedUint32(values []uint32) []uint32 {
-	if len(values) < 2 {
-		return values
-	}
-	out := values[:1]
-	for _, value := range values[1:] {
-		if value != out[len(out)-1] {
-			out = append(out, value)
-		}
-	}
-	return out
-}
-
 func textHash32String(value string) uint32 {
 	const (
 		offset64 = 14695981039346656037
