@@ -5,7 +5,14 @@ import (
 	"sync"
 )
 
-const defaultSegmentFileCacheMax = 256
+// defaultSegmentFileCacheMax bounds how many segment file handles the store
+// keeps open. The previous value of 256 thrashed on workloads where a single
+// query touched more segments than that (e.g. tenant_id=42 on a sort-by-
+// tenant_id table at 100M rows lands in every segment); each subsequent
+// query re-opened the evicted handles via os.Open, which showed up as ~64%
+// of warm-path CPU on Windows. 4096 covers the workloads we benchmark and
+// is well inside OS open-file limits.
+const defaultSegmentFileCacheMax = 4096
 
 type segmentFileCache struct {
 	mu     sync.Mutex
