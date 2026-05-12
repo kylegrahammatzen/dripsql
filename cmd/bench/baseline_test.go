@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kylegrahammatzen/dripsql/internal/explain"
+	"github.com/kylegrahammatzen/dripsql/internal/engine"
 )
 
 func TestWriteDiffPrintsRegressionsOnly(t *testing.T) {
@@ -17,18 +17,18 @@ func TestWriteDiffPrintsRegressionsOnly(t *testing.T) {
 		Rows:    1000,
 		Env:     envInfo{Commit: "abc123de"},
 		Queries: []queryReport{
-			{Name: "fast", Timing: explain.Timing{AvgMs: 10}},
-			{Name: "regress", Timing: explain.Timing{AvgMs: 100}},
-			{Name: "stable", Timing: explain.Timing{AvgMs: 50}},
+			{Name: "fast", Timing: engine.Timing{AvgNs: 10 * int64(time.Millisecond)}},
+			{Name: "regress", Timing: engine.Timing{AvgNs: 100 * int64(time.Millisecond)}},
+			{Name: "stable", Timing: engine.Timing{AvgNs: 50 * int64(time.Millisecond)}},
 		},
 	}
 	current := benchReport{
 		Profile: "structured",
 		Rows:    1000,
 		Queries: []queryReport{
-			{Name: "fast", Timing: explain.Timing{AvgMs: 10.4}},
-			{Name: "regress", Timing: explain.Timing{AvgMs: 130}},
-			{Name: "stable", Timing: explain.Timing{AvgMs: 51}},
+			{Name: "fast", Timing: engine.Timing{AvgNs: 10_400_000}},
+			{Name: "regress", Timing: engine.Timing{AvgNs: 130 * int64(time.Millisecond)}},
+			{Name: "stable", Timing: engine.Timing{AvgNs: 51 * int64(time.Millisecond)}},
 		},
 	}
 	var buf bytes.Buffer
@@ -52,8 +52,8 @@ func TestWriteDiffPrintsRegressionsOnly(t *testing.T) {
 }
 
 func TestWriteDiffShowAllPrintsEveryQuery(t *testing.T) {
-	baseline := benchReport{Profile: "structured", Rows: 1000, Queries: []queryReport{{Name: "stable", Timing: explain.Timing{AvgMs: 50}}}}
-	current := benchReport{Profile: "structured", Rows: 1000, Queries: []queryReport{{Name: "stable", Timing: explain.Timing{AvgMs: 51}}}}
+	baseline := benchReport{Profile: "structured", Rows: 1000, Queries: []queryReport{{Name: "stable", Timing: engine.Timing{AvgNs: 50 * int64(time.Millisecond)}}}}
+	current := benchReport{Profile: "structured", Rows: 1000, Queries: []queryReport{{Name: "stable", Timing: engine.Timing{AvgNs: 51 * int64(time.Millisecond)}}}}
 
 	var buf bytes.Buffer
 	if err := writeDiff(&buf, baseline, current, true); err != nil {
@@ -69,13 +69,13 @@ func TestWriteComparisonPrintsCompactSummary(t *testing.T) {
 		Profile: "structured",
 		Rows:    1000,
 		Load:    loadStats{Elapsed: 10 * time.Millisecond},
-		Queries: []queryReport{{Name: "regress", Timing: explain.Timing{AvgMs: 100}}},
+		Queries: []queryReport{{Name: "regress", Timing: engine.Timing{AvgNs: 100 * int64(time.Millisecond)}}},
 	}}
 	current := []benchReport{{
 		Profile: "structured",
 		Rows:    1000,
 		Load:    loadStats{Elapsed: 20 * time.Millisecond},
-		Queries: []queryReport{{Name: "regress", Timing: explain.Timing{AvgMs: 130}}},
+		Queries: []queryReport{{Name: "regress", Timing: engine.Timing{AvgNs: 130 * int64(time.Millisecond)}}},
 	}}
 
 	var buf bytes.Buffer
@@ -117,8 +117,8 @@ func TestPercentDeltaHandlesZeroBaseline(t *testing.T) {
 
 func TestLoadBaselinesReadsConcatenatedReports(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "baseline.json")
-	data := []byte(`{"profile":"structured","rows":1000,"queries":[{"query_name":"a","timing":{"avg_ms":1}}]}
-{"profile":"structured","rows":2000,"queries":[{"query_name":"a","timing":{"avg_ms":2}}]}
+	data := []byte(`{"profile":"structured","rows":1000,"queries":[{"query_name":"a","timing":{"avg_ns":1000000}}]}
+{"profile":"structured","rows":2000,"queries":[{"query_name":"a","timing":{"avg_ns":2000000}}]}
 `)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write baseline: %v", err)
@@ -131,7 +131,7 @@ func TestLoadBaselinesReadsConcatenatedReports(t *testing.T) {
 		t.Fatalf("reports = %d, want 2", len(reports))
 	}
 	matched, ok := findBaseline(reports, "structured", 2000)
-	if !ok || matched.Queries[0].Timing.AvgMs != 2 {
+	if !ok || matched.Queries[0].Timing.AvgNs != 2_000_000 {
 		t.Fatalf("matched = %#v ok=%v", matched, ok)
 	}
 }
@@ -153,10 +153,10 @@ func TestFindBaselineMatchesMode(t *testing.T) {
 
 func TestLoadBaselinesReadsProfileFilesFromDirectory(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "structured.json"), []byte(`{"profile":"structured","rows":1000,"queries":[{"query_name":"a","timing":{"avg_ms":1}}]}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "structured.json"), []byte(`{"profile":"structured","rows":1000,"queries":[{"query_name":"a","timing":{"avg_ns":1000000}}]}`), 0o644); err != nil {
 		t.Fatalf("write structured baseline: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "random.json"), []byte(`{"profile":"random","rows":1000,"queries":[{"query_name":"a","timing":{"avg_ms":2}}]}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "random.json"), []byte(`{"profile":"random","rows":1000,"queries":[{"query_name":"a","timing":{"avg_ns":2000000}}]}`), 0o644); err != nil {
 		t.Fatalf("write random baseline: %v", err)
 	}
 
@@ -168,7 +168,7 @@ func TestLoadBaselinesReadsProfileFilesFromDirectory(t *testing.T) {
 		t.Fatalf("reports = %d, want 2", len(reports))
 	}
 	matched, ok := findBaseline(reports, "random", 1000)
-	if !ok || matched.Queries[0].Timing.AvgMs != 2 {
+	if !ok || matched.Queries[0].Timing.AvgNs != 2_000_000 {
 		t.Fatalf("matched = %#v ok=%v", matched, ok)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,7 +21,6 @@ import (
 	"time"
 
 	"github.com/kylegrahammatzen/dripsql/internal/engine"
-	"github.com/kylegrahammatzen/dripsql/internal/explain"
 	humanfmt "github.com/kylegrahammatzen/dripsql/internal/format"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
@@ -78,6 +78,7 @@ type options struct {
 	details     bool
 	query       string
 	segmentRows int
+	cpuProfile  string
 }
 
 type query struct {
@@ -175,8 +176,15 @@ type benchReport struct {
 	Rows     int64               `json:"rows"`
 	Runs     int                 `json:"runs"`
 	Load     loadStats           `json:"load"`
-	Storage  engine.StorageStats `json:"storage"`
-	Queries  []queryReport       `json:"queries"`
+	Storage  engine.StorageStats   `json:"storage"`
+	Reads    queryReadStats        `json:"reads"`
+	Cache    engine.ByteCacheStats `json:"page_cache"`
+	Queries  []queryReport         `json:"queries"`
+}
+
+type queryReadStats struct {
+	Calls int64 `json:"calls"`
+	Bytes int64 `json:"bytes"`
 }
 
 type queryReport struct {
@@ -185,8 +193,8 @@ type queryReport struct {
 	Columns []string       `json:"columns"`
 	Values  [][]any        `json:"values"`
 	Rows    int            `json:"rows"`
-	Timing  explain.Timing `json:"timing"`
-	Explain explain.Report `json:"explain"`
+	Timing  engine.Timing `json:"timing"`
+	Explain engine.Report `json:"explain"`
 }
 
 type loadStats struct {
@@ -232,6 +240,7 @@ func parseOptions(args []string) (options, error) {
 	fs.BoolVar(&opts.details, "details", false, "in baseline mode, print full breakdowns for shown queries")
 	fs.StringVar(&opts.query, "query", "", "run only queries whose name or SQL contains this string")
 	fs.IntVar(&opts.segmentRows, "segment-rows", 0, "rows per sealed segment (0 = storage default 131072; larger = fewer seals = faster ingest)")
+	fs.StringVar(&opts.cpuProfile, "cpuprofile", "", "write CPU profile during query phase to this file")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -317,7 +326,7 @@ func runOne(opts options, rows int64, profile profileSpec) (benchReport, error) 
 	dir := benchmarkDBDir(opts, profile)
 
 	ctx := context.Background()
-	db, err := engine.Open(ctx, dir, engine.Options{})
+	db, err := engine.Open(ctx, dir)
 	if err != nil {
 		return benchReport{}, err
 	}
@@ -354,15 +363,33 @@ func runOne(opts options, rows int64, profile profileSpec) (benchReport, error) 
 	}
 
 	benchQueries := buildBenchmarkQueries(profile, actualRows)
+	readsBefore := db.ReadStats()
+	if opts.cpuProfile != "" {
+		f, err := os.Create(opts.cpuProfile)
+		if err != nil {
+			return benchReport{}, fmt.Errorf("create cpuprofile: %w", err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			f.Close()
+			return benchReport{}, fmt.Errorf("start cpuprofile: %w", err)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			f.Close()
+		}()
+	}
 	queries, err := runQuerySet(ctx, db, benchQueries, opts.runs, opts.query)
 	if err != nil {
 		return benchReport{}, err
 	}
+	readsAfter := db.ReadStats()
+	cacheStats := db.ByteCacheStats()
 	storageStats, err := db.StorageStats(ctx, "events")
 	if err != nil {
 		return benchReport{}, err
 	}
-	return benchReport{Env: captureEnv(), Dir: dir, Profile: opts.profile, Mode: opts.mode, ModeNote: modeNote, Rows: storageStats.Rows, Runs: opts.runs, Load: load, Storage: storageStats, Queries: queries}, nil
+	reads := queryReadStats{Calls: readsAfter.Calls - readsBefore.Calls, Bytes: readsAfter.Bytes - readsBefore.Bytes}
+	return benchReport{Env: captureEnv(), Dir: dir, Profile: opts.profile, Mode: opts.mode, ModeNote: modeNote, Rows: storageStats.Rows, Runs: opts.runs, Load: load, Storage: storageStats, Reads: reads, Cache: cacheStats, Queries: queries}, nil
 }
 
 func benchmarkDBDir(opts options, profile profileSpec) string {
@@ -408,7 +435,7 @@ func reopenBenchDB(ctx context.Context, db **engine.DB, dir string) error {
 			return err
 		}
 	}
-	reopened, err := engine.Open(ctx, dir, engine.Options{})
+	reopened, err := engine.Open(ctx, dir)
 	if err != nil {
 		return err
 	}
@@ -530,8 +557,8 @@ func queryMatchesFilter(q query, filter string) bool {
 }
 
 func timeQuery(ctx context.Context, db *engine.DB, q query, runs int) (queryReport, error) {
-	report := queryReport{Name: q.Name, SQL: q.SQL, Timing: explain.Timing{Samples: runs}}
-	var firstExplain explain.Report
+	report := queryReport{Name: q.Name, SQL: q.SQL, Timing: engine.Timing{Samples: runs}}
+	var firstExplain engine.Report
 	var totalNs int64
 	samples := make([]int64, 0, runs)
 	for i := range runs {
@@ -558,23 +585,17 @@ func timeQuery(ctx context.Context, db *engine.DB, q query, runs int) (queryRepo
 			sampleNs = (sampleNs*iterations + elapsed.Nanoseconds()) / (iterations + 1)
 		}
 		samples = append(samples, sampleNs)
-		ms := float64(sampleNs) / float64(time.Millisecond)
 		if i == 0 {
-			report.Timing.FirstMs = ms
-			report.Timing.BestMs = ms
 			report.Timing.FirstNs = sampleNs
 			report.Timing.BestNs = sampleNs
 		}
 		if sampleNs < report.Timing.BestNs {
-			report.Timing.BestMs = ms
 			report.Timing.BestNs = sampleNs
 		}
 		totalNs += sampleNs
 	}
 	report.Timing.AvgNs = totalNs / int64(runs)
-	report.Timing.AvgMs = float64(report.Timing.AvgNs) / float64(time.Millisecond)
 	report.Timing.P95Ns = percentileNearestRank(samples, 95)
-	report.Timing.P95Ms = float64(report.Timing.P95Ns) / float64(time.Millisecond)
 	firstExplain.Timing = report.Timing
 	report.Explain = firstExplain
 	return report, nil
@@ -638,12 +659,39 @@ func emitText(w io.Writer, report benchReport) {
 	fmt.Fprintf(w, "Generate wait:     %s\n", humanfmt.Duration(time.Duration(report.Load.GenerateWaitNs)))
 	fmt.Fprintf(w, "Append calls:      %s\n", humanfmt.Duration(time.Duration(report.Load.AppendCallNs)))
 	fmt.Fprintf(w, "Flush/seal wait:   %s\n\n", humanfmt.Duration(time.Duration(report.Load.FlushNs)))
+	storage := report.Storage
+	overhead := storage.TableBytes - storage.ColumnPayloadBytes
+	if overhead < 0 {
+		overhead = 0
+	}
+	tableRatio := 0.0
+	if storage.TableBytes > 0 {
+		tableRatio = float64(storage.PlainEstimate) / float64(storage.TableBytes)
+	}
 	fmt.Fprintf(w, "Storage\n")
-	fmt.Fprintf(w, "Original:          %s\n", formatBytes(report.Storage.PlainEstimate))
-	fmt.Fprintf(w, "Compressed:        %s (%.2fx, %s of original)\n", formatBytes(report.Storage.TableBytes), report.Storage.TableCompression, formatPercent(report.Storage.TableBytes, report.Storage.PlainEstimate))
-	fmt.Fprintf(w, "  Column data:     %s\n", formatBytes(report.Storage.ColumnPayloadBytes))
-	fmt.Fprintf(w, "  Pruning metadata:%s\n", formatBytes(report.Storage.StorageOverhead))
-	fmt.Fprintf(w, "Per row:           %s original -> %s compressed\n", formatBytesPerRow(report.Storage.PlainEstimate, report.Rows), formatBytesPerRow(report.Storage.TableBytes, report.Rows))
+	fmt.Fprintf(w, "Original:          %s\n", formatBytes(storage.PlainEstimate))
+	fmt.Fprintf(w, "Compressed:        %s (%.2fx, %s of original)\n", formatBytes(storage.TableBytes), tableRatio, formatPercent(storage.TableBytes, storage.PlainEstimate))
+	fmt.Fprintf(w, "  Column data:     %s\n", formatBytes(storage.ColumnPayloadBytes))
+	fmt.Fprintf(w, "  Pruning metadata:%s\n", formatBytes(overhead))
+	fmt.Fprintf(w, "Per row:           %s original -> %s compressed\n", formatBytesPerRow(storage.PlainEstimate, report.Rows), formatBytesPerRow(storage.TableBytes, report.Rows))
+	if report.Runs > 0 {
+		callsPerRun := float64(report.Reads.Calls) / float64(report.Runs)
+		bytesPerRun := float64(report.Reads.Bytes) / float64(report.Runs)
+		fmt.Fprintf(w, "Physical reads:    %d calls, %s (across query phase: %.1f calls/run, %s/run)\n",
+			report.Reads.Calls, formatBytes(report.Reads.Bytes),
+			callsPerRun, formatBytes(int64(bytesPerRun)))
+	} else {
+		fmt.Fprintf(w, "Physical reads:    %d calls, %s\n", report.Reads.Calls, formatBytes(report.Reads.Bytes))
+	}
+	cache := report.Cache
+	totalLookups := cache.Hits + cache.Misses
+	hitRate := 0.0
+	if totalLookups > 0 {
+		hitRate = float64(cache.Hits) * 100 / float64(totalLookups)
+	}
+	fmt.Fprintf(w, "Page cache:        %d hits, %d misses (%.1f%% hit rate), %s resident / %s budget, %d evictions\n",
+		cache.Hits, cache.Misses, hitRate,
+		formatBytes(cache.Bytes), formatBytes(cache.MaxBytes), cache.Evictions)
 	if len(report.Storage.Columns) > 0 {
 		fmt.Fprintln(w)
 		writeColumnsTable(w, report.Storage.Columns)
@@ -653,7 +701,7 @@ func emitText(w io.Writer, report benchReport) {
 	for _, q := range report.Queries {
 		fmt.Fprintf(w, "\n%s\n", q.Name)
 		fmt.Fprintf(w, "  %s\n", q.SQL)
-		explain.RenderText(w, q.Explain, "  ")
+		engine.RenderText(w, q.Explain, "  ")
 	}
 }
 
@@ -663,8 +711,8 @@ func writeColumnsTable(w io.Writer, cols []engine.ColumnStats) {
 	fmt.Fprintln(tw, "  Column\tType\tOriginal\tStored\tRatio\tEncoding")
 	for _, c := range cols {
 		ratio := "—"
-		if c.Compression > 0 {
-			ratio = fmt.Sprintf("%.2fx", c.Compression)
+		if c.StoredBytes > 0 && c.PlainBytes > 0 {
+			ratio = fmt.Sprintf("%.2fx", float64(c.PlainBytes)/float64(c.StoredBytes))
 		}
 		encoding := strings.Join(c.Encodings, ", ")
 		if encoding == "" {
@@ -802,6 +850,13 @@ func profileSpecFor(profile string) (profileSpec, error) {
 		base := baseProfileColumns(structuredValues)
 		base = append(base, int64ColumnSpec("cluster_key", func(row int64) int64 { return row % 10_000 }))
 		return profileSpec{name: "sorted", columns: base, userFor: structuredValues.user}, nil
+	case "tenant-clustered":
+		// tenant_id clustered: contiguous chunks of ~9766 rows per tenant,
+		// so per-segment + per-page min/max actually prune for `WHERE tenant_id = N`.
+		// Other columns mirror structured to keep apples-to-apples on Q3.
+		clustered := structuredValues
+		clustered.tenant = func(row int64) int64 { return (row / 9766) + 1 }
+		return profileSpec{name: "tenant-clustered", columns: baseProfileColumns(clustered), userFor: clustered.user}, nil
 	}
 	return profileSpec{}, fmt.Errorf("unknown profile %q", profile)
 }

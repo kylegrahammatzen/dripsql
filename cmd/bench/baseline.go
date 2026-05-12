@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/kylegrahammatzen/dripsql/internal/explain"
+	"github.com/kylegrahammatzen/dripsql/internal/engine"
 	humanfmt "github.com/kylegrahammatzen/dripsql/internal/format"
 )
 
@@ -102,18 +102,18 @@ func writeDiff(w io.Writer, baseline, current benchReport, showAll bool) error {
 		base, hadBaseline := prev[q.Name]
 		if !hadBaseline {
 			if showAll {
-				fprintf(w, "  %s: avg %s (no baseline)\n", q.Name, q.Timing.FormatAvg())
+				fprintf(w, "  %s: avg %s (no baseline)\n", q.Name, humanfmt.Duration(time.Duration(q.Timing.AvgNs)))
 			}
 			continue
 		}
-		if base.Timing.AvgMs == 0 && base.Timing.AvgNs == 0 {
+		if base.Timing.AvgNs == 0 {
 			if showAll {
-				fprintf(w, "  %s: avg - -> %s (no baseline timing)\n", q.Name, q.Timing.FormatAvg())
+				fprintf(w, "  %s: avg - -> %s (no baseline timing)\n", q.Name, humanfmt.Duration(time.Duration(q.Timing.AvgNs)))
 			}
 			continue
 		}
-		ours := q.Timing.AvgMs
-		theirs := base.Timing.AvgMs
+		ours := float64(q.Timing.AvgNs)
+		theirs := float64(base.Timing.AvgNs)
 		delta := percentDelta(theirs, ours)
 		if !showAll && delta <= regressionThresholdPct {
 			continue
@@ -122,7 +122,7 @@ func writeDiff(w io.Writer, baseline, current benchReport, showAll bool) error {
 		if delta > regressionThresholdPct {
 			marker = " regression"
 		}
-		fprintf(w, "  %s: avg %s -> %s (%+.1f%%)%s\n", q.Name, base.Timing.FormatAvg(), q.Timing.FormatAvg(), delta, marker)
+		fprintf(w, "  %s: avg %s -> %s (%+.1f%%)%s\n", q.Name, humanfmt.Duration(time.Duration(base.Timing.AvgNs)), humanfmt.Duration(time.Duration(q.Timing.AvgNs)), delta, marker)
 	}
 	return nil
 }
@@ -177,7 +177,7 @@ func writeComparison(w io.Writer, baselines []benchReport, current []benchReport
 			base, hadBaseline := prev[q.Name]
 			if !hadBaseline {
 				if showAll {
-					fprintf(w, "%-12s %-12s %10d %-29s %10s %10s %8s\n", report.Profile, effectiveMode(report.Mode), report.Rows, trimQueryName(q.Name), "-", q.Timing.FormatAvg(), "new")
+					fprintf(w, "%-12s %-12s %10d %-29s %10s %10s %8s\n", report.Profile, effectiveMode(report.Mode), report.Rows, trimQueryName(q.Name), "-", humanfmt.Duration(time.Duration(q.Timing.AvgNs)), "new")
 					if details {
 						detailRows = append(detailRows, comparisonDetail{report: report, query: q})
 					}
@@ -185,9 +185,9 @@ func writeComparison(w io.Writer, baselines []benchReport, current []benchReport
 				}
 				continue
 			}
-			if base.Timing.AvgMs == 0 && base.Timing.AvgNs == 0 {
+			if base.Timing.AvgNs == 0 {
 				if showAll {
-					fprintf(w, "%-12s %-12s %10d %-29s %10s %10s %8s\n", report.Profile, effectiveMode(report.Mode), report.Rows, trimQueryName(q.Name), "-", q.Timing.FormatAvg(), "no base")
+					fprintf(w, "%-12s %-12s %10d %-29s %10s %10s %8s\n", report.Profile, effectiveMode(report.Mode), report.Rows, trimQueryName(q.Name), "-", humanfmt.Duration(time.Duration(q.Timing.AvgNs)), "no base")
 					if details {
 						detailRows = append(detailRows, comparisonDetail{report: report, query: q})
 					}
@@ -195,8 +195,8 @@ func writeComparison(w io.Writer, baselines []benchReport, current []benchReport
 				}
 				continue
 			}
-			ours := q.Timing.AvgMs
-			theirs := base.Timing.AvgMs
+			ours := float64(q.Timing.AvgNs)
+			theirs := float64(base.Timing.AvgNs)
 			delta := percentDelta(theirs, ours)
 			queryDeltaTotal += delta
 			queryCompared++
@@ -212,7 +212,7 @@ func writeComparison(w io.Writer, baselines []benchReport, current []benchReport
 			if delta > regressionThresholdPct {
 				marker = " regression"
 			}
-			fprintf(w, "%-12s %-12s %10d %-29s %10s %10s %+7.1f%%%s\n", report.Profile, effectiveMode(report.Mode), report.Rows, trimQueryName(q.Name), base.Timing.FormatAvg(), q.Timing.FormatAvg(), delta, marker)
+			fprintf(w, "%-12s %-12s %10d %-29s %10s %10s %+7.1f%%%s\n", report.Profile, effectiveMode(report.Mode), report.Rows, trimQueryName(q.Name), humanfmt.Duration(time.Duration(base.Timing.AvgNs)), humanfmt.Duration(time.Duration(q.Timing.AvgNs)), delta, marker)
 			if details {
 				detailRows = append(detailRows, comparisonDetail{report: report, query: q})
 			}
@@ -237,7 +237,7 @@ func writeComparison(w io.Writer, baselines []benchReport, current []benchReport
 			}
 			fprintf(w, "%s / %s / %d rows / %s\n", detail.report.Profile, effectiveMode(detail.report.Mode), detail.report.Rows, detail.query.Name)
 			fprintf(w, "  %s\n", detail.query.SQL)
-			explain.RenderText(w, detail.query.Explain, "  ")
+			engine.RenderText(w, detail.query.Explain, "  ")
 		}
 	}
 	return nil

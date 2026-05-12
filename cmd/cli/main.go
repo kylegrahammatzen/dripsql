@@ -33,7 +33,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func runExec(path, sql string, stdout, stderr io.Writer) int {
-	db, err := engine.Open(context.Background(), path, engine.Options{})
+	db, err := engine.Open(context.Background(), path)
 	if err != nil {
 		printError(stderr, err)
 		return 1
@@ -50,7 +50,7 @@ func runExec(path, sql string, stdout, stderr io.Writer) int {
 }
 
 func runQuery(path, sql string, stdout, stderr io.Writer) int {
-	db, err := engine.Open(context.Background(), path, engine.Options{})
+	db, err := engine.Open(context.Background(), path)
 	if err != nil {
 		printError(stderr, err)
 		return 1
