@@ -15,15 +15,20 @@ import (
 // It reads a real segment file from the structured bench DB so the numbers
 // reflect production-shaped metadata. Skipped if the file is missing.
 func TestFooterColumnBreakdown(t *testing.T) {
-	const path = `..\..\db\bench\structured\seg-2097152\tables\events\segments\0000000000000001.dsv3`
+	const path = `..\..\db\bench\structured\seg-default\tables\events\segments\0000000000000001.dsv3`
 	if _, err := os.Stat(path); err != nil {
 		t.Skipf("bench segment not available at %s: %v", path, err)
 	}
 
-	meta, _, err := ReadSegmentFooter(path)
+	meta, segSize, err := ReadSegmentFooter(path)
 	if err != nil {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
+	if err := meta.LoadAllColumns(); err != nil {
+		t.Fatalf("LoadAllColumns: %v", err)
+	}
+	t.Logf("Segment file: %d bytes, %d rows, %d pages, %d columns",
+		segSize, meta.Rows, len(meta.PageRowCounts), len(meta.Columns))
 
 	// Total marshaled bytes for the whole footer (post-marshal, pre-compress).
 	fullRaw, err := marshalSegmentMetaRaw(meta)
