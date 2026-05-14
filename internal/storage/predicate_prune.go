@@ -218,7 +218,7 @@ func pruneInt64RangeCandidate(stats Int64Stats, pred boundNode) bool {
 	case PredicateOpBetween:
 		return pred.lo <= stats.Max && stats.Min <= pred.hi
 	case PredicateOpIn:
-		return pred.intSet.AnyBetween(stats.Min, stats.Max)
+		return anyIntBetween(pred.intSet, stats.Min, stats.Max)
 	default:
 		return true
 	}
@@ -366,7 +366,7 @@ func pruneTextPageCandidate(stats TextStats, pred boundNode) bool {
 			return true
 		case PredicateOpIn:
 			if len(stats.HashBloom) != 0 {
-				return pred.textSet.AnyInBloom(stats.HashBloom, textPageBloomProbes)
+				return anyTextInBloom(pred.textSet, stats.HashBloom, textPageBloomProbes)
 			}
 			return true
 		default:
@@ -389,7 +389,7 @@ func pruneTextSegmentCandidate(stats TextStats, pred boundNode) bool {
 		case PredicateOpEq:
 			return textSegmentHashBloomHas(stats.HashBloom, pred.textValue)
 		case PredicateOpIn:
-			return pred.textSet.AnyInBloom(stats.HashBloom, textSegmentBloomProbes)
+			return anyTextInBloom(pred.textSet, stats.HashBloom, textSegmentBloomProbes)
 		default:
 			return true
 		}
@@ -402,7 +402,7 @@ func pruneUUIDPageCandidate(stats UUIDStats, pred boundNode) bool {
 	case PredicateOpEq:
 		return uuidPageHashBloomHas(stats.HashBloom, pred.uuidValue)
 	case PredicateOpIn:
-		return pred.uuidSet.AnyInBloom(stats.HashBloom, textPageBloomProbes)
+		return anyUUIDInBloom(pred.uuidSet, stats.HashBloom, textPageBloomProbes)
 	default:
 		return true
 	}
@@ -413,7 +413,7 @@ func pruneUUIDSegmentCandidate(stats UUIDStats, pred boundNode) bool {
 	case PredicateOpEq:
 		return uuidSegmentHashBloomHas(stats.HashBloom, pred.uuidValue)
 	case PredicateOpIn:
-		return pred.uuidSet.AnyInBloom(stats.HashBloom, textSegmentBloomProbes)
+		return anyUUIDInBloom(pred.uuidSet, stats.HashBloom, textSegmentBloomProbes)
 	default:
 		return true
 	}

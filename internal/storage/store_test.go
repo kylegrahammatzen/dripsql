@@ -25,7 +25,7 @@ func TestStoreAppendAndScanIterator(t *testing.T) {
 		t.Fatalf("AppendBatch second: %v", err)
 	}
 	stats := &QueryStats{}
-	it, err := store.ScanIterator(context.Background(), table, NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}), stats)
+	it, err := store.ScanIterator(context.Background(), table, BindPredicate(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}), stats)
 	if err != nil {
 		t.Fatalf("ScanIterator: %v", err)
 	}
@@ -598,7 +598,7 @@ func storeTableSpec() types.TableSpec {
 	}
 }
 
-func firstScannedBatch(t *testing.T, store *Store, table types.TableSpec, pred PredicateEvaluator) (types.Batch, error) {
+func firstScannedBatch(t *testing.T, store *Store, table types.TableSpec, pred *BoundPredicate) (types.Batch, error) {
 	t.Helper()
 	it, err := store.ScanIterator(context.Background(), table, pred, nil)
 	if err != nil {

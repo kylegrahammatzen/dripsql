@@ -22,7 +22,7 @@ type ScanSegment struct {
 type SegmentScanIterator struct {
 	Context              context.Context
 	Segments             []ScanSegment
-	Predicate            PredicateEvaluator
+	Predicate            *BoundPredicate
 	Prune                Predicate
 	OutputColumns        []string
 	EncodedOutputColumns map[string]struct{}

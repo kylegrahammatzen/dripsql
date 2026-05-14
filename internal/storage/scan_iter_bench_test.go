@@ -25,7 +25,7 @@ func BenchmarkSegmentScanIteratorMemoryPredicate(b *testing.B) {
 	} {
 		b.Run(tt.name, func(b *testing.B) {
 			pages := scanBenchmarkPages(tt.batch, 4)
-			it := SegmentScanIterator{Segments: []ScanSegment{{Pages: pages}}, Predicate: NewPredicateEvaluator(tt.pred)}
+			it := SegmentScanIterator{Segments: []ScanSegment{{Pages: pages}}, Predicate: BindPredicate(tt.pred)}
 			var sink int
 			visit := func(_ types.Batch, sel types.SelectionMask) error {
 				sink += sel.PopCount()
@@ -57,7 +57,7 @@ func BenchmarkSegmentScanIteratorPrunedMiss(b *testing.B) {
 	}
 	size := benchmarkSegmentSize(b, path)
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 999999}}
-	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Size: size, Meta: meta, PageInfos: infos}}, Predicate: NewPredicateEvaluator(pred), Prune: pred}
+	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Size: size, Meta: meta, PageInfos: infos}}, Predicate: BindPredicate(pred), Prune: pred}
 	var sink int
 	visit := func(_ types.Batch, sel types.SelectionMask) error {
 		sink += sel.PopCount()
@@ -101,7 +101,7 @@ func BenchmarkSegmentScanIteratorPersistedPredicate(b *testing.B) {
 					b.Fatalf("cache.Close: %v", err)
 				}
 			}()
-			it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Size: size, Meta: meta, PageInfos: infos}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, OutputColumns: tt.columns, fileCache: cache}
+			it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Size: size, Meta: meta, PageInfos: infos}}, Predicate: BindPredicate(pred), Prune: pred, OutputColumns: tt.columns, fileCache: cache}
 			var sink int
 			visit := func(_ types.Batch, sel types.SelectionMask) error {
 				sink += sel.PopCount()

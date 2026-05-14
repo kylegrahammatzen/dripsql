@@ -125,7 +125,7 @@ func phase5RunScan(t *testing.T, ctx context.Context, batches []types.Batch, pre
 	}
 	scan := &Scan{Iterator: storage.SegmentScanIterator{
 		Segments:  []storage.ScanSegment{{Pages: pages}},
-		Predicate: storage.NewPredicateEvaluator(pred),
+		Predicate: storage.BindPredicate(pred),
 	}}
 	if err := scan.Open(ctx); err != nil {
 		t.Fatalf("scan Open: %v", err)

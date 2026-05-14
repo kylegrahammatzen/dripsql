@@ -14,7 +14,7 @@ func TestFilterPredicateOnlyVisitsSelectedRows(t *testing.T) {
 	sel.Set(1)
 	sel.Set(3)
 	downstream := &collectConsumer{}
-	predicate := &countingPredicateEvaluator{matches: map[int]bool{3: true}, recordVisited: true}
+	predicate := &countingPredicate{matches: map[int]bool{3: true}, recordVisited: true}
 	filter := &Filter{Predicate: predicate, Downstream: downstream}
 	if err := filter.Open(context.Background()); err != nil {
 		t.Fatalf("Open: %v", err)
@@ -35,7 +35,7 @@ func TestFilterSparseSelectionNoFullBatchEval(t *testing.T) {
 	batch := execInt64Batch(t, []int64{1, 2, 3, 4}, nil)
 	sel := types.NewSelectionMask(batch.Len)
 	sel.Set(2)
-	predicate := &countingPredicateEvaluator{matches: map[int]bool{2: true}, recordVisited: true}
+	predicate := &countingPredicate{matches: map[int]bool{2: true}, recordVisited: true}
 	filter := &Filter{Predicate: predicate, Downstream: &collectConsumer{}}
 	if err := filter.Open(context.Background()); err != nil {
 		t.Fatalf("Open: %v", err)
@@ -58,7 +58,7 @@ func BenchmarkFilterSparseSelection(b *testing.B) {
 		sel.Set(row)
 	}
 	filter := &Filter{
-		Predicate:  &countingPredicateEvaluator{matchAll: true},
+		Predicate:  &countingPredicate{matchAll: true},
 		Downstream: noopConsumer{},
 	}
 	if err := filter.Open(context.Background()); err != nil {
@@ -76,7 +76,7 @@ func BenchmarkFilterSparseSelection(b *testing.B) {
 	}
 }
 
-type countingPredicateEvaluator struct {
+type countingPredicate struct {
 	matches        map[int]bool
 	matchAll       bool
 	recordVisited  bool
@@ -84,9 +84,9 @@ type countingPredicateEvaluator struct {
 	fullEvalCalled bool
 }
 
-func (e *countingPredicateEvaluator) RequiredColumns() []string { return nil }
+func (e *countingPredicate) RequiredColumns() []string { return nil }
 
-func (e *countingPredicateEvaluator) Eval(batch types.Batch, sel *types.SelectionMask) (int, error) {
+func (e *countingPredicate) Eval(batch types.Batch, sel *types.SelectionMask) (int, error) {
 	e.fullEvalCalled = true
 	sel.Resize(batch.Len)
 	matched := 0
@@ -99,7 +99,7 @@ func (e *countingPredicateEvaluator) Eval(batch types.Batch, sel *types.Selectio
 	return matched, nil
 }
 
-func (e *countingPredicateEvaluator) EvalSelected(batch types.Batch, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
+func (e *countingPredicate) EvalSelected(batch types.Batch, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
 	sel.Resize(batch.Len)
 	matched := 0
 	input.IterSet(func(row int) {

@@ -9,7 +9,7 @@ import (
 // base.Segments. The function receives a per-worker copy of the iterator
 // with Segments, Context, and Stats already adjusted; callers may further
 // mutate fields like Predicate inside fn (e.g. to install a fresh evaluator
-// per worker — PredicateEvaluator carries per-page scratch state and must
+// per worker — *BoundPredicate carries per-page scratch state and must
 // not be shared across goroutines).
 //
 // Returns the per-worker stats and the first error. The first error cancels

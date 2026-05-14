@@ -15,7 +15,7 @@ func TestFilterIntersectsExistingSelection(t *testing.T) {
 	in.Set(2)
 	downstream := &collectConsumer{}
 	filter := &Filter{
-		Predicate:  storage.NewPredicateEvaluator(storage.Predicate{Column: "amount", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Int64: 42}}),
+		Predicate:  storage.BindPredicate(storage.Predicate{Column: "amount", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Int64: 42}}),
 		Downstream: downstream,
 	}
 	if err := filter.Open(context.Background()); err != nil {
@@ -105,7 +105,7 @@ func TestScanFilterProjectLimitCountPipeline(t *testing.T) {
 	agg := &Aggregate{Sinks: []AggregateSink{sink}}
 	limit := &Limit{Offset: 1, Limit: 1, Downstream: agg}
 	project := &Project{Columns: []string{"other"}, Downstream: limit}
-	filter := &Filter{Predicate: storage.NewPredicateEvaluator(storage.Predicate{Column: "amount", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Int64: 42}}), Downstream: project}
+	filter := &Filter{Predicate: storage.BindPredicate(storage.Predicate{Column: "amount", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Int64: 42}}), Downstream: project}
 	scan := &Scan{Iterator: storage.SegmentScanIterator{Segments: []storage.ScanSegment{{Pages: []storage.ScanPage{{Batch: batch}}}}}}
 	if err := scan.Open(context.Background()); err != nil {
 		t.Fatalf("Open: %v", err)

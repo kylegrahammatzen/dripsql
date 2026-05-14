@@ -49,7 +49,7 @@ func TestScanWithPredicate(t *testing.T) {
 	pred := storage.Predicate{Column: "amount", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Int64: 42}}
 	scan := &Scan{Iterator: storage.SegmentScanIterator{
 		Segments:  []storage.ScanSegment{{Pages: []storage.ScanPage{{Batch: batch}}}},
-		Predicate: storage.NewPredicateEvaluator(pred),
+		Predicate: storage.BindPredicate(pred),
 	}}
 	sink := &CountSink{}
 	agg := &Aggregate{Sinks: []AggregateSink{sink}}

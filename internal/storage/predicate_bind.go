@@ -3,7 +3,6 @@ package storage
 import (
 	"fmt"
 	"math/bits"
-	"slices"
 
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
@@ -31,117 +30,36 @@ type boundNode struct {
 	children []boundNode
 }
 
-type boolMatcher struct {
-	allowTrue  bool
-	allowFalse bool
-}
-
-type int64Matcher struct {
-	small []int64
-	large map[int64]struct{}
-}
-
-type textMatcher struct {
-	small []string
-	large map[string]struct{}
-}
-
-type uuidMatcher struct {
-	small []types.UUID16
-	large map[types.UUID16]struct{}
-}
-
-type PredicateEvaluator interface {
-	RequiredColumns() []string
-	Eval(batch types.Batch, sel *types.SelectionMask) (int, error)
-	EvalSelected(batch types.Batch, input types.SelectionMask, sel *types.SelectionMask) (int, error)
-}
-
-type predicateEvaluator struct {
+// BoundPredicate is the single public predicate handle. It owns the AST,
+// lazily binds against each batch's column layout, and serves the row-level
+// evaluation API.
+type BoundPredicate struct {
 	pred    Predicate
 	columns []string
-	bound   BoundPredicateEvaluator
-	schema  []string
-	boundOK bool
-}
-
-func NewPredicateEvaluator(pred Predicate) PredicateEvaluator {
-	return &predicateEvaluator{pred: pred, columns: PredicateColumns(pred)}
-}
-
-func (e *predicateEvaluator) RequiredColumns() []string {
-	return e.columns
-}
-
-func (e *predicateEvaluator) Eval(batch types.Batch, sel *types.SelectionMask) (int, error) {
-	if sel == nil {
-		return 0, fmt.Errorf("selection mask is nil")
-	}
-	bound, err := e.boundForBatch(batch)
-	if err != nil {
-		return 0, err
-	}
-	return bound.Eval(batch, sel)
-}
-
-func (e *predicateEvaluator) EvalSelected(batch types.Batch, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
-	if sel == nil {
-		return 0, fmt.Errorf("selection mask is nil")
-	}
-	if input.Rows != batch.Len {
-		return 0, fmt.Errorf("selection rows %d do not match batch length %d", input.Rows, batch.Len)
-	}
-	if selectionAliases(input, *sel) {
-		copyInput := types.NewSelectionMask(input.Rows)
-		copy(copyInput.Words, input.Words)
-		input = copyInput
-	}
-	bound, err := e.boundForBatch(batch)
-	if err != nil {
-		return 0, err
-	}
-	return bound.EvalSelected(batch, input, sel)
-}
-
-func (e *predicateEvaluator) boundForBatch(batch types.Batch) (BoundPredicateEvaluator, error) {
-	if e.boundOK && sameBatchSchema(e.schema, batch) {
-		return e.bound, nil
-	}
-	bound, err := BindPredicate(e.pred, batch)
-	if err != nil {
-		return BoundPredicateEvaluator{}, err
-	}
-	e.bound = bound
-	e.schema = batchSchema(e.schema[:0], batch)
-	e.boundOK = true
-	return bound, nil
-}
-
-type BoundPredicateEvaluator struct {
 	root    boundNode
-	columns []string
+	schema  []string
+	bound   bool
 }
 
-func BindPredicate(pred Predicate, batch types.Batch) (BoundPredicateEvaluator, error) {
-	root, err := bindEvalNode(pred, batch)
-	if err != nil {
-		return BoundPredicateEvaluator{}, err
-	}
-	return BoundPredicateEvaluator{root: root, columns: PredicateColumns(pred)}, nil
+func BindPredicate(pred Predicate) *BoundPredicate {
+	return &BoundPredicate{pred: pred, columns: PredicateColumns(pred)}
 }
 
-func (e BoundPredicateEvaluator) RequiredColumns() []string {
-	return e.columns
+func (b *BoundPredicate) RequiredColumns() []string {
+	return b.columns
 }
 
-func (e BoundPredicateEvaluator) Eval(batch types.Batch, sel *types.SelectionMask) (int, error) {
+func (b *BoundPredicate) Eval(batch types.Batch, sel *types.SelectionMask) (int, error) {
 	if sel == nil {
 		return 0, fmt.Errorf("selection mask is nil")
 	}
-	return evalBoundInto(batch, e.root, sel)
+	if err := b.rebindIfNeeded(batch); err != nil {
+		return 0, err
+	}
+	return evalBoundInto(batch, b.root, sel)
 }
 
-func (e BoundPredicateEvaluator) EvalSelected(batch types.Batch, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
+func (b *BoundPredicate) EvalSelected(batch types.Batch, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
 	if sel == nil {
 		return 0, fmt.Errorf("selection mask is nil")
 	}
@@ -153,7 +71,24 @@ func (e BoundPredicateEvaluator) EvalSelected(batch types.Batch, input types.Sel
 		copy(copyInput.Words, input.Words)
 		input = copyInput
 	}
-	return evalBoundSelectedInto(batch, e.root, input, sel)
+	if err := b.rebindIfNeeded(batch); err != nil {
+		return 0, err
+	}
+	return evalBoundSelectedInto(batch, b.root, input, sel)
+}
+
+func (b *BoundPredicate) rebindIfNeeded(batch types.Batch) error {
+	if b.bound && sameBatchSchema(b.schema, batch) {
+		return nil
+	}
+	root, err := bindEvalNode(b.pred, batch)
+	if err != nil {
+		return err
+	}
+	b.root = root
+	b.schema = batchSchema(b.schema[:0], batch)
+	b.bound = true
+	return nil
 }
 
 func bindEvalNode(pred Predicate, batch types.Batch) (boundNode, error) {
@@ -191,10 +126,10 @@ func newBoundNode(pred Predicate) boundNode {
 		hi:         pred.Hi,
 		textValue:  pred.Text,
 		uuidValue:  pred.UUID,
-		boolSet:    newBoolMatcher(pred.Bools),
-		intSet:     newInt64Matcher(pred.Int64s),
-		textSet:    newTextMatcher(pred.Texts),
-		uuidSet:    newUUIDMatcher(pred.UUIDs),
+		boolSet:    newSetMatcher(pred.Bools),
+		intSet:     newSetMatcher(pred.Int64s),
+		textSet:    newSetMatcher(pred.Texts),
+		uuidSet:    newSetMatcher(pred.UUIDs),
 	}
 }
 
@@ -312,156 +247,6 @@ func evalBoundSelectedInto(batch types.Batch, pred boundNode, input types.Select
 	default:
 		return evalLeafSelectedInto(batch, pred, input, sel)
 	}
-}
-
-func newBoolMatcher(values []bool) boolMatcher {
-	var m boolMatcher
-	for _, value := range values {
-		if value {
-			m.allowTrue = true
-		} else {
-			m.allowFalse = true
-		}
-	}
-	return m
-}
-
-func (m boolMatcher) Has(value bool) bool {
-	if value {
-		return m.allowTrue
-	}
-	return m.allowFalse
-}
-
-func newInt64Matcher(values []int64) int64Matcher {
-	if len(values) <= 8 {
-		return int64Matcher{small: slices.Clone(values)}
-	}
-	large := make(map[int64]struct{}, len(values))
-	for _, value := range values {
-		large[value] = struct{}{}
-	}
-	return int64Matcher{large: large}
-}
-
-func (m int64Matcher) Has(value int64) bool {
-	if m.large != nil {
-		_, ok := m.large[value]
-		return ok
-	}
-	return slices.Contains(m.small, value)
-}
-
-// Each invokes fn for every value in the set; ordering is unspecified.
-func (m int64Matcher) Each(fn func(int64) bool) {
-	if m.large != nil {
-		for value := range m.large {
-			if !fn(value) {
-				return
-			}
-		}
-		return
-	}
-	for _, value := range m.small {
-		if !fn(value) {
-			return
-		}
-	}
-}
-
-func (m int64Matcher) AnyBetween(min int64, max int64) bool {
-	if m.large != nil {
-		for value := range m.large {
-			if min <= value && value <= max {
-				return true
-			}
-		}
-		return false
-	}
-	for _, value := range m.small {
-		if min <= value && value <= max {
-			return true
-		}
-	}
-	return false
-}
-
-func newTextMatcher(values []string) textMatcher {
-	if len(values) <= 8 {
-		return textMatcher{small: slices.Clone(values)}
-	}
-	large := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		large[value] = struct{}{}
-	}
-	return textMatcher{large: large}
-}
-
-func (m textMatcher) Has(value string) bool {
-	if m.large != nil {
-		_, ok := m.large[value]
-		return ok
-	}
-	return slices.Contains(m.small, value)
-}
-
-func (m textMatcher) AnyInBloom(bloom []uint64, probes uint64) bool {
-	if len(bloom) == 0 {
-		return true
-	}
-	if m.large != nil {
-		for value := range m.large {
-			if hashBloomHas(bloom, textHash32String(value), probes) {
-				return true
-			}
-		}
-		return false
-	}
-	for _, value := range m.small {
-		if hashBloomHas(bloom, textHash32String(value), probes) {
-			return true
-		}
-	}
-	return false
-}
-
-func newUUIDMatcher(values []types.UUID16) uuidMatcher {
-	if len(values) <= 8 {
-		return uuidMatcher{small: slices.Clone(values)}
-	}
-	large := make(map[types.UUID16]struct{}, len(values))
-	for _, value := range values {
-		large[value] = struct{}{}
-	}
-	return uuidMatcher{large: large}
-}
-
-func (m uuidMatcher) Has(value types.UUID16) bool {
-	if m.large != nil {
-		_, ok := m.large[value]
-		return ok
-	}
-	return slices.Contains(m.small, value)
-}
-
-func (m uuidMatcher) AnyInBloom(bloom []uint64, probes uint64) bool {
-	if len(bloom) == 0 {
-		return true
-	}
-	if m.large != nil {
-		for value := range m.large {
-			if hashBloomHas(bloom, uuidHash32(value), probes) {
-				return true
-			}
-		}
-		return false
-	}
-	for _, value := range m.small {
-		if hashBloomHas(bloom, uuidHash32(value), probes) {
-			return true
-		}
-	}
-	return false
 }
 
 const selectionScratchWords = (types.StandardBatchRows + 63) / 64

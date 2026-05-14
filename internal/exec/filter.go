@@ -5,12 +5,20 @@ import (
 	"fmt"
 
 	v3sql "github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
+// Predicator is the consumer-side contract Filter requires. It lets tests
+// stub the predicate without depending on the concrete storage type. In
+// production *storage.BoundPredicate is the sole implementation.
+type Predicator interface {
+	RequiredColumns() []string
+	Eval(batch types.Batch, sel *types.SelectionMask) (int, error)
+	EvalSelected(batch types.Batch, input types.SelectionMask, sel *types.SelectionMask) (int, error)
+}
+
 type Filter struct {
-	Predicate  storage.PredicateEvaluator
+	Predicate  Predicator
 	Expr       *v3sql.BoundExpr
 	Downstream Consumer
 

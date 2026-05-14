@@ -121,7 +121,7 @@ func TestStoreAppendBufferedAppliesSortBy(t *testing.T) {
 		t.Fatalf("FlushBuffered: %v", err)
 	}
 
-	it, err := store.ScanIterator(ctx, table, NewPredicateEvaluator(Predicate{}), nil)
+	it, err := store.ScanIterator(ctx, table, BindPredicate(Predicate{}), nil)
 	if err != nil {
 		t.Fatalf("ScanIterator: %v", err)
 	}

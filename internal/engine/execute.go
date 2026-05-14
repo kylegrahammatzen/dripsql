@@ -1110,7 +1110,7 @@ func runParallelAggregate[S any](
 	}
 	perWorkerStats, err := base.RunParallel(ctx, workers, func(w int, it storage.SegmentScanIterator) error {
 		if hasPushPred {
-			it.Predicate = storage.NewPredicateEvaluator(pushPred)
+			it.Predicate = storage.BindPredicate(pushPred)
 		}
 		return consume(it, states[w])
 	})

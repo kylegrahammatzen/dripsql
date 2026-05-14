@@ -68,7 +68,7 @@ func TestSegmentScanIteratorPredicateSkipsEmptyPage(t *testing.T) {
 	stats := &QueryStats{}
 	it := SegmentScanIterator{
 		Segments:  []ScanSegment{{Pages: []ScanPage{{Batch: batch, PayloadBytes: 64}}}},
-		Predicate: NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 999}}),
+		Predicate: BindPredicate(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 999}}),
 		Stats:     stats,
 	}
 	visits := 0
@@ -177,7 +177,7 @@ func TestSegmentScanIteratorPersistedPredicateSkipsEmptyPage(t *testing.T) {
 	stats := &QueryStats{}
 	it := SegmentScanIterator{
 		Segments:  []ScanSegment{{Path: path, Meta: meta}},
-		Predicate: NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}),
+		Predicate: BindPredicate(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}),
 		Stats:     stats,
 	}
 
@@ -210,7 +210,7 @@ func TestSegmentScanIteratorReadsOutputColumns(t *testing.T) {
 	stats := &QueryStats{}
 	it := SegmentScanIterator{
 		Segments:      []ScanSegment{{Path: path, Meta: meta, PageInfos: infos}},
-		Predicate:     NewPredicateEvaluator(pred),
+		Predicate:     BindPredicate(pred),
 		Prune:         pred,
 		OutputColumns: []string{"event_type"},
 		Stats:         stats,
@@ -248,7 +248,7 @@ func TestSegmentScanIteratorReadsPredicateOnlyFORColumnEncoded(t *testing.T) {
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}
 	it := SegmentScanIterator{
 		Segments:      []ScanSegment{{Path: path, Meta: meta}},
-		Predicate:     NewPredicateEvaluator(pred),
+		Predicate:     BindPredicate(pred),
 		OutputColumns: []string{"event_type"},
 	}
 	visits := 0
@@ -284,7 +284,7 @@ func TestSegmentScanIteratorLateMaterializesSelectedFOROutput(t *testing.T) {
 	pred := Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}
 	it := SegmentScanIterator{
 		Segments:      []ScanSegment{{Path: path, Meta: meta}},
-		Predicate:     NewPredicateEvaluator(pred),
+		Predicate:     BindPredicate(pred),
 		OutputColumns: []string{"tenant_id"},
 		Stats:         stats,
 	}
@@ -324,7 +324,7 @@ func TestSegmentScanIteratorLateMaterializesEncodedFOROutputForRequester(t *test
 	pred := Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}
 	it := SegmentScanIterator{
 		Segments:             []ScanSegment{{Path: path, Meta: meta}},
-		Predicate:            NewPredicateEvaluator(pred),
+		Predicate:            BindPredicate(pred),
 		OutputColumns:        []string{"tenant_id"},
 		EncodedOutputColumns: map[string]struct{}{"tenant_id": {}},
 	}
@@ -360,7 +360,7 @@ func TestSegmentScanIteratorLateMaterializesSelectedPlainOutput(t *testing.T) {
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}
 	it := SegmentScanIterator{
 		Segments:      []ScanSegment{{Path: path, Meta: meta}},
-		Predicate:     NewPredicateEvaluator(pred),
+		Predicate:     BindPredicate(pred),
 		OutputColumns: []string{"score"},
 	}
 	visits := 0
@@ -399,7 +399,7 @@ func TestSegmentScanIteratorLateMaterializesSelectedDictionaryOutput(t *testing.
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}
 	it := SegmentScanIterator{
 		Segments:      []ScanSegment{{Path: path, Meta: meta}},
-		Predicate:     NewPredicateEvaluator(pred),
+		Predicate:     BindPredicate(pred),
 		OutputColumns: []string{"event_type"},
 	}
 	visits := 0
@@ -437,7 +437,7 @@ func TestSegmentScanIteratorLateMaterializesSelectedConstantOutput(t *testing.T)
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}
 	it := SegmentScanIterator{
 		Segments:      []ScanSegment{{Path: path, Meta: meta}},
-		Predicate:     NewPredicateEvaluator(pred),
+		Predicate:     BindPredicate(pred),
 		OutputColumns: []string{"event_type"},
 	}
 	visits := 0
@@ -473,7 +473,7 @@ func TestSegmentScanIteratorSkipsLateOutputWhenPredicateMatchesNothing(t *testin
 	pred := Predicate{Column: "event_type", Op: PredicateOpNotEq, PredicateValue: PredicateValue{Text: "checkout"}}
 	it := SegmentScanIterator{
 		Segments:      []ScanSegment{{Path: path, Meta: meta}},
-		Predicate:     NewPredicateEvaluator(pred),
+		Predicate:     BindPredicate(pred),
 		OutputColumns: []string{"tenant_id"},
 		Stats:         stats,
 	}
@@ -507,7 +507,7 @@ func TestSegmentScanIteratorPrunesPersistedPages(t *testing.T) {
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}
 	it := SegmentScanIterator{
 		Segments:  []ScanSegment{{Path: path, Meta: meta}},
-		Predicate: NewPredicateEvaluator(pred),
+		Predicate: BindPredicate(pred),
 		Prune:     pred,
 		Stats:     stats,
 	}
@@ -543,7 +543,7 @@ func TestSegmentScanIteratorPrunesPersistedSegments(t *testing.T) {
 	}
 	stats := &QueryStats{}
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 999999}}
-	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 
 	visits := 0
 	if err := it.ForEach(func(types.Batch, types.SelectionMask) error {
@@ -572,7 +572,7 @@ func TestSegmentScanIteratorPrunesPersistedTextPages(t *testing.T) {
 	}
 	stats := &QueryStats{}
 	pred := Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}
-	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 
 	visits := 0
 	if err := it.ForEach(func(types.Batch, types.SelectionMask) error {
@@ -598,7 +598,7 @@ func TestSegmentScanIteratorPrunesPersistedBoolPages(t *testing.T) {
 	}
 	stats := &QueryStats{}
 	pred := Predicate{Column: "flag", Op: PredicateOpEq, PredicateValue: PredicateValue{Bool: true}}
-	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 
 	visits := 0
 	if err := it.ForEach(func(_ types.Batch, sel types.SelectionMask) error {
@@ -627,7 +627,7 @@ func TestSegmentScanIteratorPrunesPersistedInt16Pages(t *testing.T) {
 	}
 	stats := &QueryStats{}
 	pred := Predicate{Column: "small_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 1}}
-	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 
 	visits := 0
 	if err := it.ForEach(func(_ types.Batch, sel types.SelectionMask) error {
@@ -659,7 +659,7 @@ func TestSegmentScanIteratorPrunesPersistedInt16ValuePages(t *testing.T) {
 	}
 	stats := &QueryStats{}
 	pred := Predicate{Column: "small_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 2}}
-	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 
 	visits := 0
 	if err := it.ForEach(func(types.Batch, types.SelectionMask) error {
@@ -689,7 +689,7 @@ func TestSegmentScanIteratorPrunesPersistedInt64ValuePages(t *testing.T) {
 
 	stats := &QueryStats{}
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 2}}
-	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 
 	visits := 0
 	if err := it.ForEach(func(types.Batch, types.SelectionMask) error {
@@ -704,7 +704,7 @@ func TestSegmentScanIteratorPrunesPersistedInt64ValuePages(t *testing.T) {
 
 	stats = &QueryStats{}
 	pred = Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 3}}
-	it = SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it = SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 	visits = 0
 	if err := it.ForEach(func(_ types.Batch, sel types.SelectionMask) error {
 		visits++
@@ -738,7 +738,7 @@ func TestSegmentScanIteratorPrunesTruncatedTextStatsWithBloom(t *testing.T) {
 
 	stats := &QueryStats{}
 	pred := Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: missingTextBloomValueAcross(textPageBloomProbes, textStats.HashBloom)}}
-	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 
 	visits := 0
 	if err := it.ForEach(func(types.Batch, types.SelectionMask) error {
@@ -753,7 +753,7 @@ func TestSegmentScanIteratorPrunesTruncatedTextStatsWithBloom(t *testing.T) {
 
 	stats = &QueryStats{}
 	pred = Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: events[len(events)-1]}}
-	it = SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it = SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 	visits = 0
 	if err := it.ForEach(func(_ types.Batch, sel types.SelectionMask) error {
 		visits++
@@ -854,7 +854,7 @@ func TestSegmentScanIteratorPrunesUUIDStatsWithBloom(t *testing.T) {
 	stats := &QueryStats{}
 	absent := missingUUIDBloomValueAcross(textPageBloomProbes, uuidStats.HashBloom)
 	pred := Predicate{Column: "event_uuid", Op: PredicateOpEq, PredicateValue: PredicateValue{UUID: absent}}
-	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 	visits := 0
 	if err := it.ForEach(func(types.Batch, types.SelectionMask) error {
 		visits++
@@ -868,7 +868,7 @@ func TestSegmentScanIteratorPrunesUUIDStatsWithBloom(t *testing.T) {
 
 	stats = &QueryStats{}
 	pred = Predicate{Column: "event_uuid", Op: PredicateOpEq, PredicateValue: PredicateValue{UUID: values[len(values)-1]}}
-	it = SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it = SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 	visits = 0
 	if err := it.ForEach(func(_ types.Batch, sel types.SelectionMask) error {
 		visits++
@@ -920,7 +920,7 @@ func TestSegmentScanIteratorBloomPrunesTruncatedInt64ValueStats(t *testing.T) {
 	}
 	stats := &QueryStats{}
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 1}}
-	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
+	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: BindPredicate(pred), Prune: pred, Stats: stats}
 
 	visits := 0
 	if err := it.ForEach(func(types.Batch, types.SelectionMask) error {
