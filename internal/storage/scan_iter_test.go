@@ -988,7 +988,7 @@ func segmentPayloadBytes(meta SegmentMeta) int {
 }
 
 func missingTextBloomValueAcross(probes uint64, blooms ...[]uint64) string {
-	for i := 0; i < 1_000_000; i++ {
+	for i := range 1_000_000 {
 		value := fmt.Sprintf("missing_%d", i)
 		found := false
 		for _, bloom := range blooms {
@@ -1005,7 +1005,7 @@ func missingTextBloomValueAcross(probes uint64, blooms ...[]uint64) string {
 }
 
 func missingUUIDBloomValueAcross(probes uint64, blooms ...[]uint64) types.UUID16 {
-	for i := 0; i < 1_000_000; i++ {
+	for i := range 1_000_000 {
 		value := testUUID16(i + 1)
 		found := false
 		for _, bloom := range blooms {

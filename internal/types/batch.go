@@ -75,7 +75,7 @@ func NewBatchNoClone(cols []Column) (Batch, error) {
 		if name == "" {
 			return Batch{}, fmt.Errorf("column name is required")
 		}
-		for j := 0; j < i; j++ {
+		for j := range i {
 			if cols[j].Name == name {
 				return Batch{}, fmt.Errorf("duplicate column %q", name)
 			}

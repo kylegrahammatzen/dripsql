@@ -259,7 +259,7 @@ func plainDecodeSelectedVarBytes(payload []byte, rows int, valid types.Validity,
 		}
 	})
 	out := types.NewVarBytes(rows, dataBytes)
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		if !sel.IsSet(row) || !types.IsValid(valid, row) {
 			out.AppendBytes(row, nil)
 			continue
@@ -325,5 +325,3 @@ func readValidityInto(payload []byte, rows int, nullCount int, dst types.Validit
 	}
 	return valid, bytes, nil
 }
-
-

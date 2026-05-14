@@ -101,11 +101,27 @@ func (r *segmentMetaReader) skip(n int) {
 	r.pos += n
 }
 
-func (r *segmentMetaReader) skipString()     { r.skip(int(r.readU32())) }
-func (r *segmentMetaReader) skipBoolStats()  { if r.readBool() { r.skip(2) } }
-func (r *segmentMetaReader) skipInt32Stats() { if r.readBool() { r.skip(17) } }
-func (r *segmentMetaReader) skipInt64Stats() { if r.readBool() { r.skip(25) } }
-func (r *segmentMetaReader) skipUUIDStats()  { if r.readBool() { r.skip(int(r.readU32()) * 8) } }
+func (r *segmentMetaReader) skipString() { r.skip(int(r.readU32())) }
+func (r *segmentMetaReader) skipBoolStats() {
+	if r.readBool() {
+		r.skip(2)
+	}
+}
+func (r *segmentMetaReader) skipInt32Stats() {
+	if r.readBool() {
+		r.skip(17)
+	}
+}
+func (r *segmentMetaReader) skipInt64Stats() {
+	if r.readBool() {
+		r.skip(25)
+	}
+}
+func (r *segmentMetaReader) skipUUIDStats() {
+	if r.readBool() {
+		r.skip(int(r.readU32()) * 8)
+	}
+}
 
 func (r *segmentMetaReader) skipInt32ValueStats() { r.skipValueStats(4) }
 func (r *segmentMetaReader) skipInt64ValueStats() { r.skipValueStats(8) }
@@ -127,7 +143,7 @@ func (r *segmentMetaReader) skipTextStats() {
 	}
 	r.skip(9)
 	values := r.readU32()
-	for i := uint32(0); i < values; i++ {
+	for range values {
 		r.skipString()
 		r.skip(4)
 	}
@@ -136,15 +152,15 @@ func (r *segmentMetaReader) skipTextStats() {
 		return
 	}
 	groups := r.readU32()
-	for g := uint32(0); g < groups; g++ {
+	for range groups {
 		r.skipString()
 		r.skip(int(r.readU32()) * 8)
 	}
 	siblings := r.readU32()
-	for s := uint32(0); s < siblings; s++ {
+	for range siblings {
 		r.skipString()
 		vc := r.readU32()
-		for v := uint32(0); v < vc; v++ {
+		for range vc {
 			r.skipString()
 			r.skip(int(r.readU32()) * 8)
 		}

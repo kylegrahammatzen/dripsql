@@ -245,7 +245,7 @@ func TestPlainRoundTripSingleRow(t *testing.T) {
 
 func TestPlainRoundTripAllNullPage(t *testing.T) {
 	valid := types.NewValidity(3)
-	for row := 0; row < 3; row++ {
+	for row := range 3 {
 		types.SetInvalid(valid, row)
 	}
 	v := types.Vec{Kind: types.VecInt64, Encoding: types.EncodingFlat, Len: 3, Valid: valid, I64: []int64{1, 2, 3}}

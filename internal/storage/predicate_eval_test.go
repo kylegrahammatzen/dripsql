@@ -410,7 +410,7 @@ func dictSingleValueBatch(t *testing.T) types.Batch {
 func dictAllNullBatch(t *testing.T) types.Batch {
 	t.Helper()
 	valid := types.NewValidity(4)
-	for row := 0; row < 4; row++ {
+	for row := range 4 {
 		types.SetInvalid(valid, row)
 	}
 	dict := types.NewVarBytes(1, 0)

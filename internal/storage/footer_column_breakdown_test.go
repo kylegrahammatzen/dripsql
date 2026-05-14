@@ -42,10 +42,10 @@ func TestFooterColumnBreakdown(t *testing.T) {
 
 	// Per-column raw bytes: build a SegmentMeta with just that column.
 	type colStat struct {
-		name       string
-		rawBytes   int
-		compBytes  int
-		decompNs   int64
+		name      string
+		rawBytes  int
+		compBytes int
+		decompNs  int64
 	}
 	stats := make([]colStat, len(meta.Columns))
 	const iters = 20
@@ -68,7 +68,7 @@ func TestFooterColumnBreakdown(t *testing.T) {
 
 		// Decompression time for this one-column blob, averaged over iters.
 		start := time.Now()
-		for k := 0; k < iters; k++ {
+		for range iters {
 			out, err := decompressSegmentFooter(comp, len(raw))
 			if err != nil || len(out) != len(raw) {
 				t.Fatalf("decompress one-col %q: %v", col.Name, err)
@@ -79,7 +79,7 @@ func TestFooterColumnBreakdown(t *testing.T) {
 
 	// Full-footer decompression time, same number of iters for comparison.
 	startFull := time.Now()
-	for k := 0; k < iters; k++ {
+	for range iters {
 		out, err := decompressSegmentFooter(fullCompressed, len(fullRaw))
 		if err != nil || len(out) != len(fullRaw) {
 			t.Fatalf("decompress full: %v", err)

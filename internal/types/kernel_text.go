@@ -11,7 +11,7 @@ func EqBytes(v VarBytes, valid Validity, sel Sel, out Sel, rhs []byte) Sel {
 		out = ensureSelLen(out, rows)
 		n := 0
 		if valid == nil {
-			for i := 0; i < rows; i++ {
+			for i := range rows {
 				if bytes.Equal(v.Bytes(i), rhs) {
 					out[n] = Row(i)
 					n++
@@ -19,7 +19,7 @@ func EqBytes(v VarBytes, valid Validity, sel Sel, out Sel, rhs []byte) Sel {
 			}
 			return out[:n]
 		}
-		for i := 0; i < rows; i++ {
+		for i := range rows {
 			if validBit(valid, i) && bytes.Equal(v.Bytes(i), rhs) {
 				out[n] = Row(i)
 				n++
@@ -56,7 +56,7 @@ func PrefixBytes(v VarBytes, valid Validity, sel Sel, out Sel, prefix []byte) Se
 		out = ensureSelLen(out, rows)
 		n := 0
 		if valid == nil {
-			for i := 0; i < rows; i++ {
+			for i := range rows {
 				if bytes.HasPrefix(v.Bytes(i), prefix) {
 					out[n] = Row(i)
 					n++
@@ -64,7 +64,7 @@ func PrefixBytes(v VarBytes, valid Validity, sel Sel, out Sel, prefix []byte) Se
 			}
 			return out[:n]
 		}
-		for i := 0; i < rows; i++ {
+		for i := range rows {
 			if validBit(valid, i) && bytes.HasPrefix(v.Bytes(i), prefix) {
 				out[n] = Row(i)
 				n++

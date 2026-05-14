@@ -87,7 +87,7 @@ func (c *TextGroupCountSumSink) pushDict(rows int, group types.Vec, sum types.Ve
 		switch sum.Kind {
 		case types.VecInt64:
 			src := sum.I64[:rows]
-			for row := 0; row < rows; row++ {
+			for row := range rows {
 				id := int(ids[row])
 				counts[id]++
 				next, ok := AddInt64(sums[id], src[row])
@@ -98,7 +98,7 @@ func (c *TextGroupCountSumSink) pushDict(rows int, group types.Vec, sum types.Ve
 			}
 		case types.VecInt32:
 			src := sum.I32[:rows]
-			for row := 0; row < rows; row++ {
+			for row := range rows {
 				id := int(ids[row])
 				counts[id]++
 				next, ok := AddInt64(sums[id], int64(src[row]))
@@ -140,7 +140,7 @@ func (c *TextGroupCountSumSink) pushDict(rows int, group types.Vec, sum types.Ve
 			return nil
 		}
 		if fullPage {
-			for row := 0; row < rows; row++ {
+			for row := range rows {
 				if err := addRow(row); err != nil {
 					return err
 				}
@@ -158,7 +158,7 @@ func (c *TextGroupCountSumSink) pushDict(rows int, group types.Vec, sum types.Ve
 			}
 		}
 	}
-	for id := 0; id < dictRows; id++ {
+	for id := range dictRows {
 		if counts[id] == 0 {
 			continue
 		}
@@ -198,7 +198,7 @@ func (c *TextGroupCountSumSink) pushFlat(rows int, group types.Vec, sum types.Ve
 		return c.mergeGroup(key, state, 1, rowSum)
 	}
 	if sel.Rows == 0 || sel.PopCount() == sel.Rows {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if err := addRow(row); err != nil {
 				return err
 			}

@@ -419,17 +419,15 @@ func TestStoreConcurrentAppendAssignsUniqueSegmentIDs(t *testing.T) {
 	ids := make(chan SegmentID, appends)
 	errs := make(chan error, appends)
 	var wg sync.WaitGroup
-	for i := 0; i < appends; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range appends {
+		wg.Go(func() {
 			meta, err := store.AppendBatch(context.Background(), table, batch)
 			if err != nil {
 				errs <- err
 				return
 			}
 			ids <- meta.ID
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)

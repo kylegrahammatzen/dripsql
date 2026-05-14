@@ -21,7 +21,7 @@ func segmentFileIdentity(path string, size int64) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(path))
 	var sizeBuf [8]byte
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		sizeBuf[i] = byte(size >> (i * 8))
 	}
 	_, _ = h.Write(sizeBuf[:])

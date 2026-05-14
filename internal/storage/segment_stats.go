@@ -191,7 +191,7 @@ func applyPageStats(page *PageMeta, v types.Vec) {
 
 func boolStats(values []uint64, rows int, valid types.Validity) *BoolStats {
 	var out BoolStats
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		if !types.IsValid(valid, row) {
 			continue
 		}
@@ -826,7 +826,7 @@ func hashBloomAdd(bloom []uint64, hash uint32, probes uint64) {
 	if len(bloom) == 0 {
 		return
 	}
-	for probe := uint64(0); probe < probes; probe++ {
+	for probe := range probes {
 		bit := textHashBloomBit(hash, probe, len(bloom))
 		bloom[bit>>6] |= uint64(1) << (bit & 63)
 	}
@@ -863,7 +863,7 @@ func uuidSegmentHashBloomHas(bloom []uint64, value types.UUID16) bool {
 }
 
 func hashBloomHas(bloom []uint64, hash uint32, probes uint64) bool {
-	for probe := uint64(0); probe < probes; probe++ {
+	for probe := range probes {
 		bit := textHashBloomBit(hash, probe, len(bloom))
 		if bloom[bit>>6]&(uint64(1)<<(bit&63)) == 0 {
 			return false
@@ -885,10 +885,7 @@ func textSegmentBloomWordsFor(valueCount int) int {
 		return 0
 	}
 	bits := valueCount * textSegmentBloomBitsPerValue
-	words := (bits + 63) / 64
-	if words < textSegmentBloomMinWords {
-		words = textSegmentBloomMinWords
-	}
+	words := max((bits+63)/64, textSegmentBloomMinWords)
 	if words > textSegmentBloomMaxWords {
 		words = textSegmentBloomMaxWords
 	}

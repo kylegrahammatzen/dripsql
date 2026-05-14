@@ -235,7 +235,7 @@ func forBitPackPayloadSize(rows int, valid types.Validity, width int) int {
 
 func forBitPackSet(payload []byte, row int, width int, value uint64) {
 	bitOffset := row * width
-	for bit := 0; bit < width; bit++ {
+	for bit := range width {
 		if value&(uint64(1)<<uint(bit)) == 0 {
 			continue
 		}
@@ -247,7 +247,7 @@ func forBitPackSet(payload []byte, row int, width int, value uint64) {
 func forBitPackGetNaive(payload []byte, row int, width int) uint64 {
 	bitOffset := row * width
 	var value uint64
-	for bit := 0; bit < width; bit++ {
+	for bit := range width {
 		absoluteBit := bitOffset + bit
 		if payload[absoluteBit>>3]&(byte(1)<<uint(absoluteBit&7)) != 0 {
 			value |= uint64(1) << uint(bit)
@@ -264,28 +264,28 @@ func forBitPackPack[T ~int16 | ~int32 | ~int64](dst []byte, values []T, valid ty
 	n := len(values)
 	switch width {
 	case 8:
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if !types.IsValid(valid, i) {
 				continue
 			}
 			dst[i] = byte(uint64(int64(values[i])) - uint64(base))
 		}
 	case 16:
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if !types.IsValid(valid, i) {
 				continue
 			}
 			binary.LittleEndian.PutUint16(dst[i*2:i*2+2], uint16(uint64(int64(values[i]))-uint64(base)))
 		}
 	case 32:
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if !types.IsValid(valid, i) {
 				continue
 			}
 			binary.LittleEndian.PutUint32(dst[i*4:i*4+4], uint32(uint64(int64(values[i]))-uint64(base)))
 		}
 	case 64:
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if !types.IsValid(valid, i) {
 				continue
 			}
@@ -317,7 +317,7 @@ func forBitPackPack[T ~int16 | ~int32 | ~int64](dst []byte, values []T, valid ty
 				forBitPackSet(dst, i, width, uint64(int64(values[i]))-uint64(base))
 			}
 		} else {
-			for i := 0; i < n; i++ {
+			for i := range n {
 				if !types.IsValid(valid, i) {
 					continue
 				}
@@ -337,7 +337,7 @@ func forBitPackUnpack[T ~int16 | ~int32 | ~int64](data []byte, dst []T, base int
 	n := len(dst)
 	switch width {
 	case 8:
-		for i := 0; i < n; i++ {
+		for i := range n {
 			dst[i] = T(base + int64(data[i]))
 		}
 	case 10:
@@ -345,17 +345,17 @@ func forBitPackUnpack[T ~int16 | ~int32 | ~int64](data []byte, dst []T, base int
 	case 12:
 		forBitPackUnpackWidth12(data, dst, base)
 	case 16:
-		for i := 0; i < n; i++ {
+		for i := range n {
 			dst[i] = T(base + int64(binary.LittleEndian.Uint16(data[i*2:i*2+2])))
 		}
 	case 24:
 		forBitPackUnpackWidth24(data, dst, base)
 	case 32:
-		for i := 0; i < n; i++ {
+		for i := range n {
 			dst[i] = T(base + int64(binary.LittleEndian.Uint32(data[i*4:i*4+4])))
 		}
 	case 64:
-		for i := 0; i < n; i++ {
+		for i := range n {
 			dst[i] = T(base + int64(binary.LittleEndian.Uint64(data[i*8:i*8+8])))
 		}
 	default:
@@ -376,7 +376,7 @@ func forBitPackUnpack[T ~int16 | ~int32 | ~int64](data []byte, dst []T, base int
 				dst[i] = T(base + int64(forBitPackGetNaive(data, i, width)))
 			}
 		} else {
-			for i := 0; i < n; i++ {
+			for i := range n {
 				dst[i] = T(base + int64(forBitPackGetNaive(data, i, width)))
 			}
 		}
@@ -422,7 +422,7 @@ func forBitPackUnpackWidth12[T ~int16 | ~int32 | ~int64](data []byte, dst []T, b
 }
 
 func forBitPackUnpackWidth24[T ~int16 | ~int32 | ~int64](data []byte, dst []T, base int64) {
-	for i := 0; i < len(dst); i++ {
+	for i := range dst {
 		in := i * 3
 		value := uint64(data[in]) |
 			uint64(data[in+1])<<8 |

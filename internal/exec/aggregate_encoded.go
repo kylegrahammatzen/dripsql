@@ -47,7 +47,7 @@ func sumConstantInt64Selected(v types.Vec, sel types.SelectionMask, base int64) 
 	count := countValidSelected(v.Valid, sel)
 	sum := base
 	value := v.Encoded.ConstantI64
-	for i := int64(0); i < count; i++ {
+	for range count {
 		next, ok := AddInt64(sum, value)
 		if !ok {
 			return 0, 0, true

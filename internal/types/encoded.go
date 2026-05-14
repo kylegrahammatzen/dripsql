@@ -53,7 +53,7 @@ func forOffsetBits(data []byte, row int, width int) uint64 {
 		return (binary.LittleEndian.Uint64(data[byteOffset:byteOffset+8]) >> shift) & mask
 	}
 	var value uint64
-	for bit := 0; bit < width; bit++ {
+	for bit := range width {
 		absoluteBit := bitOffset + bit
 		if data[absoluteBit>>3]&(byte(1)<<uint(absoluteBit&7)) != 0 {
 			value |= uint64(1) << uint(bit)

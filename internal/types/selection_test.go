@@ -7,7 +7,7 @@ import (
 
 func TestSelectionMaskZeroIsAllUnset(t *testing.T) {
 	m := NewSelectionMask(64)
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		if m.IsSet(i) {
 			t.Errorf("row %d set in fresh mask", i)
 		}

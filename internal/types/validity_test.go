@@ -21,7 +21,7 @@ func TestValidityWordsForRowCount(t *testing.T) {
 
 func TestValidityIsValidAllTrue(t *testing.T) {
 	v := NewValidity(64)
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		if !IsValid(v, i) {
 			t.Errorf("row %d invalid in fresh validity", i)
 		}
@@ -30,7 +30,7 @@ func TestValidityIsValidAllTrue(t *testing.T) {
 
 func TestValidityIsValidAllFalse(t *testing.T) {
 	v := make(Validity, 1)
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		if IsValid(v, i) {
 			t.Errorf("row %d valid in zero validity", i)
 		}
@@ -103,7 +103,7 @@ func TestValidityCountAcrossWordBoundary(t *testing.T) {
 func TestValidityFillValidPartialWord(t *testing.T) {
 	v := make(Validity, ValidityWords(70))
 	FillValid(v, 70)
-	for i := 0; i < 70; i++ {
+	for i := range 70 {
 		if !IsValid(v, i) {
 			t.Errorf("row %d invalid after FillValid(70)", i)
 		}

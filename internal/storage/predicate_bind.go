@@ -349,12 +349,7 @@ func (m int64Matcher) Has(value int64) bool {
 		_, ok := m.large[value]
 		return ok
 	}
-	for _, candidate := range m.small {
-		if candidate == value {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(m.small, value)
 }
 
 // Each invokes fn for every value in the set; ordering is unspecified.
@@ -407,12 +402,7 @@ func (m textMatcher) Has(value string) bool {
 		_, ok := m.large[value]
 		return ok
 	}
-	for _, candidate := range m.small {
-		if candidate == value {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(m.small, value)
 }
 
 func (m textMatcher) AnyInBloom(bloom []uint64, probes uint64) bool {
@@ -451,12 +441,7 @@ func (m uuidMatcher) Has(value types.UUID16) bool {
 		_, ok := m.large[value]
 		return ok
 	}
-	for _, candidate := range m.small {
-		if candidate == value {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(m.small, value)
 }
 
 func (m uuidMatcher) AnyInBloom(bloom []uint64, probes uint64) bool {
@@ -509,7 +494,7 @@ func selectValidRows(valid types.Validity, rows int, input *types.SelectionMask,
 			return out.FillAll()
 		}
 		matched := 0
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(valid, row) {
 				out.SetUnsafe(row)
 				matched++

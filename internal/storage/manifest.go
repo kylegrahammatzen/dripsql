@@ -23,7 +23,7 @@ const manifestFileName = "manifest.jsonl"
 // the full SegmentMeta inline still decode here: encoding/json silently drops
 // the extra fields, so legacy databases keep loading without migration.
 type manifestSegment struct {
-	Path string                `json:"path"`
+	Path string                   `json:"path"`
 	Meta manifestSegmentSignature `json:"meta"`
 }
 
@@ -120,10 +120,7 @@ func parseManifestRecords(data []byte) ([]manifestRecord, error) {
 	}
 
 	records := make([]manifestRecord, len(pending))
-	workers := min(runtime.GOMAXPROCS(0), len(pending))
-	if workers < 1 {
-		workers = 1
-	}
+	workers := max(min(runtime.GOMAXPROCS(0), len(pending)), 1)
 
 	var next atomic.Int64
 	var failed atomic.Bool
@@ -136,9 +133,7 @@ func parseManifestRecords(data []byte) ([]manifestRecord, error) {
 		failed.Store(true)
 	}
 	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				if failed.Load() {
 					return
@@ -159,7 +154,7 @@ func parseManifestRecords(data []byte) ([]manifestRecord, error) {
 				}
 				records[i] = manifestRecord{line: p.line, record: record}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if firstErr != nil {
@@ -194,10 +189,7 @@ func readManifest(dir string) ([]storedSegment, error) {
 	}
 
 	segments := make([]storedSegment, len(records))
-	workers := runtime.GOMAXPROCS(0)
-	if workers > len(records) {
-		workers = len(records)
-	}
+	workers := min(runtime.GOMAXPROCS(0), len(records))
 	if workers < 1 {
 		workers = 1
 	}
@@ -213,9 +205,7 @@ func readManifest(dir string) ([]storedSegment, error) {
 		failed.Store(true)
 	}
 	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for {
 				if failed.Load() {
 					return
@@ -237,7 +227,7 @@ func readManifest(dir string) ([]storedSegment, error) {
 				}
 				segments[i] = storedSegment{path: path, meta: footer, size: size, pageInfos: synthesizeSegmentPageInfos(footer)}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if firstErr != nil {

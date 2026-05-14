@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -169,14 +170,14 @@ func benchmarkRowForLookup(rows int64) int64 {
 }
 
 type benchReport struct {
-	Env      envInfo             `json:"env"`
-	Dir      string              `json:"dir"`
-	Profile  string              `json:"profile"`
-	Mode     string              `json:"mode"`
-	ModeNote string              `json:"mode_note,omitempty"`
-	Rows     int64               `json:"rows"`
-	Runs     int                 `json:"runs"`
-	Load     loadStats           `json:"load"`
+	Env      envInfo               `json:"env"`
+	Dir      string                `json:"dir"`
+	Profile  string                `json:"profile"`
+	Mode     string                `json:"mode"`
+	ModeNote string                `json:"mode_note,omitempty"`
+	Rows     int64                 `json:"rows"`
+	Runs     int                   `json:"runs"`
+	Load     loadStats             `json:"load"`
 	Storage  engine.StorageStats   `json:"storage"`
 	Reads    queryReadStats        `json:"reads"`
 	Cache    engine.ByteCacheStats `json:"page_cache"`
@@ -189,11 +190,11 @@ type queryReadStats struct {
 }
 
 type queryReport struct {
-	Name    string         `json:"query_name"`
-	SQL     string         `json:"sql"`
-	Columns []string       `json:"columns"`
-	Values  [][]any        `json:"values"`
-	Rows    int            `json:"rows"`
+	Name    string        `json:"query_name"`
+	SQL     string        `json:"sql"`
+	Columns []string      `json:"columns"`
+	Values  [][]any       `json:"values"`
+	Rows    int           `json:"rows"`
 	Timing  engine.Timing `json:"timing"`
 	Explain engine.Report `json:"explain"`
 }
@@ -354,10 +355,7 @@ func runOne(opts options, rows int64, profile profileSpec) (benchReport, error) 
 	} else {
 		load.Elapsed = 0
 	}
-	actualRows := rows
-	if existingRows > actualRows {
-		actualRows = existingRows
-	}
+	actualRows := max(existingRows, rows)
 	modeNote, err := prepareQueryMode(ctx, &db, dir, opts.mode)
 	if err != nil {
 		return benchReport{}, err
@@ -504,7 +502,7 @@ func loadRows(ctx context.Context, db *engine.DB, startRows int64, targetRows in
 		err   error
 	}
 	chans := make([]chan job, workers)
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		ch := make(chan job, 2)
 		chans[w] = ch
 		go func(start int, ch chan<- job) {
@@ -525,7 +523,7 @@ func loadRows(ctx context.Context, db *engine.DB, startRows int64, targetRows in
 		}(w, ch)
 	}
 
-	for i := 0; i < batchCount; i++ {
+	for i := range batchCount {
 		waitStart := time.Now()
 		j, ok := <-chans[i%workers]
 		stats.GenerateWaitNs += time.Since(waitStart).Nanoseconds()
@@ -636,7 +634,7 @@ func percentileNearestRank(samples []int64, percentile int) int64 {
 		return 0
 	}
 	ordered := append([]int64(nil), samples...)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	slices.Sort(ordered)
 	if percentile <= 0 {
 		return ordered[0]
 	}
@@ -690,10 +688,7 @@ func emitText(w io.Writer, report benchReport) {
 	fmt.Fprintf(w, "Append calls:      %s\n", humanfmt.Duration(time.Duration(report.Load.AppendCallNs)))
 	fmt.Fprintf(w, "Flush/seal wait:   %s\n\n", humanfmt.Duration(time.Duration(report.Load.FlushNs)))
 	storage := report.Storage
-	overhead := storage.TableBytes - storage.ColumnPayloadBytes
-	if overhead < 0 {
-		overhead = 0
-	}
+	overhead := max(storage.TableBytes-storage.ColumnPayloadBytes, 0)
 	tableRatio := 0.0
 	if storage.TableBytes > 0 {
 		tableRatio = float64(storage.PlainEstimate) / float64(storage.TableBytes)

@@ -53,7 +53,7 @@ func evalUUIDLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, 
 func evalUUIDEq(values []types.UUID16, valid types.Validity, rows int, want types.UUID16, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(valid, row) && (values[row] == want) != invert {
 				out.SetUnsafe(row)
 				matched++
@@ -73,7 +73,7 @@ func evalUUIDEq(values []types.UUID16, valid types.Validity, rows int, want type
 func evalUUIDIn(values []types.UUID16, valid types.Validity, rows int, matcher uuidMatcher, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if !types.IsValid(valid, row) {
 				continue
 			}
@@ -230,7 +230,7 @@ func evalFlatIntLeafBoundAllValid[T ~int16 | ~int32 | ~int64](values []T, rows i
 func evalIntEqAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if int64(values[row]) == want {
 				out.SetUnsafe(row)
 				matched++
@@ -250,7 +250,7 @@ func evalIntEqAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, want in
 func evalIntNotEqAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if int64(values[row]) != want {
 				out.SetUnsafe(row)
 				matched++
@@ -270,7 +270,7 @@ func evalIntNotEqAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, want
 func evalIntLessAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if int64(values[row]) < want {
 				out.SetUnsafe(row)
 				matched++
@@ -290,7 +290,7 @@ func evalIntLessAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, want 
 func evalIntLessEqualAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if int64(values[row]) <= want {
 				out.SetUnsafe(row)
 				matched++
@@ -310,7 +310,7 @@ func evalIntLessEqualAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, 
 func evalIntGreaterAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if int64(values[row]) > want {
 				out.SetUnsafe(row)
 				matched++
@@ -330,7 +330,7 @@ func evalIntGreaterAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, wa
 func evalIntGreaterEqualAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if int64(values[row]) >= want {
 				out.SetUnsafe(row)
 				matched++
@@ -350,7 +350,7 @@ func evalIntGreaterEqualAllValid[T ~int16 | ~int32 | ~int64](values []T, rows in
 func evalIntBetweenAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, lo int64, hi int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			value := int64(values[row])
 			if lo <= value && value <= hi {
 				out.SetUnsafe(row)
@@ -372,7 +372,7 @@ func evalIntBetweenAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, lo
 func evalIntInAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, matcher int64Matcher, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if matcher.Has(int64(values[row])) != invert {
 				out.SetUnsafe(row)
 				matched++
@@ -392,7 +392,7 @@ func evalIntInAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, matcher
 func evalIntEq[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(valid, row) && int64(values[row]) == want {
 				out.SetUnsafe(row)
 				matched++
@@ -412,7 +412,7 @@ func evalIntEq[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, row
 func evalIntNotEq[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(valid, row) && int64(values[row]) != want {
 				out.SetUnsafe(row)
 				matched++
@@ -432,7 +432,7 @@ func evalIntNotEq[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, 
 func evalIntLess[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(valid, row) && int64(values[row]) < want {
 				out.SetUnsafe(row)
 				matched++
@@ -452,7 +452,7 @@ func evalIntLess[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, r
 func evalIntLessEqual[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(valid, row) && int64(values[row]) <= want {
 				out.SetUnsafe(row)
 				matched++
@@ -472,7 +472,7 @@ func evalIntLessEqual[T ~int16 | ~int32 | ~int64](values []T, valid types.Validi
 func evalIntGreater[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(valid, row) && int64(values[row]) > want {
 				out.SetUnsafe(row)
 				matched++
@@ -492,7 +492,7 @@ func evalIntGreater[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity
 func evalIntGreaterEqual[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, want int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(valid, row) && int64(values[row]) >= want {
 				out.SetUnsafe(row)
 				matched++
@@ -512,7 +512,7 @@ func evalIntGreaterEqual[T ~int16 | ~int32 | ~int64](values []T, valid types.Val
 func evalIntBetween[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, lo int64, hi int64, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			value := int64(values[row])
 			if types.IsValid(valid, row) && lo <= value && value <= hi {
 				out.SetUnsafe(row)
@@ -534,7 +534,7 @@ func evalIntBetween[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity
 func evalIntIn[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, matcher int64Matcher, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(valid, row) && matcher.Has(int64(values[row])) != invert {
 				out.SetUnsafe(row)
 				matched++

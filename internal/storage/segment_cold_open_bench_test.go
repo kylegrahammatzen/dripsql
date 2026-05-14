@@ -33,17 +33,15 @@ func BenchmarkColdOpenReadFooters(b *testing.B) {
 	for b.Loop() {
 		var wg sync.WaitGroup
 		next := make(chan int)
-		for w := 0; w < workers; w++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range workers {
+			wg.Go(func() {
 				for idx := range next {
 					if _, _, err := ReadSegmentFooter(paths[idx]); err != nil {
 						b.Errorf("ReadSegmentFooter: %v", err)
 						return
 					}
 				}
-			}()
+			})
 		}
 		for i := range paths {
 			next <- i

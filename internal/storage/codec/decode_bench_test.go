@@ -297,7 +297,7 @@ func densitySelectionMask(tb testing.TB, rows int, percent int) types.SelectionM
 	tb.Helper()
 	sel := types.NewSelectionMask(rows)
 	step := 100
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		// Bresenham-style: pick row when its share crosses a percent boundary.
 		if ((row+1)*percent)/step != (row*percent)/step {
 			sel.Set(row)
@@ -346,7 +346,7 @@ func dictTextBenchVec(tb testing.TB) types.Vec {
 	tb.Helper()
 	varText := types.NewVarBytes(types.StandardBatchRows, types.StandardBatchRows*8)
 	values := []string{"checkout", "login", "signup", "logout"}
-	for row := 0; row < types.StandardBatchRows; row++ {
+	for row := range types.StandardBatchRows {
 		varText.AppendString(row, values[row&3])
 	}
 	return types.Vec{Kind: types.VecText, Encoding: types.EncodingFlat, Len: types.StandardBatchRows, Var: varText}
@@ -389,7 +389,7 @@ func forBitPackInt64BenchVec(tb testing.TB, width int) types.Vec {
 func plainTextBenchVec(tb testing.TB) types.Vec {
 	tb.Helper()
 	varText := types.NewVarBytes(types.StandardBatchRows, types.StandardBatchRows*16)
-	for row := 0; row < types.StandardBatchRows; row++ {
+	for row := range types.StandardBatchRows {
 		varText.AppendString(row, fmt.Sprintf("user-%05d@example.com", row))
 	}
 	return types.Vec{Kind: types.VecText, Encoding: types.EncodingFlat, Len: types.StandardBatchRows, Var: varText}

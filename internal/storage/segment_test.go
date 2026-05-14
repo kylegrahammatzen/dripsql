@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -494,10 +495,8 @@ func TestReadSegmentConcurrentReaders(t *testing.T) {
 	const readers = 8
 	var wg sync.WaitGroup
 	errs := make(chan error, readers*2)
-	for i := 0; i < readers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range readers {
+		wg.Go(func() {
 			if _, _, err := ReadSegmentFooter(path); err != nil {
 				errs <- err
 				return
@@ -505,7 +504,7 @@ func TestReadSegmentConcurrentReaders(t *testing.T) {
 			if _, _, err := ReadSegmentBatch(path, meta, 0); err != nil {
 				errs <- err
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)
@@ -545,7 +544,7 @@ func segmentBatch(t *testing.T, ids []int64, events []string, invalidRows ...int
 func compressibleTextBatch(t *testing.T, rows int) types.Batch {
 	t.Helper()
 	varText := types.NewVarBytes(rows, rows*128)
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		value := fmt.Sprintf("%s/%08d/%s", strings.Repeat("/users/events", 8), row, strings.Repeat("x", 32))
 		varText.AppendString(row, value)
 	}
@@ -647,28 +646,13 @@ func textValue(t *testing.T, v types.Vec, row int) string {
 }
 
 func stringSetContains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 func int32SetContains(values []int32, want int32) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 func int64SetContains(values []int64, want int64) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }

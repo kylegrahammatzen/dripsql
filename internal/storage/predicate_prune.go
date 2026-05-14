@@ -235,12 +235,7 @@ func pruneInt64ValuePageCandidate(stats Int64ValueStats, pred boundNode) bool {
 	case PredicateOpEq:
 		return slices.Contains(stats.Values, pred.int64Value)
 	case PredicateOpIn:
-		for _, value := range stats.Values {
-			if pred.intSet.Has(value) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(stats.Values, pred.intSet.Has)
 	default:
 		return true
 	}
@@ -257,12 +252,7 @@ func pruneInt64ValueSegmentCandidate(stats Int64ValueStats, pred boundNode) bool
 	case PredicateOpEq:
 		return slices.Contains(stats.Values, pred.int64Value)
 	case PredicateOpIn:
-		for _, value := range stats.Values {
-			if pred.intSet.Has(value) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(stats.Values, pred.intSet.Has)
 	default:
 		return true
 	}
@@ -387,12 +377,7 @@ func pruneTextPageCandidate(stats TextStats, pred boundNode) bool {
 	case PredicateOpEq:
 		return slices.Contains(stats.Values, pred.textValue)
 	case PredicateOpIn:
-		for _, value := range stats.Values {
-			if pred.textSet.Has(value) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(stats.Values, pred.textSet.Has)
 	default:
 		return true
 	}

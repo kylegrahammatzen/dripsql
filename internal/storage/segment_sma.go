@@ -22,8 +22,8 @@ type segmentSMAAccumulator struct {
 	intCols  []int
 
 	perText       []perTextState
-	batchSums     [256]int64    // scratch for one (text, int) pair at a time
-	batchCrossCnt [65536]int64  // scratch for one (text, text) pair, indexed id1*256+id2
+	batchSums     [256]int64   // scratch for one (text, int) pair at a time
+	batchCrossCnt [65536]int64 // scratch for one (text, text) pair, indexed id1*256+id2
 	segmentSums   [][]map[string]int64
 	// segmentCross[ti][tj] = map[crossKey]int64 — counts of (textCol[ti] value,
 	// textCol[tj] value) pairs across the segment. Stored both ways at finalize
@@ -219,7 +219,7 @@ func (a *segmentSMAAccumulator) observeBatch(batch types.Batch) {
 			n2 := len(state2.values)
 			// Zero only the cells we'll touch (n1*n2 contiguous block in batchCrossCnt).
 			for k := 0; k < n1*256; k += 256 {
-				for off := 0; off < n2; off++ {
+				for off := range n2 {
 					a.batchCrossCnt[k+off] = 0
 				}
 			}

@@ -395,7 +395,7 @@ func TestEngineParallelGroupedCountWithPredicateAcrossSegments(t *testing.T) {
 	if _, err := db.Exec(ctx, `CREATE TABLE events (tenant_id INT64 NOT NULL, event_type TEXT NOT NULL, country TEXT NOT NULL)`); err != nil {
 		t.Fatalf("CREATE TABLE: %v", err)
 	}
-	for segment := 0; segment < 8; segment++ {
+	for segment := range 8 {
 		if _, err := db.Exec(ctx, `INSERT INTO events VALUES
 			(1, 'checkout', 'US'),
 			(2, 'checkout', 'CA'),
@@ -432,7 +432,7 @@ func TestEngineParallelGroupedTextCountSumAcrossSegments(t *testing.T) {
 	if _, err := db.Exec(ctx, `CREATE TABLE events (country TEXT NOT NULL, amount INT64 NOT NULL)`); err != nil {
 		t.Fatalf("CREATE TABLE: %v", err)
 	}
-	for segment := 0; segment < 8; segment++ {
+	for segment := range 8 {
 		if _, err := db.Exec(ctx, `INSERT INTO events VALUES
 			('US', 10),
 			('CA', 20),

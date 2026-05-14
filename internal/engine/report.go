@@ -90,10 +90,7 @@ func ReductionFromStats(stats storage.ExecStats) Reduction {
 }
 
 func NewCounter(scanned, candidate int64) Counter {
-	pruned := scanned - candidate
-	if pruned < 0 {
-		pruned = 0
-	}
+	pruned := max(scanned-candidate, 0)
 	counter := Counter{Scanned: scanned, Candidate: candidate, Pruned: pruned}
 	if scanned > 0 {
 		counter.PrunedPct = float64(pruned) * 100 / float64(scanned)
@@ -296,4 +293,3 @@ func formatCount(n int64) string {
 func fprintf(w io.Writer, format string, args ...any) {
 	_, _ = fmt.Fprintf(w, format, args...)
 }
-

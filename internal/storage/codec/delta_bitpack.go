@@ -115,10 +115,7 @@ func (DeltaBitPack) DecodeInto(page Page, dst *types.Vec) error {
 	if width <= 0 || width > 64 {
 		return fmt.Errorf("delta+bitpack invalid width %d", width)
 	}
-	deltaCount := page.Rows - 1
-	if deltaCount < 0 {
-		deltaCount = 0
-	}
+	deltaCount := max(page.Rows-1, 0)
 	packedBytes := (deltaCount*width + 7) / 8
 	if len(page.Payload)-pos < packedBytes {
 		return fmt.Errorf("delta+bitpack values truncated")
@@ -176,10 +173,7 @@ func (DeltaBitPack) Estimate(v types.Vec) (int, bool) {
 }
 
 func deltaBitPackPayloadSize(rows int, valid types.Validity, width int) int {
-	deltas := rows - 1
-	if deltas < 0 {
-		deltas = 0
-	}
+	deltas := max(rows-1, 0)
 	return validityBytes(valid) + 8 + 8 + 1 + (deltas*width+7)/8
 }
 

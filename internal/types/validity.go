@@ -57,7 +57,7 @@ func NullCount(valid Validity, n int) int {
 	}
 	ones := 0
 	full := n >> 6
-	for i := 0; i < full; i++ {
+	for i := range full {
 		ones += bits.OnesCount64(valid[i])
 	}
 	if rem := n & 63; rem != 0 {

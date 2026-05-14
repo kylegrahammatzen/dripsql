@@ -403,7 +403,7 @@ func fillConstantVarBytes(dst *types.Vec, value []byte, rows int) error {
 		return fmt.Errorf("constant varbytes decoded size exceeds int capacity")
 	}
 	varBytes := types.NewVarBytes(rows, len(value)*rows)
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		varBytes.AppendBytes(row, value)
 	}
 	dst.Var = varBytes

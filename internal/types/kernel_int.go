@@ -413,15 +413,9 @@ func addInt64Checked(sum int64, v int64) (int64, bool) {
 }
 
 func SumInt64Selected(x []int64, mask SelectionMask) (sum int64, count int, overflow bool) {
-	limit := mask.Rows
-	if len(x) < limit {
-		limit = len(x)
-	}
+	limit := min(len(x), mask.Rows)
 	totalWords := ValidityWords(limit)
-	words := totalWords
-	if len(mask.Words) < words {
-		words = len(mask.Words)
-	}
+	words := min(len(mask.Words), totalWords)
 	for wordIdx := 0; wordIdx < words; wordIdx++ {
 		word := mask.Words[wordIdx]
 		if wordIdx == totalWords-1 {

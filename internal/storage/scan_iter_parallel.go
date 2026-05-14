@@ -28,7 +28,7 @@ func (base SegmentScanIterator) RunParallel(
 	stats := make([]ExecStats, workers)
 	errCh := make(chan error, workers)
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		start := w * len(base.Segments) / workers
 		end := (w + 1) * len(base.Segments) / workers
 		if start == end {

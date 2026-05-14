@@ -380,37 +380,37 @@ func addDictStringCount(counts map[string]int64, values types.VarBytes, row int,
 func groupAnyCountAll(v types.Vec, rows int, counts map[GroupKey]int64) error {
 	switch v.Kind {
 	case types.VecBool:
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(v.Valid, row) {
 				counts[GroupKey{Kind: v.Kind, Bool: v.BoolBits[row>>6]&(uint64(1)<<uint(row&63)) != 0}]++
 			}
 		}
 	case types.VecInt16:
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(v.Valid, row) {
 				counts[GroupKey{Kind: v.Kind, I64: int64(v.I16[row])}]++
 			}
 		}
 	case types.VecInt32, types.VecDate:
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(v.Valid, row) {
 				counts[GroupKey{Kind: v.Kind, I64: int64(v.I32[row])}]++
 			}
 		}
 	case types.VecInt64, types.VecDecimal64, types.VecTimestamp, types.VecTime:
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(v.Valid, row) {
 				counts[GroupKey{Kind: v.Kind, I64: v.I64[row]}]++
 			}
 		}
 	case types.VecUUID:
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(v.Valid, row) {
 				counts[GroupKey{Kind: v.Kind, UUID: v.UUID[row]}]++
 			}
 		}
 	case types.VecEnum32:
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(v.Valid, row) {
 				counts[GroupKey{Kind: v.Kind, U32: v.U32[row]}]++
 			}
@@ -419,7 +419,7 @@ func groupAnyCountAll(v types.Vec, rows int, counts map[GroupKey]int64) error {
 		if v.Encoding != types.EncodingFlat {
 			return fmt.Errorf("group bytes unsupported encoding %s", v.Encoding)
 		}
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			if types.IsValid(v.Valid, row) {
 				counts[GroupKey{Kind: v.Kind, Bytes: v.Var.StringCopy(row)}]++
 			}

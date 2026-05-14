@@ -15,11 +15,11 @@ import (
 // the SMA bench that was already proven sub-ms.
 
 const (
-	q3PagesPer    = 4883
-	q3Segments    = 5
-	q3EventTypes  = 4
-	q3Countries   = 8
-	q3TotalPages  = q3PagesPer * q3Segments
+	q3PagesPer   = 4883
+	q3Segments   = 5
+	q3EventTypes = 4
+	q3Countries  = 8
+	q3TotalPages = q3PagesPer * q3Segments
 )
 
 // pageCrossCount[i][j] = count of rows where event_type==Values[i] AND country==Values[j].
@@ -34,8 +34,8 @@ func buildQ3CrossCounts() [][]pageCrossCount {
 		// Even split across event_type × country buckets.
 		per := rowsPerPage / int64(q3EventTypes*q3Countries)
 		for p := range pages {
-			for et := 0; et < q3EventTypes; et++ {
-				for c := 0; c < q3Countries; c++ {
+			for et := range q3EventTypes {
+				for c := range q3Countries {
 					pages[p][et][c] = per
 				}
 			}
@@ -55,7 +55,7 @@ func BenchmarkSMA_Q3CrossCountMergeOnly(b *testing.B) {
 		for _, segment := range cross {
 			for p := range segment {
 				page := &segment[p]
-				for c := 0; c < q3Countries; c++ {
+				for c := range q3Countries {
 					counts[c] += page[checkoutEventID][c]
 				}
 			}

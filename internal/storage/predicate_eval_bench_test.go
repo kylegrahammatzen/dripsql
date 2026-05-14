@@ -265,7 +265,7 @@ func benchmarkTextBatch(tb testing.TB, enc types.Encoding) types.Batch {
 	switch enc {
 	case types.EncodingFlat:
 		varText := types.NewVarBytes(rows, rows*8)
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			varText.AppendString(row, values[row&3])
 		}
 		vec = types.Vec{Kind: types.VecText, Encoding: types.EncodingFlat, Len: rows, Var: varText}
@@ -275,7 +275,7 @@ func benchmarkTextBatch(tb testing.TB, enc types.Encoding) types.Batch {
 			dict.AppendString(i, value)
 		}
 		ids := make([]uint8, rows)
-		for row := 0; row < rows; row++ {
+		for row := range rows {
 			ids[row] = uint8(row & 3)
 		}
 		vec = types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: rows, Encoded: &types.EncodedState{DictIDs: ids, DictValues: dict}}
@@ -297,7 +297,7 @@ func benchmarkTextDistinctBatch(tb testing.TB, distinct int) types.Batch {
 		values[i] = fmt.Sprintf("event_%03d", i)
 	}
 	varText := types.NewVarBytes(rows, rows*9)
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		varText.AppendString(row, values[row%len(values)])
 	}
 	batch, err := types.NewBatch([]types.Column{{Name: "event_type", Type: types.Text, V: types.Vec{Kind: types.VecText, Encoding: types.EncodingFlat, Len: rows, Var: varText}}})
@@ -337,7 +337,7 @@ func benchmarkFORBitPackBatch(tb testing.TB) types.Batch {
 	data := make([]byte, bytes)
 	for row, value := range values {
 		offset := uint64(value - base)
-		for bit := 0; bit < width; bit++ {
+		for bit := range width {
 			if offset&(uint64(1)<<uint(bit)) == 0 {
 				continue
 			}
@@ -377,7 +377,7 @@ func benchmarkCompoundBatch(tb testing.TB) types.Batch {
 	values := []string{"checkout", "login", "signup", "logout"}
 	tenantIDs := make([]int64, rows)
 	varText := types.NewVarBytes(rows, rows*8)
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		if row&1 == 0 {
 			tenantIDs[row] = 42
 		} else {

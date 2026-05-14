@@ -17,12 +17,12 @@ import (
 // 5 segments × 4883 pages × 8 country dict-ids.
 
 const (
-	smaSegments      = 5
-	smaPagesPer      = 4883
-	smaCountries     = 8
-	smaSegmentRows   = 2_097_152
-	smaPageRows      = smaSegmentRows / smaPagesPer
-	smaTotalPages    = smaSegments * smaPagesPer
+	smaSegments    = 5
+	smaPagesPer    = 4883
+	smaCountries   = 8
+	smaSegmentRows = 2_097_152
+	smaPageRows    = smaSegmentRows / smaPagesPer
+	smaTotalPages  = smaSegments * smaPagesPer
 )
 
 // pageSMA is the per-page projection: for each dict-id, the count and sum.
@@ -38,7 +38,7 @@ func buildSMA() [][]pageSMA {
 		pages := make([]pageSMA, smaPagesPer)
 		for p := range pages {
 			rowsPer := int64(smaPageRows / smaCountries)
-			for c := 0; c < smaCountries; c++ {
+			for c := range smaCountries {
 				pages[p].counts[c] = rowsPer
 				pages[p].sums[c] = rowsPer * int64(c+1) * 100
 			}
@@ -59,7 +59,7 @@ func BenchmarkSMACountryAggregateMergeOnly(b *testing.B) {
 		for _, segment := range sma {
 			for p := range segment {
 				page := &segment[p]
-				for c := 0; c < smaCountries; c++ {
+				for c := range smaCountries {
 					counts[c] += page.counts[c]
 					sums[c] += page.sums[c]
 				}

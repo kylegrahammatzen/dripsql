@@ -150,13 +150,13 @@ func TestFORBitPackBulkUnpackMatchesNaive(t *testing.T) {
 			if width < 64 {
 				mask = (uint64(1) << uint(width)) - 1
 			}
-			for row := 0; row < types.StandardBatchRows; row++ {
+			for row := range types.StandardBatchRows {
 				value := (uint64(row*row) + uint64(row<<3) + 17) & mask
 				forBitPackSet(payload, row, width, value)
 			}
 			dst := make([]int64, types.StandardBatchRows)
 			forBitPackUnpack(payload, dst, 0, width)
-			for row := 0; row < types.StandardBatchRows; row++ {
+			for row := range types.StandardBatchRows {
 				want := int64(forBitPackGetNaive(payload, row, width))
 				if dst[row] != want {
 					t.Fatalf("row %d bulk = %d, naive = %d", row, dst[row], want)
@@ -165,7 +165,7 @@ func TestFORBitPackBulkUnpackMatchesNaive(t *testing.T) {
 			if width <= 32 {
 				dst32 := make([]int32, types.StandardBatchRows)
 				forBitPackUnpack(payload, dst32, 0, width)
-				for row := 0; row < types.StandardBatchRows; row++ {
+				for row := range types.StandardBatchRows {
 					want := int32(forBitPackGetNaive(payload, row, width))
 					if dst32[row] != want {
 						t.Fatalf("row %d int32 bulk = %d, naive = %d", row, dst32[row], want)
@@ -175,7 +175,7 @@ func TestFORBitPackBulkUnpackMatchesNaive(t *testing.T) {
 			if width <= 16 {
 				dst16 := make([]int16, types.StandardBatchRows)
 				forBitPackUnpack(payload, dst16, 0, width)
-				for row := 0; row < types.StandardBatchRows; row++ {
+				for row := range types.StandardBatchRows {
 					want := int16(forBitPackGetNaive(payload, row, width))
 					if dst16[row] != want {
 						t.Fatalf("row %d int16 bulk = %d, naive = %d", row, dst16[row], want)

@@ -127,11 +127,11 @@ func TestSegmentByteCacheConcurrent(t *testing.T) {
 	const writers = 8
 	const ops = 500
 	var wg sync.WaitGroup
-	for w := 0; w < writers; w++ {
+	for w := range writers {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			for i := 0; i < ops; i++ {
+			for i := range ops {
 				k := segmentReadKey{FileID: uint64(w), Offset: int64(i % 16), Length: 64} //nolint:gosec
 				payload := bytes.Repeat([]byte{byte(w)}, 64)
 				c.Put(k, payload)

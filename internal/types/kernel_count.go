@@ -25,7 +25,7 @@ func isTrueAll(bits []uint64, n int, out Sel) Sel {
 	out = ensureSelLen(out, n)
 	rows := 0
 	fullWords := n >> 6
-	for wordIndex := 0; wordIndex < fullWords; wordIndex++ {
+	for wordIndex := range fullWords {
 		rows = appendSetBits(out, rows, wordIndex, bits[wordIndex])
 	}
 	if rem := n & 63; rem != 0 {
@@ -39,7 +39,7 @@ func isTrueValidAll(bits []uint64, n int, valid Validity, out Sel) Sel {
 	out = ensureSelLen(out, n)
 	rows := 0
 	fullWords := n >> 6
-	for wordIndex := 0; wordIndex < fullWords; wordIndex++ {
+	for wordIndex := range fullWords {
 		rows = appendSetBits(out, rows, wordIndex, bits[wordIndex]&valid[wordIndex])
 	}
 	if rem := n & 63; rem != 0 {
@@ -89,7 +89,7 @@ func CountTrue(bits []uint64, n int, valid Validity, sel Sel) int {
 func countTrueAll(bits []uint64, n int) int {
 	count := 0
 	fullWords := n >> 6
-	for i := 0; i < fullWords; i++ {
+	for i := range fullWords {
 		count += mathbits.OnesCount64(bits[i])
 	}
 	if rem := n & 63; rem != 0 {
@@ -102,7 +102,7 @@ func countTrueAll(bits []uint64, n int) int {
 func countTrueValidAll(bits []uint64, n int, valid Validity) int {
 	count := 0
 	fullWords := n >> 6
-	for i := 0; i < fullWords; i++ {
+	for i := range fullWords {
 		count += mathbits.OnesCount64(bits[i] & valid[i])
 	}
 	if rem := n & 63; rem != 0 {
@@ -150,7 +150,7 @@ func AndBool(dst []uint64, left []uint64, right []uint64, n int) []uint64 {
 	} else {
 		dst = dst[:words]
 	}
-	for i := 0; i < words; i++ {
+	for i := range words {
 		dst[i] = left[i] & right[i]
 	}
 	maskLastWord(dst, n)
@@ -164,7 +164,7 @@ func OrBool(dst []uint64, left []uint64, right []uint64, n int) []uint64 {
 	} else {
 		dst = dst[:words]
 	}
-	for i := 0; i < words; i++ {
+	for i := range words {
 		dst[i] = left[i] | right[i]
 	}
 	maskLastWord(dst, n)
