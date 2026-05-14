@@ -158,6 +158,33 @@ func bindScalarCall(columns map[string]BoundColumnDef, call *FuncCall) (BoundExp
 			op = BoundOpUpper
 		}
 		return BoundExpr{Kind: BoundExprUnary, Type: types.Text, Op: op, Left: &arg}, nil
+	case "substring", "substr":
+		if len(call.Args) < 2 || len(call.Args) > 3 {
+			return BoundExpr{}, fmt.Errorf("substring() requires 2 or 3 arguments")
+		}
+		text, err := bindTextArg(columns, call.Args[0])
+		if err != nil {
+			return BoundExpr{}, err
+		}
+		start, err := bindExpr(columns, call.Args[1])
+		if err != nil {
+			return BoundExpr{}, err
+		}
+		if !isIntegerExpr(start) {
+			return BoundExpr{}, fmt.Errorf("substring() start must be an integer")
+		}
+		args := []BoundExpr{start}
+		if len(call.Args) == 3 {
+			length, err := bindExpr(columns, call.Args[2])
+			if err != nil {
+				return BoundExpr{}, err
+			}
+			if !isIntegerExpr(length) {
+				return BoundExpr{}, fmt.Errorf("substring() length must be an integer")
+			}
+			args = append(args, length)
+		}
+		return BoundExpr{Kind: BoundExprBinary, Type: types.Text, Op: BoundOpSubstring, Left: &text, Args: args}, nil
 	case "length":
 		if len(call.Args) != 1 {
 			return BoundExpr{}, fmt.Errorf("length() requires exactly one argument")

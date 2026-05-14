@@ -502,6 +502,9 @@ func projectColumnValue(v types.Vec, row int) (any, bool, error) {
 }
 
 func evalProjectBinary(batch types.Batch, row int, expr v3sql.BoundExpr) (any, bool, error) {
+	if expr.Op == v3sql.BoundOpSubstring {
+		return evalProjectSubstring(batch, row, expr)
+	}
 	if expr.Left == nil || expr.Right == nil {
 		return nil, false, nil
 	}
@@ -541,6 +544,61 @@ func evalProjectBinary(batch types.Batch, row int, expr v3sql.BoundExpr) (any, b
 	default:
 		return nil, false, fmt.Errorf("project unsupported binary expression operator %d", expr.Op)
 	}
+}
+
+func evalProjectSubstring(batch types.Batch, row int, expr v3sql.BoundExpr) (any, bool, error) {
+	if expr.Left == nil || len(expr.Args) == 0 {
+		return nil, false, nil
+	}
+	textValue, ok, err := evalProjectValue(batch, row, *expr.Left)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	text, ok := textValue.(string)
+	if !ok {
+		return nil, false, nil
+	}
+	startValue, ok, err := evalProjectValue(batch, row, expr.Args[0])
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	start, ok := projectIntValue(startValue)
+	if !ok {
+		return nil, false, nil
+	}
+	hasLength := len(expr.Args) >= 2
+	var length int64
+	if hasLength {
+		lengthValue, ok, err := evalProjectValue(batch, row, expr.Args[1])
+		if err != nil || !ok {
+			return nil, false, err
+		}
+		length, ok = projectIntValue(lengthValue)
+		if !ok {
+			return nil, false, nil
+		}
+		if length < 0 {
+			return "", true, nil
+		}
+	}
+	begin := start - 1
+	if begin < 0 {
+		if hasLength {
+			length += begin
+			if length <= 0 {
+				return "", true, nil
+			}
+		}
+		begin = 0
+	}
+	if begin >= int64(len(text)) {
+		return "", true, nil
+	}
+	end := int64(len(text))
+	if hasLength {
+		end = min(begin+length, int64(len(text)))
+	}
+	return text[begin:end], true, nil
 }
 
 func evalProjectUnary(batch types.Batch, row int, expr v3sql.BoundExpr) (any, bool, error) {

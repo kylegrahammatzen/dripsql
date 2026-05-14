@@ -231,7 +231,7 @@ func isScanComputedOp(op BoundOp) bool {
 	switch op {
 	case BoundOpAdd, BoundOpSubtract, BoundOpMultiply, BoundOpDivide, BoundOpModulo, BoundOpIntDivide,
 		BoundOpConcat, BoundOpLower, BoundOpUpper, BoundOpJSONGet, BoundOpJSONGetText, BoundOpLength,
-		BoundOpCoalesce:
+		BoundOpCoalesce, BoundOpSubstring:
 		return true
 	default:
 		return false

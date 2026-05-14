@@ -242,6 +242,46 @@ func TestEngineLengthScalarFunction(t *testing.T) {
 	)
 }
 
+func TestEngineSubstringScalarFunction(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+	if _, err := db.Exec(ctx, `CREATE TABLE pages (id INT64 NOT NULL, url TEXT NOT NULL)`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO pages VALUES
+		(1, '/users/alice/events'),
+		(2, '/users/bob/checkout'),
+		(3, '/teams/admin')`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	if err := db.FlushBuffered(ctx, "pages"); err != nil {
+		t.Fatalf("FlushBuffered: %v", err)
+	}
+	assertQueryRows(t, ctx, db,
+		`SELECT substring(url, 2, 5) AS prefix FROM pages ORDER BY id`,
+		[]string{"prefix"},
+		[][]any{{"users"}, {"users"}, {"teams"}},
+	)
+	assertQueryRows(t, ctx, db,
+		`SELECT substring(url, 8) AS tail FROM pages ORDER BY id`,
+		[]string{"tail"},
+		[][]any{{"alice/events"}, {"bob/checkout"}, {"admin"}},
+	)
+	assertQueryRows(t, ctx, db,
+		`SELECT id FROM pages WHERE substring(url, 2, 5) = 'users' ORDER BY id`,
+		[]string{"id"},
+		[][]any{{int64(1)}, {int64(2)}},
+	)
+}
+
 func TestEngineCoalesceScalarFunction(t *testing.T) {
 	ctx := context.Background()
 	db, err := Open(ctx, t.TempDir())
