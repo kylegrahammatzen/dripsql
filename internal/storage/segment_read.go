@@ -409,29 +409,15 @@ func decodeColumnPageInto(colMeta ColumnMeta, pageMeta PageMeta, payload []byte,
 		return types.Column{}, err
 	}
 	page := codec.Page{Kind: pageMeta.Kind, Encoding: pageMeta.Encoding, Rows: int(pageMeta.Rows), NullCount: int(pageMeta.NullCount), Payload: payload}
-	var vec types.Vec
-	if dst != nil {
-		if reusable, ok := c.(codec.ReusableCodec); ok {
-			if err := reusable.DecodeInto(page, dst); err != nil {
-				return types.Column{}, err
-			}
-			vec = *dst
-		} else {
-			decoded, err := c.Decode(page)
-			if err != nil {
-				return types.Column{}, err
-			}
-			*dst = decoded
-			vec = decoded
-		}
-	} else {
-		decoded, err := c.Decode(page)
-		if err != nil {
-			return types.Column{}, err
-		}
-		vec = decoded
+	var local types.Vec
+	target := dst
+	if target == nil {
+		target = &local
 	}
-	return types.Column{Name: colMeta.Name, Type: colMeta.Type, EnumLabels: append([]string(nil), colMeta.EnumLabels...), V: vec}, nil
+	if err := c.DecodeInto(page, target); err != nil {
+		return types.Column{}, err
+	}
+	return types.Column{Name: colMeta.Name, Type: colMeta.Type, EnumLabels: append([]string(nil), colMeta.EnumLabels...), V: *target}, nil
 }
 
 func pageCodec(enc types.Encoding) (codec.Codec, error) {

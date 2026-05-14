@@ -12,34 +12,46 @@ type Page struct {
 	Payload   []byte
 }
 
+// Codec is the base codec contract every implementation satisfies. Decode
+// writes into a caller-provided Vec so the segment reader can amortize slice
+// allocations across pages; callers that don't yet have a Vec pass a fresh
+// zero value.
 type Codec interface {
 	Encoding() types.Encoding
 	Encode(v types.Vec) (Page, error)
-	Decode(page Page) (types.Vec, error)
+	DecodeInto(page Page, dst *types.Vec) error
 	Estimate(v types.Vec) (int, bool)
 }
 
+// PreparedEncoding is the prepared-state handle returned by PreparableCodec.
+// Prepare. It captures the cascade picker's per-column scratch (FOR base,
+// dictionary build, etc.) so encode does not re-scan the vector after
+// Estimate.
 type PreparedEncoding interface {
 	Encoding() types.Encoding
 	Size() int
 	EncodeInto(scratch []byte) (Page, error)
 }
 
+// PreparableCodec is implemented by codecs whose Estimate produces durable
+// state that Encode would otherwise recompute (FOR base/width, dictionary
+// build). Cascade picking uses Prepare so the winning codec encodes without
+// a second scan.
 type PreparableCodec interface {
 	Codec
 	Prepare(v types.Vec) (PreparedEncoding, bool)
 }
 
-type ReusableCodec interface {
-	Codec
-	DecodeInto(page Page, dst *types.Vec) error
-}
-
+// SelectedCodec is implemented by codecs with a per-row decode fast path that
+// can skip non-selected rows.
 type SelectedCodec interface {
 	Codec
 	DecodeSelected(page Page, sel types.SelectionMask) (types.Vec, error)
 }
 
+// EncodedCodec is implemented by codecs whose payload can be exposed in its
+// non-flat form so predicate eval and aggregate kernels can operate on
+// encoded bytes directly.
 type EncodedCodec interface {
 	Codec
 	DecodeEncoded(page Page) (types.Vec, error)
