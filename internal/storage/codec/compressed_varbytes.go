@@ -158,6 +158,7 @@ func decodeCompressedVarBytesInto(page Page, plainPayload []byte, dst *types.Vec
 	if err := validateSourceOffsets(offsets, len(data)); err != nil {
 		return err
 	}
-	dst.Var = types.VarBytes{Offsets: offsets, Data: data}
+	dst.Var = types.VarBytes{Offsets: offsets, Data: data, Prefixes: resizeSlice(dst.Var.Prefixes, page.Rows)}
+	dst.Var.RebuildPrefixes()
 	return nil
 }

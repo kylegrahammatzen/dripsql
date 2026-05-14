@@ -185,7 +185,8 @@ func (Plain) DecodeInto(page Page, dst *types.Vec) error {
 		pos += offsetBytes
 		data := resizeSlice(dst.Var.Data, len(page.Payload)-pos)
 		copy(data, page.Payload[pos:])
-		dst.Var = types.VarBytes{Offsets: offsets, Data: data}
+		dst.Var = types.VarBytes{Offsets: offsets, Data: data, Prefixes: resizeSlice(dst.Var.Prefixes, page.Rows)}
+		dst.Var.RebuildPrefixes()
 	default:
 		return fmt.Errorf("plain codec unsupported kind %s", page.Kind)
 	}

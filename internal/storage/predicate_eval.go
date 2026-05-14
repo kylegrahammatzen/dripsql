@@ -579,9 +579,24 @@ func evalFlatTextLeafBound(v types.Vec, pred boundNode, input *types.SelectionMa
 
 func evalTextEq(v types.Vec, want string, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
+	wantLen := uint32(len(want))
+	wantPrefix := types.PackPrefix([]byte(want))
+	prefixes := v.Var.Prefixes
+	usePrefix := len(prefixes) >= v.Len
+	match := func(row int) bool {
+		if usePrefix {
+			if v.Var.Len(row) != wantLen {
+				return false
+			}
+			if prefixes[row] != wantPrefix {
+				return false
+			}
+		}
+		return v.Var.String(row) == want
+	}
 	if input == nil {
-		for row := 0; row < v.Len; row++ {
-			if types.IsValid(v.Valid, row) && (v.Var.String(row) == want) != invert {
+		for row := range v.Len {
+			if types.IsValid(v.Valid, row) && match(row) != invert {
 				out.SetUnsafe(row)
 				matched++
 			}
@@ -589,7 +604,7 @@ func evalTextEq(v types.Vec, want string, invert bool, input *types.SelectionMas
 		return matched
 	}
 	input.IterSet(func(row int) {
-		if types.IsValid(v.Valid, row) && (v.Var.String(row) == want) != invert {
+		if types.IsValid(v.Valid, row) && match(row) != invert {
 			out.SetUnsafe(row)
 			matched++
 		}

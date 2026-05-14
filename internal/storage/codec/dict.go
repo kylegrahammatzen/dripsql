@@ -113,7 +113,9 @@ func (Dictionary) DecodeSelected(page Page, sel types.SelectionMask) (types.Vec,
 			ids[row] = encodedIDs[row]
 		}
 	})
-	return types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: page.Rows, Valid: valid, Encoded: &types.EncodedState{DictIDs: ids, DictValues: types.VarBytes{Offsets: offsets, Data: data}}}, nil
+	dict := types.VarBytes{Offsets: offsets, Data: data, Prefixes: make([]uint32, len(offsets)-1)}
+	dict.RebuildPrefixes()
+	return types.Vec{Kind: types.VecText, Encoding: types.EncodingDictionary, Len: page.Rows, Valid: valid, Encoded: &types.EncodedState{DictIDs: ids, DictValues: dict}}, nil
 }
 
 func (Dictionary) DecodeInto(page Page, dst *types.Vec) error {
@@ -160,7 +162,8 @@ func (Dictionary) DecodeInto(page Page, dst *types.Vec) error {
 	ids := resizeSlice(dst.Encoded.DictIDs, page.Rows)
 	copy(ids, page.Payload[pos:pos+page.Rows])
 	dst.Encoded.DictIDs = ids
-	dst.Encoded.DictValues = types.VarBytes{Offsets: offsets, Data: data}
+	dst.Encoded.DictValues = types.VarBytes{Offsets: offsets, Data: data, Prefixes: resizeSlice(dst.Encoded.DictValues.Prefixes, count)}
+	dst.Encoded.DictValues.RebuildPrefixes()
 	return nil
 }
 
