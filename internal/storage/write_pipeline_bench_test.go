@@ -56,7 +56,7 @@ func BenchmarkStorageWritePipeline(b *testing.B) {
 func BenchmarkStorageEncodePage(b *testing.B) {
 	for _, tc := range pipelineBenchColumns(b) {
 		b.Run(tc.name, func(b *testing.B) {
-			page, _, err := encodeSegmentPageInto(tc.column.V, nil)
+			page, _, err := encodeSegmentPageInto(tc.column.V, nil, types.CompressionDefault)
 			if err != nil {
 				b.Fatalf("warm encodeSegmentPageInto: %v", err)
 			}
@@ -67,7 +67,7 @@ func BenchmarkStorageEncodePage(b *testing.B) {
 			scratch := make([]byte, 0, len(page.Payload))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				sink, scratch, err = encodeSegmentPageInto(tc.column.V, scratch)
+				sink, scratch, err = encodeSegmentPageInto(tc.column.V, scratch, types.CompressionDefault)
 				if err != nil {
 					b.Fatalf("encodeSegmentPageInto: %v", err)
 				}
@@ -80,7 +80,7 @@ func BenchmarkStorageEncodePage(b *testing.B) {
 
 func BenchmarkStorageDecodePage(b *testing.B) {
 	for _, tc := range pipelineBenchColumns(b) {
-		page, _, err := encodeSegmentPageInto(tc.column.V, nil)
+		page, _, err := encodeSegmentPageInto(tc.column.V, nil, types.CompressionDefault)
 		if err != nil {
 			b.Fatalf("encode %s: %v", tc.name, err)
 		}

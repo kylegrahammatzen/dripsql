@@ -201,6 +201,17 @@ func (p TableProfile) String() string {
 	}
 }
 
+// AllowsFlate reports whether the policy permits Flate compression.
+func (p CompressionPolicy) AllowsFlate() bool {
+	return p != CompressionNone
+}
+
+// AllowsZstd reports whether the policy permits Zstd compression. Fast mode
+// excludes Zstd so single-codec encode time stays predictable.
+func (p CompressionPolicy) AllowsZstd() bool {
+	return p != CompressionNone && p != CompressionFast
+}
+
 func (p CompressionPolicy) String() string {
 	switch p {
 	case CompressionDefault:

@@ -2,12 +2,16 @@ package engine
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	v3exec "github.com/kylegrahammatzen/dripsql/internal/exec"
 	v3sql "github.com/kylegrahammatzen/dripsql/internal/sql"
+	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
@@ -197,6 +201,63 @@ func TestEngineJSONPathChainAndTextSource(t *testing.T) {
 		[]string{"who"},
 		[][]any{{"alice"}, {"bob"}},
 	)
+}
+
+func TestEngineCompressionOptionGatesHeavyCodecs(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+	if _, err := db.Exec(ctx, `CREATE TABLE logs (id INT64 NOT NULL, url TEXT NOT NULL) WITH (compression = 'none')`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	const rows = 1024
+	values := make([]string, 0, rows)
+	for i := range rows {
+		values = append(values, fmt.Sprintf("(%d, '/users/%08d/events/%s')", i, i, strings.Repeat("payload-segment-x", 4)))
+	}
+	if _, err := db.Exec(ctx, "INSERT INTO logs VALUES "+strings.Join(values, ",")); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	if err := db.FlushBuffered(ctx, "logs"); err != nil {
+		t.Fatalf("FlushBuffered: %v", err)
+	}
+	assertQueryRows(t, ctx, db,
+		"SELECT count(*) FROM logs",
+		[]string{"count"},
+		[][]any{{int64(rows)}},
+	)
+
+	segments, err := filepath.Glob(filepath.Join(dir, "tables", "logs", "segments", "*.dsv3"))
+	if err != nil {
+		t.Fatalf("Glob segments: %v", err)
+	}
+	if len(segments) == 0 {
+		t.Fatal("no segments written")
+	}
+	for _, path := range segments {
+		meta, _, err := storage.ReadSegmentFooter(path)
+		if err != nil {
+			t.Fatalf("ReadSegmentFooter %s: %v", path, err)
+		}
+		if err := meta.LoadAllColumns(); err != nil {
+			t.Fatalf("LoadAllColumns: %v", err)
+		}
+		for _, col := range meta.Columns {
+			for _, page := range col.Pages {
+				if page.Encoding == types.EncodingFlate || page.Encoding == types.EncodingZstd {
+					t.Fatalf("segment %s column %q page used %s under compression='none'", path, col.Name, page.Encoding)
+				}
+			}
+		}
+	}
 }
 
 func TestEngineSplitsPushableAndComputedWhere(t *testing.T) {

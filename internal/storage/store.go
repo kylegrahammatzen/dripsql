@@ -193,7 +193,7 @@ func (s *Store) appendBatchesToStateWithID(ctx context.Context, state *tableStat
 	relPath := filepath.Join("segments", fmt.Sprintf("%016d.dsv3", id))
 	finalPath := filepath.Join(state.dir, relPath)
 	tmpPath := finalPath + ".tmp"
-	meta, err := WriteSegment(tmpPath, id, batches)
+	meta, err := WriteSegmentWith(tmpPath, id, state.spec.Options.Compression, batches)
 	if err != nil {
 		return SegmentMeta{}, err
 	}

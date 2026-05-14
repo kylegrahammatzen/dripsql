@@ -97,6 +97,10 @@ type SegmentMeta struct {
 }
 
 func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta, error) {
+	return WriteSegmentWith(path, id, types.CompressionDefault, batches)
+}
+
+func WriteSegmentWith(path string, id SegmentID, compression types.CompressionPolicy, batches []types.Batch) (SegmentMeta, error) {
 	if len(batches) == 0 {
 		return SegmentMeta{}, fmt.Errorf("segment write requires at least one batch")
 	}
@@ -133,7 +137,7 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 		sma = newSegmentSMAAccumulator(batches[0].Columns)
 	}
 	for _, batch := range batches {
-		pages, err := encodeSegmentBatchPages(batch, rowStart, scratch)
+		pages, err := encodeSegmentBatchPages(batch, rowStart, scratch, compression)
 		if err != nil {
 			return SegmentMeta{}, err
 		}
@@ -204,17 +208,17 @@ type encodedSegmentPage struct {
 	err     error
 }
 
-func encodeSegmentBatchPages(batch types.Batch, rowStart int, scratch [][]byte) ([]encodedSegmentPage, error) {
+func encodeSegmentBatchPages(batch types.Batch, rowStart int, scratch [][]byte, compression types.CompressionPolicy) ([]encodedSegmentPage, error) {
 	pages := make([]encodedSegmentPage, len(batch.Columns))
 	if len(batch.Columns) == 1 {
-		encodeSegmentBatchPage(batch.Columns[0], rowStart, scratch[0], &pages[0])
+		encodeSegmentBatchPage(batch.Columns[0], rowStart, scratch[0], &pages[0], compression)
 	} else {
 		var wg sync.WaitGroup
 		for colIndex := range batch.Columns {
 			wg.Add(1)
 			go func(colIndex int) {
 				defer wg.Done()
-				encodeSegmentBatchPage(batch.Columns[colIndex], rowStart, scratch[colIndex], &pages[colIndex])
+				encodeSegmentBatchPage(batch.Columns[colIndex], rowStart, scratch[colIndex], &pages[colIndex], compression)
 			}(colIndex)
 		}
 		wg.Wait()
@@ -227,8 +231,8 @@ func encodeSegmentBatchPages(batch types.Batch, rowStart int, scratch [][]byte) 
 	return pages, nil
 }
 
-func encodeSegmentBatchPage(col types.Column, rowStart int, scratch []byte, out *encodedSegmentPage) {
-	page, nextScratch, err := encodeSegmentPageInto(col.V, scratch)
+func encodeSegmentBatchPage(col types.Column, rowStart int, scratch []byte, out *encodedSegmentPage, compression types.CompressionPolicy) {
+	page, nextScratch, err := encodeSegmentPageInto(col.V, scratch, compression)
 	if err != nil {
 		out.err = fmt.Errorf("column %q: %w", col.Name, err)
 		return
@@ -287,9 +291,9 @@ func ReadSegmentFooter(path string) (SegmentMeta, int64, error) {
 	return meta, size, nil
 }
 
-func encodeSegmentPageInto(v types.Vec, scratch []byte) (codec.Page, []byte, error) {
+func encodeSegmentPageInto(v types.Vec, scratch []byte, compression types.CompressionPolicy) (codec.Page, []byte, error) {
 	if v.Kind == types.VecText {
-		if best, ok := codec.TextCandidates().Pick(v); ok {
+		if best, ok := codec.TextCandidatesFor(compression).Pick(v); ok {
 			page, err := best.EncodeInto(scratch)
 			return page, nextPageScratch(scratch, page.Payload), err
 		}

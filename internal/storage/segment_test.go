@@ -83,6 +83,44 @@ func TestWriteSegmentCompressesHighCardinalityText(t *testing.T) {
 	}
 }
 
+func TestWriteSegmentCompressionPolicy(t *testing.T) {
+	cases := []struct {
+		name        string
+		policy      types.CompressionPolicy
+		allowFlate  bool
+		allowZstd   bool
+	}{
+		{"none", types.CompressionNone, false, false},
+		{"fast", types.CompressionFast, true, false},
+		{"best", types.CompressionBest, true, true},
+		{"default", types.CompressionDefault, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "segment.dsv3")
+			batch := compressibleTextBatch(t, types.StandardBatchRows)
+			meta, err := WriteSegmentWith(path, 91, tc.policy, []types.Batch{batch})
+			if err != nil {
+				t.Fatalf("WriteSegmentWith: %v", err)
+			}
+			page := meta.Columns[0].Pages[0]
+			if !tc.allowFlate && page.Encoding == types.EncodingFlate {
+				t.Fatalf("%s policy produced flate page", tc.name)
+			}
+			if !tc.allowZstd && page.Encoding == types.EncodingZstd {
+				t.Fatalf("%s policy produced zstd page", tc.name)
+			}
+			col, err := ReadColumnPage(path, meta, 0, 0)
+			if err != nil {
+				t.Fatalf("ReadColumnPage: %v", err)
+			}
+			if got, want := col.V.Var.String(77), batch.Columns[0].V.Var.String(77); got != want {
+				t.Fatalf("row 77 = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestReadSegmentBatchRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "segment.dsv3")
 	batches := []types.Batch{segmentBatch(t, []int64{42, 7, 99}, []string{"checkout", "login", "signup"}, 1)}
