@@ -1,75 +1,49 @@
 package types
 
-import "fmt"
+import (
+	"encoding/hex"
+	"fmt"
+	"strings"
+)
 
-func ParseUUID(value string) (UUID16, error) {
-	if len(value) != 36 {
-		return UUID16{}, fmt.Errorf("invalid UUID literal %q", value)
-	}
-	if value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return UUID16{}, fmt.Errorf("invalid UUID literal %q", value)
-	}
-	var out UUID16
-	byteIndex := 0
-	for i := 0; i < len(value); {
-		if value[i] == '-' {
-			i++
-			continue
-		}
-		if i+1 >= len(value) {
-			return UUID16{}, fmt.Errorf("invalid UUID literal %q", value)
-		}
-		hi, ok := hexNibble(value[i])
-		if !ok {
-			return UUID16{}, fmt.Errorf("invalid UUID literal %q", value)
-		}
-		lo, ok := hexNibble(value[i+1])
-		if !ok {
-			return UUID16{}, fmt.Errorf("invalid UUID literal %q", value)
-		}
-		if byteIndex >= len(out) {
-			return UUID16{}, fmt.Errorf("invalid UUID literal %q", value)
-		}
-		out[byteIndex] = hi<<4 | lo
-		byteIndex++
-		i += 2
-	}
-	if byteIndex != len(out) {
-		return UUID16{}, fmt.Errorf("invalid UUID literal %q", value)
-	}
-	return out, nil
-}
+// UUID16 is the 16-byte UUID representation used everywhere a UUID value lives.
+type UUID16 [16]byte
 
-func FormatUUID(value UUID16) string {
-	const digits = "0123456789abcdef"
-	out := make([]byte, 36)
-	byteIndex := 0
-	for i := range out {
-		switch i {
-		case 8, 13, 18, 23:
-			out[i] = '-'
-		default:
-			b := value[byteIndex/2]
-			if byteIndex%2 == 0 {
-				out[i] = digits[b>>4]
-			} else {
-				out[i] = digits[b&0x0f]
-			}
-			byteIndex++
+// ParseUUID accepts the canonical 36-character hyphenated form and a lenient 32-character bare hex form.
+func ParseUUID(s string) (UUID16, error) {
+	switch len(s) {
+	case 36:
+		if s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+			return UUID16{}, fmt.Errorf("uuid %q has misplaced hyphens", s)
 		}
-	}
-	return string(out)
-}
-
-func hexNibble(value byte) (byte, bool) {
-	switch {
-	case value >= '0' && value <= '9':
-		return value - '0', true
-	case value >= 'a' && value <= 'f':
-		return value - 'a' + 10, true
-	case value >= 'A' && value <= 'F':
-		return value - 'A' + 10, true
+		bare := s[0:8] + s[9:13] + s[14:18] + s[19:23] + s[24:]
+		return parseUUIDHex(bare)
+	case 32:
+		return parseUUIDHex(s)
 	default:
-		return 0, false
+		return UUID16{}, fmt.Errorf("uuid %q has invalid length", s)
 	}
+}
+
+func parseUUIDHex(bare string) (UUID16, error) {
+	var u UUID16
+	if _, err := hex.Decode(u[:], []byte(strings.ToLower(bare))); err != nil {
+		return UUID16{}, fmt.Errorf("uuid %q: %w", bare, err)
+	}
+	return u, nil
+}
+
+// FormatUUID returns the canonical 36-character hyphenated form.
+func FormatUUID(u UUID16) string {
+	var buf [36]byte
+	hex.Encode(buf[0:8], u[0:4])
+	buf[8] = '-'
+	hex.Encode(buf[9:13], u[4:6])
+	buf[13] = '-'
+	hex.Encode(buf[14:18], u[6:8])
+	buf[18] = '-'
+	hex.Encode(buf[19:23], u[8:10])
+	buf[23] = '-'
+	hex.Encode(buf[24:36], u[10:16])
+	return string(buf[:])
 }
