@@ -67,19 +67,21 @@ var defaultBenchmarkRows = rowsList{
 }
 
 type options struct {
-	rows        rowsList
-	dir         string
-	keep        bool
-	runs        int
-	profile     string
-	mode        string
-	json        bool
-	baseline    string
-	showAll     bool
-	details     bool
-	query       string
-	segmentRows int
-	cpuProfile  string
+	rows          rowsList
+	dir           string
+	keep          bool
+	runs          int
+	profile       string
+	mode          string
+	json          bool
+	baseline      string
+	showAll       bool
+	details       bool
+	query         string
+	segmentRows   int
+	cpuProfile    string
+	strict        bool
+	allowBadEnv   bool
 }
 
 type query struct {
@@ -243,6 +245,8 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&opts.query, "query", "", "run only queries whose name or SQL contains this string")
 	fs.IntVar(&opts.segmentRows, "segment-rows", 0, "rows per sealed segment (0 = storage default 131072; larger = fewer seals = faster ingest)")
 	fs.StringVar(&opts.cpuProfile, "cpuprofile", "", "write CPU profile during query phase to this file")
+	fs.BoolVar(&opts.strict, "strict", false, "use tight tolerances (1% delta, p<0.01) for release-grade baseline comparison; default is CI-grade (5% delta, p<0.05)")
+	fs.BoolVar(&opts.allowBadEnv, "allow-bad-env", false, "bypass the on-battery and bench-env safety check (use only when knowingly running degraded benches)")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -262,6 +266,11 @@ func run(args []string, out io.Writer) error {
 	opts, err := parseOptions(args)
 	if err != nil {
 		return err
+	}
+	if !opts.allowBadEnv {
+		if onBattery, ok := envOnBattery(); ok && onBattery {
+			return fmt.Errorf("refusing to run benchmark on battery power; plug in or pass -allow-bad-env to override")
+		}
 	}
 	profiles, err := profileSpecsFor(opts.profile)
 	if err != nil {
@@ -305,7 +314,7 @@ func run(args []string, out io.Writer) error {
 		return nil
 	}
 	if opts.baseline != "" {
-		return writeComparison(out, baselines, reports, opts.showAll, opts.details)
+		return writeComparison(out, baselines, reports, opts.showAll, opts.details, opts.strict)
 	}
 	for i, report := range reports {
 		if i > 0 {
@@ -624,6 +633,7 @@ func timeQuery(ctx context.Context, db **engine.DB, q query, runs int, reopenBet
 	}
 	report.Timing.AvgNs = totalNs / int64(runs)
 	report.Timing.P95Ns = percentileNearestRank(samples, 95)
+	report.Timing.SampleNs = append([]int64(nil), samples...)
 	firstExplain.Timing = report.Timing
 	report.Explain = firstExplain
 	return report, nil

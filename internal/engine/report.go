@@ -74,11 +74,12 @@ type Read struct {
 }
 
 type Timing struct {
-	FirstNs int64 `json:"first_ns"`
-	BestNs  int64 `json:"best_ns"`
-	AvgNs   int64 `json:"avg_ns"`
-	P95Ns   int64 `json:"p95_ns,omitempty"`
-	Samples int   `json:"samples"`
+	FirstNs    int64   `json:"first_ns"`
+	BestNs     int64   `json:"best_ns"`
+	AvgNs      int64   `json:"avg_ns"`
+	P95Ns      int64   `json:"p95_ns,omitempty"`
+	Samples    int     `json:"samples"`
+	SampleNs   []int64 `json:"sample_ns,omitempty"`
 }
 
 func ReductionFromStats(stats storage.QueryStats) Reduction {

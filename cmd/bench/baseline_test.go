@@ -79,7 +79,7 @@ func TestWriteComparisonPrintsCompactSummary(t *testing.T) {
 	}}
 
 	var buf bytes.Buffer
-	if err := writeComparison(&buf, baseline, current, false, false); err != nil {
+	if err := writeComparison(&buf, baseline, current, false, false, false); err != nil {
 		t.Fatalf("writeComparison: %v", err)
 	}
 	out := buf.String()

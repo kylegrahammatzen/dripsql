@@ -13,7 +13,29 @@ import (
 	humanfmt "github.com/kylegrahammatzen/dripsql/internal/format"
 )
 
-const regressionThresholdPct = 5.0
+const (
+	// CI tolerance: 5% delta, p<0.05. Tuned for noisy shared runners
+	// where bench numbers wobble more than the same-laptop case.
+	ciDeltaThresholdPct = 5.0
+	ciPValueThreshold   = 0.05
+	// Release tolerance: 1% delta, p<0.01. Use -strict on a dedicated
+	// machine when comparing before/after a perf change.
+	strictDeltaThresholdPct = 1.0
+	strictPValueThreshold   = 0.01
+)
+
+// regressionThresholdPct keeps the old name for callers that have not
+// learned about -strict yet; it always reports the CI tolerance.
+const regressionThresholdPct = ciDeltaThresholdPct
+
+// thresholdsFor returns the per-query delta and p-value thresholds to
+// flag a regression. Strict mode tightens both to release-grade values.
+func thresholdsFor(strict bool) (float64, float64) {
+	if strict {
+		return strictDeltaThresholdPct, strictPValueThreshold
+	}
+	return ciDeltaThresholdPct, ciPValueThreshold
+}
 
 func loadBaselines(path string, profiles []string) ([]benchReport, error) {
 	info, err := os.Stat(path)
@@ -132,9 +154,14 @@ type comparisonDetail struct {
 	query  queryReport
 }
 
-func writeComparison(w io.Writer, baselines []benchReport, current []benchReport, showAll bool, details bool) error {
+func writeComparison(w io.Writer, baselines []benchReport, current []benchReport, showAll bool, details bool, strict bool) error {
+	deltaThreshold, pThreshold := thresholdsFor(strict)
+	mode := "CI"
+	if strict {
+		mode = "strict"
+	}
 	fprintf(w, "DripSQL v3 Benchmark Comparison\n")
-	fprintf(w, "Threshold: %.1f%%\n", regressionThresholdPct)
+	fprintf(w, "Mode: %s (delta %.1f%%, Mann-Whitney p<%.2f)\n", mode, deltaThreshold, pThreshold)
 	fprintf(w, "\nSetup\n")
 	fprintf(w, "Profile      Mode          Rows       Baseline    Current     Delta\n")
 	var loadDeltaTotal float64
@@ -200,19 +227,30 @@ func writeComparison(w io.Writer, baselines []benchReport, current []benchReport
 			delta := percentDelta(theirs, ours)
 			queryDeltaTotal += delta
 			queryCompared++
-			if delta > regressionThresholdPct {
+			significant := false
+			pValue, hadSamples := mannWhitneyP(base.Timing.SampleNs, q.Timing.SampleNs)
+			if hadSamples {
+				significant = pValue < pThreshold
+			}
+			isRegression := delta > deltaThreshold && (!hadSamples || significant)
+			isImprovement := delta < -deltaThreshold && (!hadSamples || significant)
+			if isRegression {
 				queryRegressions++
-			} else if delta < -regressionThresholdPct {
+			} else if isImprovement {
 				queryImprovements++
 			}
-			if !showAll && delta <= regressionThresholdPct {
+			if !showAll && !isRegression {
 				continue
 			}
 			marker := ""
-			if delta > regressionThresholdPct {
+			if isRegression {
 				marker = " regression"
 			}
-			fprintf(w, "%-12s %-12s %10d %-29s %10s %10s %+7.1f%%%s\n", report.Profile, effectiveMode(report.Mode), report.Rows, trimQueryName(q.Name), humanfmt.Duration(time.Duration(base.Timing.AvgNs)), humanfmt.Duration(time.Duration(q.Timing.AvgNs)), delta, marker)
+			pSuffix := ""
+			if hadSamples {
+				pSuffix = fmt.Sprintf(" p=%.3f", pValue)
+			}
+			fprintf(w, "%-12s %-12s %10d %-29s %10s %10s %+7.1f%%%s%s\n", report.Profile, effectiveMode(report.Mode), report.Rows, trimQueryName(q.Name), humanfmt.Duration(time.Duration(base.Timing.AvgNs)), humanfmt.Duration(time.Duration(q.Timing.AvgNs)), delta, pSuffix, marker)
 			if details {
 				detailRows = append(detailRows, comparisonDetail{report: report, query: q})
 			}
