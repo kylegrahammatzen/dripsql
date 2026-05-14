@@ -203,6 +203,45 @@ func TestEngineJSONPathChainAndTextSource(t *testing.T) {
 	)
 }
 
+func TestEngineLengthScalarFunction(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+	if _, err := db.Exec(ctx, `CREATE TABLE pages (id INT64 NOT NULL, url TEXT NOT NULL, payload JSON NOT NULL)`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO pages VALUES
+		(1, '/a', '{"k":"v"}'),
+		(2, '/longer-path', '[1,2,3]')`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	if err := db.FlushBuffered(ctx, "pages"); err != nil {
+		t.Fatalf("FlushBuffered: %v", err)
+	}
+	assertQueryRows(t, ctx, db,
+		`SELECT length(url) AS n FROM pages ORDER BY id`,
+		[]string{"n"},
+		[][]any{{int64(2)}, {int64(12)}},
+	)
+	assertQueryRows(t, ctx, db,
+		`SELECT length(payload) AS n FROM pages ORDER BY id`,
+		[]string{"n"},
+		[][]any{{int64(9)}, {int64(7)}},
+	)
+	assertQueryRows(t, ctx, db,
+		`SELECT id FROM pages WHERE length(url) > 5 ORDER BY id`,
+		[]string{"id"},
+		[][]any{{int64(2)}},
+	)
+}
+
 func TestEngineCompressionOptionGatesHeavyCodecs(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

@@ -158,6 +158,20 @@ func bindScalarCall(columns map[string]BoundColumnDef, call *FuncCall) (BoundExp
 			op = BoundOpUpper
 		}
 		return BoundExpr{Kind: BoundExprUnary, Type: types.Text, Op: op, Left: &arg}, nil
+	case "length":
+		if len(call.Args) != 1 {
+			return BoundExpr{}, fmt.Errorf("length() requires exactly one argument")
+		}
+		arg, err := bindExpr(columns, call.Args[0])
+		if err != nil {
+			return BoundExpr{}, err
+		}
+		switch arg.Type.Kind {
+		case types.KindText, types.KindBytes, types.KindJSON:
+		default:
+			return BoundExpr{}, fmt.Errorf("length() argument must be text, bytes, or json")
+		}
+		return BoundExpr{Kind: BoundExprUnary, Type: types.Int64, Op: BoundOpLength, Left: &arg}, nil
 	case "concat":
 		if len(call.Args) == 0 {
 			return BoundExpr{}, fmt.Errorf("concat() requires at least one argument")

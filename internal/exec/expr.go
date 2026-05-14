@@ -554,6 +554,12 @@ func evalProjectUnary(batch types.Batch, row int, expr v3sql.BoundExpr) (any, bo
 			return nil, false, nil
 		}
 		return strings.ToUpper(text), true, nil
+	case v3sql.BoundOpLength:
+		text, ok := value.(string)
+		if !ok {
+			return nil, false, nil
+		}
+		return int64(len(text)), true, nil
 	default:
 		return nil, false, fmt.Errorf("project unsupported unary expression operator %d", expr.Op)
 	}

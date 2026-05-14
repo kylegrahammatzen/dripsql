@@ -230,7 +230,7 @@ func bindScanOutputExpr(columns map[string]BoundColumnDef, sel SelectExpr) (Boun
 func isScanComputedOp(op BoundOp) bool {
 	switch op {
 	case BoundOpAdd, BoundOpSubtract, BoundOpMultiply, BoundOpDivide, BoundOpModulo, BoundOpIntDivide,
-		BoundOpConcat, BoundOpLower, BoundOpUpper, BoundOpJSONGet, BoundOpJSONGetText:
+		BoundOpConcat, BoundOpLower, BoundOpUpper, BoundOpJSONGet, BoundOpJSONGetText, BoundOpLength:
 		return true
 	default:
 		return false

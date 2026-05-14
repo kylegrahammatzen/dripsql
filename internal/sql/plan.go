@@ -198,6 +198,7 @@ const (
 	BoundOpUpper
 	BoundOpJSONGet
 	BoundOpJSONGetText
+	BoundOpLength
 )
 
 // BoundExpr is a type-checked scalar expression used by plans and operators.
