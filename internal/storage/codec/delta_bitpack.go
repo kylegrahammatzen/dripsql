@@ -74,7 +74,7 @@ func (p preparedDeltaBitPack) EncodeInto(scratch []byte) (Page, error) {
 	// Pack deltas[0..n-2] bit-packed at width bits each.
 	for i, d := range p.deltas {
 		offset := uint64(d) - uint64(p.base)
-		forBitPackSet(payload[pos:], i, p.width, offset)
+		bitpackSet(payload[pos:], i, p.width, offset)
 	}
 	return Page{Kind: p.vec.Kind, Encoding: types.EncodingDeltaBitPack, Rows: p.vec.Len, NullCount: types.NullCount(p.vec.Valid, p.vec.Len), Payload: payload}, nil
 }
@@ -134,7 +134,7 @@ func (DeltaBitPack) DecodeInto(page Page, dst *types.Vec) error {
 			dst.I16[0] = int16(value)
 		}
 		for i := 0; i < deltaCount; i++ {
-			value += base + int64(forBitPackGetNaive(data, i, width))
+			value += base + int64(bitpackGetNaive(data, i, width))
 			dst.I16[i+1] = int16(value)
 		}
 	case types.VecInt32, types.VecDate:
@@ -143,7 +143,7 @@ func (DeltaBitPack) DecodeInto(page Page, dst *types.Vec) error {
 			dst.I32[0] = int32(value)
 		}
 		for i := 0; i < deltaCount; i++ {
-			value += base + int64(forBitPackGetNaive(data, i, width))
+			value += base + int64(bitpackGetNaive(data, i, width))
 			dst.I32[i+1] = int32(value)
 		}
 	case types.VecInt64, types.VecTimestamp, types.VecTime:
@@ -152,7 +152,7 @@ func (DeltaBitPack) DecodeInto(page Page, dst *types.Vec) error {
 			dst.I64[0] = value
 		}
 		for i := 0; i < deltaCount; i++ {
-			value += base + int64(forBitPackGetNaive(data, i, width))
+			value += base + int64(bitpackGetNaive(data, i, width))
 			dst.I64[i+1] = value
 		}
 	}
