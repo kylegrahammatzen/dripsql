@@ -118,6 +118,47 @@ func TestEngineOrderByExpressionQueries(t *testing.T) {
 	)
 }
 
+func TestEngineJSONPathOperators(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+	if _, err := db.Exec(ctx, `CREATE TABLE events (id INT64 NOT NULL, payload JSON NOT NULL)`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO events VALUES
+		(1, '{"action":"click","tags":["a","b"]}'),
+		(2, '{"action":"view","tags":["c"]}'),
+		(3, '{"action":"click","tags":["d","e","f"]}')`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	if err := db.FlushBuffered(ctx, "events"); err != nil {
+		t.Fatalf("FlushBuffered: %v", err)
+	}
+
+	assertQueryRows(t, ctx, db,
+		`SELECT id FROM events WHERE payload->>'action' = 'click' ORDER BY id`,
+		[]string{"id"},
+		[][]any{{int64(1)}, {int64(3)}},
+	)
+	assertQueryRows(t, ctx, db,
+		`SELECT payload->>'action' AS action FROM events ORDER BY id`,
+		[]string{"action"},
+		[][]any{{"click"}, {"view"}, {"click"}},
+	)
+	assertQueryRows(t, ctx, db,
+		`SELECT payload->'tags' AS tags FROM events WHERE id = 1`,
+		[]string{"tags"},
+		[][]any{{`["a","b"]`}},
+	)
+}
+
 func TestEngineSplitsPushableAndComputedWhere(t *testing.T) {
 	ctx := context.Background()
 	db := openEventsDB(t, ctx)

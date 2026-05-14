@@ -131,6 +131,8 @@ const (
 	BinaryModulo
 	BinaryIntDivide
 	BinaryConcat
+	BinaryJSONGet     // -> returns JSON (object key or array index)
+	BinaryJSONGetText // ->> returns text (object key or array index, coerced)
 )
 
 type ColumnDef struct {

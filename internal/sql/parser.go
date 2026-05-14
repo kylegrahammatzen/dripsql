@@ -251,6 +251,10 @@ func tokenName(typ tokenType) string {
 		return "%"
 	case tokConcat:
 		return "||"
+	case tokJSONGet:
+		return "->"
+	case tokJSONGetText:
+		return "->>"
 	default:
 		return "token"
 	}

@@ -526,6 +526,8 @@ func evalProjectBinary(batch types.Batch, row int, expr v3sql.BoundExpr) (any, b
 			return nil, false, nil
 		}
 		return leftText + rightText, true, nil
+	case v3sql.BoundOpJSONGet, v3sql.BoundOpJSONGetText:
+		return evalProjectJSONPath(left, expr.Op, right)
 	default:
 		return nil, false, fmt.Errorf("project unsupported binary expression operator %d", expr.Op)
 	}

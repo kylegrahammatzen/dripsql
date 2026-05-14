@@ -32,6 +32,8 @@ const (
 	tokSlash
 	tokPercent
 	tokConcat
+	tokJSONGet     // -> returns JSON
+	tokJSONGetText // ->> returns Text
 )
 
 type token struct {
@@ -102,6 +104,14 @@ func (l *lexer) next() (token, error) {
 		l.pos += size
 		return token{typ: tokPlus, lit: "+", pos: start}, nil
 	case '-':
+		if strings.HasPrefix(l.sql[l.pos+size:], ">>") {
+			l.pos += size + 2
+			return token{typ: tokJSONGetText, lit: "->>", pos: start}, nil
+		}
+		if strings.HasPrefix(l.sql[l.pos+size:], ">") {
+			l.pos += size + 1
+			return token{typ: tokJSONGet, lit: "->", pos: start}, nil
+		}
 		l.pos += size
 		return token{typ: tokMinus, lit: "-", pos: start}, nil
 	case '/':

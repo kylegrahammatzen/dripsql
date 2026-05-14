@@ -163,7 +163,7 @@ func (p *parser) parseScalarExpr() (Expr, string, error) {
 }
 
 func (p *parser) parseScalarTerm() (Expr, string, error) {
-	expr, name, err := p.parseScalarPrimary()
+	expr, name, err := p.parseScalarPathOp()
 	if err != nil {
 		return nil, "", err
 	}
@@ -172,7 +172,7 @@ func (p *parser) parseScalarTerm() (Expr, string, error) {
 			if err != nil {
 				return nil, "", err
 			}
-			right, _, err := p.parseScalarPrimary()
+			right, _, err := p.parseScalarPathOp()
 			if err != nil {
 				return nil, "", err
 			}
@@ -184,7 +184,7 @@ func (p *parser) parseScalarTerm() (Expr, string, error) {
 			if err != nil {
 				return nil, "", err
 			}
-			right, _, err := p.parseScalarPrimary()
+			right, _, err := p.parseScalarPathOp()
 			if err != nil {
 				return nil, "", err
 			}
@@ -196,7 +196,7 @@ func (p *parser) parseScalarTerm() (Expr, string, error) {
 			if err != nil {
 				return nil, "", err
 			}
-			right, _, err := p.parseScalarPrimary()
+			right, _, err := p.parseScalarPathOp()
 			if err != nil {
 				return nil, "", err
 			}
@@ -208,7 +208,7 @@ func (p *parser) parseScalarTerm() (Expr, string, error) {
 			if err != nil {
 				return nil, "", err
 			}
-			right, _, err := p.parseScalarPrimary()
+			right, _, err := p.parseScalarPathOp()
 			if err != nil {
 				return nil, "", err
 			}
@@ -220,11 +220,48 @@ func (p *parser) parseScalarTerm() (Expr, string, error) {
 			if err != nil {
 				return nil, "", err
 			}
-			right, _, err := p.parseScalarPrimary()
+			right, _, err := p.parseScalarPathOp()
 			if err != nil {
 				return nil, "", err
 			}
 			expr = &BinaryExpr{Left: expr, Op: BinaryIntDivide, Right: right}
+			name = ""
+			continue
+		}
+		return expr, name, nil
+	}
+}
+
+// parseScalarPathOp folds -> and ->> JSON path operators above scalar
+// primaries so `payload->'k'->>'inner'` left-associates correctly and
+// binds tighter than arithmetic.
+func (p *parser) parseScalarPathOp() (Expr, string, error) {
+	expr, name, err := p.parseScalarPrimary()
+	if err != nil {
+		return nil, "", err
+	}
+	for {
+		if ok, err := p.maybe(tokJSONGetText); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarPrimary()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinaryJSONGetText, Right: right}
+			name = ""
+			continue
+		}
+		if ok, err := p.maybe(tokJSONGet); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarPrimary()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinaryJSONGet, Right: right}
 			name = ""
 			continue
 		}

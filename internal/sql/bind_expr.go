@@ -79,6 +79,9 @@ func bindBinaryExpr(columns map[string]BoundColumnDef, e *BinaryExpr) (BoundExpr
 	if err != nil {
 		return BoundExpr{}, err
 	}
+	if e.Op == BinaryJSONGet || e.Op == BinaryJSONGetText {
+		return bindJSONPathExpr(e.Op, left, right)
+	}
 	if isArithmeticOp(e.Op) {
 		op, _ := arithmeticOp(e.Op)
 		typ, err := arithmeticResultType(op, left, right)
@@ -101,6 +104,22 @@ func bindBinaryExpr(columns map[string]BoundColumnDef, e *BinaryExpr) (BoundExpr
 		return BoundExpr{}, err
 	}
 	return BoundExpr{Kind: BoundExprBinary, Type: types.Bool, Op: filterOpToExprOp(op), Left: &left, Right: &right}, nil
+}
+
+func bindJSONPathExpr(op BinaryOp, left, right BoundExpr) (BoundExpr, error) {
+	if left.Type.Kind != types.KindJSON && left.Type.Kind != types.KindText {
+		return BoundExpr{}, fmt.Errorf("JSON path operator requires a JSON or text left operand")
+	}
+	if right.Type.Kind != types.KindText && !isIntegerExpr(right) {
+		return BoundExpr{}, fmt.Errorf("JSON path operator requires a text key or integer index")
+	}
+	out := types.JSON
+	bound := BoundOpJSONGet
+	if op == BinaryJSONGetText {
+		out = types.Text
+		bound = BoundOpJSONGetText
+	}
+	return BoundExpr{Kind: BoundExprBinary, Type: out, Op: bound, Left: &left, Right: &right}, nil
 }
 
 func bindBoolBinary(columns map[string]BoundColumnDef, l, r Expr, op BoundOp) (BoundExpr, error) {
