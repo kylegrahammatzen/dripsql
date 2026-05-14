@@ -16,11 +16,11 @@ func BenchmarkSegmentScanIteratorMemoryPredicate(b *testing.B) {
 		batch types.Batch
 		pred  Predicate
 	}{
-		{name: "flat_text_eq", batch: benchmarkTextBatch(b, types.EncodingFlat), pred: Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}},
-		{name: "dict_text_eq", batch: benchmarkTextBatch(b, types.EncodingDictionary), pred: Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}},
+		{name: "flat_text_eq", batch: benchmarkTextBatch(b, types.EncodingFlat), pred: Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}},
+		{name: "dict_text_eq", batch: benchmarkTextBatch(b, types.EncodingDictionary), pred: Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}},
 		{name: "compound_and", batch: benchmarkCompoundBatch(b), pred: Predicate{Op: PredicateAnd, Children: []Predicate{
-			{Column: "tenant_id", Op: PredicateOpEq, Int64: 42},
-			{Column: "event_type", Op: PredicateOpEq, Text: "checkout"},
+			{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}},
+			{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}},
 		}}},
 	} {
 		b.Run(tt.name, func(b *testing.B) {
@@ -56,7 +56,7 @@ func BenchmarkSegmentScanIteratorPrunedMiss(b *testing.B) {
 		b.Fatalf("buildSegmentPageInfos: %v", err)
 	}
 	size := benchmarkSegmentSize(b, path)
-	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 999999}
+	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 999999}}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Size: size, Meta: meta, PageInfos: infos}}, Predicate: NewPredicateEvaluator(pred), Prune: pred}
 	var sink int
 	visit := func(_ types.Batch, sel types.SelectionMask) error {
@@ -74,7 +74,7 @@ func BenchmarkSegmentScanIteratorPrunedMiss(b *testing.B) {
 
 func BenchmarkSegmentScanIteratorPersistedPredicate(b *testing.B) {
 	path := filepath.Join(b.TempDir(), "segment.dsv3")
-	pred := Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}
+	pred := Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}
 	meta, err := WriteSegment(path, 42, []types.Batch{
 		benchmarkCompoundBatch(b),
 		benchmarkCompoundBatch(b),

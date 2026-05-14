@@ -544,7 +544,7 @@ func betweenPredicate(expr v3sql.BoundExpr) (storage.Predicate, bool, error) {
 	if !ok {
 		return storage.Predicate{}, false, nil
 	}
-	return storage.Predicate{Column: expr.Left.Column, Op: storage.PredicateOpBetween, Lo: lo, Hi: hi}, true, nil
+	return storage.Predicate{Column: expr.Left.Column, Op: storage.PredicateOpBetween, PredicateValue: storage.PredicateValue{Lo: lo, Hi: hi}}, true, nil
 }
 
 func inPredicate(expr v3sql.BoundExpr) (storage.Predicate, bool, error) {

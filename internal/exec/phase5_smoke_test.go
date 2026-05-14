@@ -14,8 +14,8 @@ func TestPhase5BenchQueryShapes(t *testing.T) {
 
 	t.Run("event checkout for tenant", func(t *testing.T) {
 		got, explain := phase5Count(t, ctx, batches, storage.Predicate{Op: storage.PredicateAnd, Children: []storage.Predicate{
-			{Column: "tenant_id", Op: storage.PredicateOpEq, Int64: 42},
-			{Column: "event_type", Op: storage.PredicateOpEq, Text: "checkout"},
+			{Column: "tenant_id", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Int64: 42}},
+			{Column: "event_type", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Text: "checkout"}},
 		}})
 		phase5AssertScalar(t, got, int64(2))
 		if explain.Selected != got {
@@ -24,7 +24,7 @@ func TestPhase5BenchQueryShapes(t *testing.T) {
 	})
 
 	t.Run("absent tenant", func(t *testing.T) {
-		got, explain := phase5Count(t, ctx, batches, storage.Predicate{Column: "tenant_id", Op: storage.PredicateOpEq, Int64: 999999})
+		got, explain := phase5Count(t, ctx, batches, storage.Predicate{Column: "tenant_id", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Int64: 999999}})
 		phase5AssertScalar(t, got, int64(0))
 		if explain.Selected != 0 {
 			t.Fatalf("explain selected = %d, want 0", explain.Selected)
@@ -33,8 +33,8 @@ func TestPhase5BenchQueryShapes(t *testing.T) {
 
 	t.Run("checkout amount for tenant", func(t *testing.T) {
 		got, explain := phase5Sum(t, ctx, batches, storage.Predicate{Op: storage.PredicateAnd, Children: []storage.Predicate{
-			{Column: "tenant_id", Op: storage.PredicateOpEq, Int64: 42},
-			{Column: "event_type", Op: storage.PredicateOpEq, Text: "checkout"},
+			{Column: "tenant_id", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Int64: 42}},
+			{Column: "event_type", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Text: "checkout"}},
 		}})
 		phase5AssertScalar(t, got.Sum, int64(17))
 		if explain.Selected != got.Count {
@@ -43,7 +43,7 @@ func TestPhase5BenchQueryShapes(t *testing.T) {
 	})
 
 	t.Run("checkout counts by country", func(t *testing.T) {
-		got, explain := phase5GroupCountry(t, ctx, batches, storage.Predicate{Column: "event_type", Op: storage.PredicateOpEq, Text: "checkout"})
+		got, explain := phase5GroupCountry(t, ctx, batches, storage.Predicate{Column: "event_type", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Text: "checkout"}})
 		phase5AssertGroupCounts(t, got, map[string]int64{"CA": 1, "US": 2})
 		if explain.Selected != 3 {
 			t.Fatalf("explain selected = %d, want 3", explain.Selected)

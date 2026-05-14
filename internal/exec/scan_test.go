@@ -46,7 +46,7 @@ func TestScanRespectsCancellation(t *testing.T) {
 
 func TestScanWithPredicate(t *testing.T) {
 	batch := execInt64Batch(t, []int64{42, 7, 42}, nil)
-	pred := storage.Predicate{Column: "amount", Op: storage.PredicateOpEq, Int64: 42}
+	pred := storage.Predicate{Column: "amount", Op: storage.PredicateOpEq, PredicateValue: storage.PredicateValue{Int64: 42}}
 	scan := &Scan{Iterator: storage.SegmentScanIterator{
 		Segments:  []storage.ScanSegment{{Pages: []storage.ScanPage{{Batch: batch}}}},
 		Predicate: storage.NewPredicateEvaluator(pred),

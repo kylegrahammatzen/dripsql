@@ -11,7 +11,7 @@ import (
 func TestPlainInt64EqEvaluator(t *testing.T) {
 	batch := predicateBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 42}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{0, 2})
@@ -20,7 +20,7 @@ func TestPlainInt64EqEvaluator(t *testing.T) {
 func TestPlainInt64BetweenEvaluatorWithNull(t *testing.T) {
 	batch := predicateBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpBetween, Lo: 40, Hi: 50}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpBetween, PredicateValue: PredicateValue{Lo: 40, Hi: 50}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{0, 2})
@@ -33,7 +33,7 @@ func TestFORBitPackInt64EqEvaluator(t *testing.T) {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 42}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{0, 2})
@@ -50,7 +50,7 @@ func TestFORBitPackInt64SelectedEvaluator(t *testing.T) {
 	input.Set(2)
 	input.Set(3)
 	var sel types.SelectionMask
-	matched, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 42}).EvalSelected(batch, input, &sel)
+	matched, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}).EvalSelected(batch, input, &sel)
 	if err != nil {
 		t.Fatalf("EvalSelected: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestFORBitPackInt64EqWithNulls(t *testing.T) {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 42}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{0})
@@ -93,11 +93,11 @@ func TestFORBitPackInt64BetweenAndInFastPaths(t *testing.T) {
 		pred Predicate
 		want []int
 	}{
-		{"between_inclusive", Predicate{Column: "tenant_id", Op: PredicateOpBetween, Lo: 7, Hi: 42}, []int{0, 1, 2, 3}},
-		{"between_narrow", Predicate{Column: "tenant_id", Op: PredicateOpBetween, Lo: 8, Hi: 42}, []int{0, 2, 3}},
-		{"compare_lt", Predicate{Column: "tenant_id", Op: PredicateOpLess, Int64: 9}, []int{1, 3}},
-		{"in_set", Predicate{Column: "tenant_id", Op: PredicateOpIn, Int64s: []int64{7, 42}}, []int{0, 1, 2}},
-		{"not_in_set", Predicate{Column: "tenant_id", Op: PredicateOpNotIn, Int64s: []int64{7, 42}}, []int{3}},
+		{"between_inclusive", Predicate{Column: "tenant_id", Op: PredicateOpBetween, PredicateValue: PredicateValue{Lo: 7, Hi: 42}}, []int{0, 1, 2, 3}},
+		{"between_narrow", Predicate{Column: "tenant_id", Op: PredicateOpBetween, PredicateValue: PredicateValue{Lo: 8, Hi: 42}}, []int{0, 2, 3}},
+		{"compare_lt", Predicate{Column: "tenant_id", Op: PredicateOpLess, PredicateValue: PredicateValue{Int64: 9}}, []int{1, 3}},
+		{"in_set", Predicate{Column: "tenant_id", Op: PredicateOpIn, PredicateValue: PredicateValue{Int64s: []int64{7, 42}}}, []int{0, 1, 2}},
+		{"not_in_set", Predicate{Column: "tenant_id", Op: PredicateOpNotIn, PredicateValue: PredicateValue{Int64s: []int64{7, 42}}}, []int{3}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -117,7 +117,7 @@ func TestFORBitPackInt64EqMissingRHS(t *testing.T) {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 999}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 999}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, nil)
@@ -126,7 +126,7 @@ func TestFORBitPackInt64EqMissingRHS(t *testing.T) {
 func TestPlainTextEqEvaluator(t *testing.T) {
 	batch := predicateBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{0, 1, 3})
@@ -137,7 +137,7 @@ func TestPredicateEvaluatorReusesSelectionMask(t *testing.T) {
 	sel := types.NewSelectionMask(batch.Len)
 	sel.FillAll()
 	words := &sel.Words[0]
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, Text: "login"}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "login"}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	if &sel.Words[0] != words {
@@ -149,7 +149,7 @@ func TestPredicateEvaluatorReusesSelectionMask(t *testing.T) {
 func TestDictTextEqEvaluator(t *testing.T) {
 	batch := dictPredicateBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{0, 3})
@@ -158,7 +158,7 @@ func TestDictTextEqEvaluator(t *testing.T) {
 func TestDictTextEqMissingRHS(t *testing.T) {
 	batch := dictPredicateBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, Text: "purchase"}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "purchase"}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, nil)
@@ -167,7 +167,7 @@ func TestDictTextEqMissingRHS(t *testing.T) {
 func TestDictTextNotEqEvaluator(t *testing.T) {
 	batch := dictPredicateBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpNotEq, Text: "checkout"}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpNotEq, PredicateValue: PredicateValue{Text: "checkout"}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{2})
@@ -176,7 +176,7 @@ func TestDictTextNotEqEvaluator(t *testing.T) {
 func TestDictTextNotEqMissingRHS(t *testing.T) {
 	batch := dictPredicateBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpNotEq, Text: "purchase"}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpNotEq, PredicateValue: PredicateValue{Text: "purchase"}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{0, 2, 3})
@@ -185,7 +185,7 @@ func TestDictTextNotEqMissingRHS(t *testing.T) {
 func TestDictTextInEvaluator(t *testing.T) {
 	batch := dictPredicateBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpIn, Texts: []string{"login", "checkout"}}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpIn, PredicateValue: PredicateValue{Texts: []string{"login", "checkout"}}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{0, 2, 3})
@@ -194,7 +194,7 @@ func TestDictTextInEvaluator(t *testing.T) {
 func TestDictTextNotInEvaluator(t *testing.T) {
 	batch := dictPredicateBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpNotIn, Texts: []string{"checkout"}}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpNotIn, PredicateValue: PredicateValue{Texts: []string{"checkout"}}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{2})
@@ -206,7 +206,7 @@ func TestDictTextSelectedEvaluator(t *testing.T) {
 	input.Set(2)
 	input.Set(3)
 	var sel types.SelectionMask
-	matched, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}).EvalSelected(batch, input, &sel)
+	matched, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}).EvalSelected(batch, input, &sel)
 	if err != nil {
 		t.Fatalf("EvalSelected: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestDictTextSelectedNotEqMissingRHS(t *testing.T) {
 	input.Set(2)
 	input.Set(3)
 	var sel types.SelectionMask
-	matched, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpNotEq, Text: "purchase"}).EvalSelected(batch, input, &sel)
+	matched, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpNotEq, PredicateValue: PredicateValue{Text: "purchase"}}).EvalSelected(batch, input, &sel)
 	if err != nil {
 		t.Fatalf("EvalSelected: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestDictTextSelectedNotEqMissingRHS(t *testing.T) {
 func TestDictTextInWithDuplicateRHS(t *testing.T) {
 	batch := dictPredicateBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpIn, Texts: []string{"checkout", "checkout", "missing"}}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpIn, PredicateValue: PredicateValue{Texts: []string{"checkout", "checkout", "missing"}}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{0, 3})
@@ -245,7 +245,7 @@ func TestDictTextInWithDuplicateRHS(t *testing.T) {
 func TestDictTextSingleValuePage(t *testing.T) {
 	batch := dictSingleValueBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, []int{0, 1, 2, 3})
@@ -254,7 +254,7 @@ func TestDictTextSingleValuePage(t *testing.T) {
 func TestDictTextAllNullPage(t *testing.T) {
 	batch := dictAllNullBatch(t)
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpNotEq, Text: "purchase"}).Eval(batch, &sel); err != nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpNotEq, PredicateValue: PredicateValue{Text: "purchase"}}).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	assertMaskRows(t, sel, nil)
@@ -268,7 +268,7 @@ func TestDictTextRejectsShortIDs(t *testing.T) {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	var sel types.SelectionMask
-	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}).Eval(batch, &sel); err == nil {
+	if _, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}).Eval(batch, &sel); err == nil {
 		t.Fatal("expected short dictionary IDs error")
 	}
 }
@@ -282,7 +282,7 @@ func TestDictTextPersistedSegmentScan(t *testing.T) {
 	if meta.Columns[1].Pages[0].Encoding != types.EncodingDictionary {
 		t.Fatalf("encoding = %s, want dictionary", meta.Columns[1].Pages[0].Encoding)
 	}
-	pred := Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}
+	pred := Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred}
 	visits := 0
 	if err := it.ForEach(func(_ types.Batch, sel types.SelectionMask) error {
@@ -301,8 +301,8 @@ func TestConjunctionEvaluator(t *testing.T) {
 	batch := predicateBatch(t)
 	var sel types.SelectionMask
 	pred := Predicate{Op: PredicateAnd, Children: []Predicate{
-		{Column: "tenant_id", Op: PredicateOpEq, Int64: 42},
-		{Column: "event_type", Op: PredicateOpEq, Text: "checkout"},
+		{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}},
+		{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}},
 	}}
 	if _, err := NewPredicateEvaluator(pred).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
@@ -314,8 +314,8 @@ func TestDisjunctionEvaluator(t *testing.T) {
 	batch := predicateBatch(t)
 	var sel types.SelectionMask
 	pred := Predicate{Op: PredicateOr, Children: []Predicate{
-		{Column: "tenant_id", Op: PredicateOpEq, Int64: 7},
-		{Column: "event_type", Op: PredicateOpEq, Text: "login"},
+		{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 7}},
+		{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "login"}},
 	}}
 	if _, err := NewPredicateEvaluator(pred).Eval(batch, &sel); err != nil {
 		t.Fatalf("Eval: %v", err)
@@ -329,7 +329,7 @@ func TestPredicateEvaluatorSelectedRows(t *testing.T) {
 	input.Set(2)
 	input.Set(3)
 	var sel types.SelectionMask
-	matched, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}).EvalSelected(batch, input, &sel)
+	matched, err := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}).EvalSelected(batch, input, &sel)
 	if err != nil {
 		t.Fatalf("EvalSelected: %v", err)
 	}
@@ -347,8 +347,8 @@ func TestPredicateEvaluatorSelectedCompound(t *testing.T) {
 	input.Set(3)
 	var sel types.SelectionMask
 	pred := Predicate{Op: PredicateOr, Children: []Predicate{
-		{Column: "tenant_id", Op: PredicateOpEq, Int64: 7},
-		{Column: "event_type", Op: PredicateOpEq, Text: "login"},
+		{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 7}},
+		{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "login"}},
 	}}
 	matched, err := NewPredicateEvaluator(pred).EvalSelected(batch, input, &sel)
 	if err != nil {

@@ -20,10 +20,11 @@ const (
 	PredicateNot
 )
 
-type Predicate struct {
-	Column string
-	Op     PredicateOp
-
+// PredicateValue holds the literal payload for a comparison or set
+// predicate, separated from the structural fields (Column, Op, Children)
+// so that future PRs can replace it with a sealed-interface variant
+// without changing how callers read the value fields.
+type PredicateValue struct {
 	Bool  bool
 	Bools []bool
 
@@ -37,7 +38,12 @@ type Predicate struct {
 
 	UUID  types.UUID16
 	UUIDs []types.UUID16
+}
 
+type Predicate struct {
+	Column string
+	Op     PredicateOp
+	PredicateValue
 	Children []Predicate
 }
 

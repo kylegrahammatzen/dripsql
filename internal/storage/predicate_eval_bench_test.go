@@ -12,7 +12,7 @@ var predicateBenchSink int
 func BenchmarkDictTextEqVsPlain(b *testing.B) {
 	flat := benchmarkTextBatch(b, types.EncodingFlat)
 	dict := benchmarkTextBatch(b, types.EncodingDictionary)
-	pred := Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}
+	pred := Predicate{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}}
 	flatEval := NewPredicateEvaluator(pred)
 	dictEval := NewPredicateEvaluator(pred)
 	b.Run("flat", func(b *testing.B) {
@@ -48,8 +48,8 @@ func BenchmarkDictTextEqVsPlain(b *testing.B) {
 func BenchmarkCompoundPredicateReusedMask(b *testing.B) {
 	batch := benchmarkCompoundBatch(b)
 	eval := NewPredicateEvaluator(Predicate{Op: PredicateAnd, Children: []Predicate{
-		{Column: "tenant_id", Op: PredicateOpEq, Int64: 42},
-		{Column: "event_type", Op: PredicateOpEq, Text: "checkout"},
+		{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}},
+		{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}},
 	}})
 	sel := types.NewSelectionMask(batch.Len)
 	var sink int
@@ -68,8 +68,8 @@ func BenchmarkCompoundPredicateReusedMask(b *testing.B) {
 func BenchmarkPredicateEvalSelectedSparse(b *testing.B) {
 	batch := benchmarkCompoundBatch(b)
 	eval := NewPredicateEvaluator(Predicate{Op: PredicateAnd, Children: []Predicate{
-		{Column: "tenant_id", Op: PredicateOpEq, Int64: 42},
-		{Column: "event_type", Op: PredicateOpEq, Text: "checkout"},
+		{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}},
+		{Column: "event_type", Op: PredicateOpEq, PredicateValue: PredicateValue{Text: "checkout"}},
 	}})
 	input := types.NewSelectionMask(batch.Len)
 	for row := 0; row < batch.Len; row += 64 {
@@ -110,7 +110,7 @@ func BenchmarkPredicateEvalSelectedSparse(b *testing.B) {
 
 func BenchmarkPredicateInt64EqFull(b *testing.B) {
 	batch := benchmarkInt64Batch(b)
-	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 42})
+	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}})
 	sel := types.NewSelectionMask(batch.Len)
 	if _, err := eval.Eval(batch, &sel); err != nil {
 		b.Fatalf("prewarm Eval: %v", err)
@@ -130,7 +130,7 @@ func BenchmarkPredicateInt64EqFull(b *testing.B) {
 
 func BenchmarkPredicateInt64EqSelectedSparse(b *testing.B) {
 	batch := benchmarkInt64Batch(b)
-	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 42})
+	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}})
 	input := types.NewSelectionMask(batch.Len)
 	for row := 0; row < batch.Len; row += 64 {
 		input.Set(row)
@@ -154,7 +154,7 @@ func BenchmarkPredicateInt64EqSelectedSparse(b *testing.B) {
 
 func BenchmarkPredicateFORBitPackEqFull(b *testing.B) {
 	batch := benchmarkFORBitPackBatch(b)
-	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 42})
+	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, PredicateValue: PredicateValue{Int64: 42}})
 	sel := types.NewSelectionMask(batch.Len)
 	if _, err := eval.Eval(batch, &sel); err != nil {
 		b.Fatalf("prewarm Eval: %v", err)
@@ -174,7 +174,7 @@ func BenchmarkPredicateFORBitPackEqFull(b *testing.B) {
 
 func BenchmarkPredicateInt64InSmall(b *testing.B) {
 	batch := benchmarkInt64Batch(b)
-	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpIn, Int64s: []int64{7, 42, 99, 1234}})
+	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpIn, PredicateValue: PredicateValue{Int64s: []int64{7, 42, 99, 1234}}})
 	sel := types.NewSelectionMask(batch.Len)
 	if _, err := eval.Eval(batch, &sel); err != nil {
 		b.Fatalf("prewarm Eval: %v", err)
@@ -198,7 +198,7 @@ func BenchmarkPredicateInt64InLarge(b *testing.B) {
 	for i := range values {
 		values[i] = int64(i * 3)
 	}
-	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpIn, Int64s: values})
+	eval := NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpIn, PredicateValue: PredicateValue{Int64s: values}})
 	sel := types.NewSelectionMask(batch.Len)
 	if _, err := eval.Eval(batch, &sel); err != nil {
 		b.Fatalf("prewarm Eval: %v", err)
@@ -222,7 +222,7 @@ func BenchmarkPredicateTextInFlatLarge(b *testing.B) {
 	for i := range values {
 		values[i] = fmt.Sprintf("event_%03d", i*2)
 	}
-	eval := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpIn, Texts: values})
+	eval := NewPredicateEvaluator(Predicate{Column: "event_type", Op: PredicateOpIn, PredicateValue: PredicateValue{Texts: values}})
 	sel := types.NewSelectionMask(batch.Len)
 	if _, err := eval.Eval(batch, &sel); err != nil {
 		b.Fatalf("prewarm Eval: %v", err)
@@ -242,7 +242,7 @@ func BenchmarkPredicateTextInFlatLarge(b *testing.B) {
 
 func BenchmarkPredicatePruneBound(b *testing.B) {
 	meta := benchmarkPruneMeta(16, 256)
-	pred := Predicate{Column: "col_15", Op: PredicateOpBetween, Lo: 1000, Hi: 1400}
+	pred := Predicate{Column: "col_15", Op: PredicateOpBetween, PredicateValue: PredicateValue{Lo: 1000, Hi: 1400}}
 	plan := BindPrunePredicate(pred, meta)
 	var sink int
 	b.ReportAllocs()
