@@ -242,6 +242,46 @@ func TestEngineLengthScalarFunction(t *testing.T) {
 	)
 }
 
+func TestEngineCoalesceScalarFunction(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+	if _, err := db.Exec(ctx, `CREATE TABLE events (id INT64 NOT NULL, label TEXT, fallback TEXT NOT NULL)`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO events VALUES
+		(1, 'alpha', 'default'),
+		(2, NULL, 'beta-fallback'),
+		(3, 'gamma', 'whatever')`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	if err := db.FlushBuffered(ctx, "events"); err != nil {
+		t.Fatalf("FlushBuffered: %v", err)
+	}
+	assertQueryRows(t, ctx, db,
+		`SELECT coalesce(label, fallback) AS picked FROM events ORDER BY id`,
+		[]string{"picked"},
+		[][]any{{"alpha"}, {"beta-fallback"}, {"gamma"}},
+	)
+	assertQueryRows(t, ctx, db,
+		`SELECT coalesce(label, 'literal') AS picked FROM events ORDER BY id`,
+		[]string{"picked"},
+		[][]any{{"alpha"}, {"literal"}, {"gamma"}},
+	)
+	assertQueryRows(t, ctx, db,
+		`SELECT id FROM events WHERE coalesce(label, 'beta-fallback') = 'beta-fallback' ORDER BY id`,
+		[]string{"id"},
+		[][]any{{int64(2)}},
+	)
+}
+
 func TestEngineCompressionOptionGatesHeavyCodecs(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

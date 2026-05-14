@@ -505,6 +505,16 @@ func evalProjectBinary(batch types.Batch, row int, expr v3sql.BoundExpr) (any, b
 	if expr.Left == nil || expr.Right == nil {
 		return nil, false, nil
 	}
+	if expr.Op == v3sql.BoundOpCoalesce {
+		left, leftOK, err := evalProjectValue(batch, row, *expr.Left)
+		if err != nil {
+			return nil, false, err
+		}
+		if leftOK {
+			return left, true, nil
+		}
+		return evalProjectValue(batch, row, *expr.Right)
+	}
 	left, leftOK, err := evalProjectValue(batch, row, *expr.Left)
 	if err != nil {
 		return nil, false, err

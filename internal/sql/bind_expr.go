@@ -172,6 +172,38 @@ func bindScalarCall(columns map[string]BoundColumnDef, call *FuncCall) (BoundExp
 			return BoundExpr{}, fmt.Errorf("length() argument must be text, bytes, or json")
 		}
 		return BoundExpr{Kind: BoundExprUnary, Type: types.Int64, Op: BoundOpLength, Left: &arg}, nil
+	case "coalesce":
+		if len(call.Args) == 0 {
+			return BoundExpr{}, fmt.Errorf("coalesce() requires at least one argument")
+		}
+		args := make([]BoundExpr, 0, len(call.Args))
+		var commonType types.Type
+		for _, raw := range call.Args {
+			bound, err := bindExpr(columns, raw)
+			if err != nil {
+				return BoundExpr{}, err
+			}
+			if bound.Type.Kind != types.KindInvalid {
+				if commonType.Kind == types.KindInvalid {
+					commonType = bound.Type
+				} else if bound.Type.Kind != commonType.Kind {
+					return BoundExpr{}, fmt.Errorf("coalesce() arguments must share a common type")
+				}
+			}
+			args = append(args, bound)
+		}
+		if commonType.Kind == types.KindInvalid {
+			return BoundExpr{}, fmt.Errorf("coalesce() requires at least one typed argument")
+		}
+		out := args[0]
+		out.Type = commonType
+		for i := 1; i < len(args); i++ {
+			right := args[i]
+			right.Type = commonType
+			left := out
+			out = BoundExpr{Kind: BoundExprBinary, Type: commonType, Op: BoundOpCoalesce, Left: &left, Right: &right}
+		}
+		return out, nil
 	case "concat":
 		if len(call.Args) == 0 {
 			return BoundExpr{}, fmt.Errorf("concat() requires at least one argument")
