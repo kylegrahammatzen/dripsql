@@ -435,9 +435,6 @@ func decodeColumnPageInto(colMeta ColumnMeta, pageMeta PageMeta, payload []byte,
 }
 
 func pageCodec(enc types.Encoding) (codec.Codec, error) {
-	if c, ok := codec.Lookup(enc); ok {
-		return c, nil
-	}
 	switch enc {
 	case types.EncodingFlat:
 		return codec.Plain{}, nil

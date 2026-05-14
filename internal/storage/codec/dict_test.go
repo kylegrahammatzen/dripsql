@@ -206,14 +206,3 @@ func TestPickSmallestFallsBackToPlainWhenDictionaryInvalid(t *testing.T) {
 	}
 }
 
-func TestRegisterDuplicateCodec(t *testing.T) {
-	if err := Register(Constant{}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	if err := Register(Constant{}); err == nil {
-		t.Fatal("expected duplicate registration error")
-	}
-	if _, ok := Lookup(types.EncodingConstant); !ok {
-		t.Fatal("registered codec missing")
-	}
-}

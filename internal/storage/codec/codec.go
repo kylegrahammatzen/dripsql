@@ -1,9 +1,6 @@
 package codec
 
 import (
-	"fmt"
-	"sync"
-
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
@@ -46,36 +43,6 @@ type SelectedCodec interface {
 type EncodedCodec interface {
 	Codec
 	DecodeEncoded(page Page) (types.Vec, error)
-}
-
-var registry struct {
-	sync.RWMutex
-	codecs map[types.Encoding]Codec
-}
-
-func init() {
-	registry.codecs = make(map[types.Encoding]Codec)
-}
-
-func Register(c Codec) error {
-	if c == nil {
-		return fmt.Errorf("codec is nil")
-	}
-	registry.Lock()
-	defer registry.Unlock()
-	enc := c.Encoding()
-	if _, ok := registry.codecs[enc]; ok {
-		return fmt.Errorf("codec %s already registered", enc)
-	}
-	registry.codecs[enc] = c
-	return nil
-}
-
-func Lookup(enc types.Encoding) (Codec, bool) {
-	registry.RLock()
-	defer registry.RUnlock()
-	c, ok := registry.codecs[enc]
-	return c, ok
 }
 
 func PickSmallest(v types.Vec, codecs ...Codec) (Codec, bool) {
