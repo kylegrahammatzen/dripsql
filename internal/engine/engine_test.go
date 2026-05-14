@@ -159,6 +159,46 @@ func TestEngineJSONPathOperators(t *testing.T) {
 	)
 }
 
+func TestEngineJSONPathChainAndTextSource(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+	if _, err := db.Exec(ctx, `CREATE TABLE events (id INT64 NOT NULL, payload JSON NOT NULL, raw TEXT NOT NULL)`); err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO events VALUES
+		(1, '{"meta":{"id":"a1","tags":["x","y"]}}', '{"who":"alice"}'),
+		(2, '{"meta":{"id":"b2","tags":["z"]}}',     '{"who":"bob"}')`); err != nil {
+		t.Fatalf("INSERT: %v", err)
+	}
+	if err := db.FlushBuffered(ctx, "events"); err != nil {
+		t.Fatalf("FlushBuffered: %v", err)
+	}
+
+	assertQueryRows(t, ctx, db,
+		`SELECT payload->'meta'->>'id' AS meta_id FROM events ORDER BY id`,
+		[]string{"meta_id"},
+		[][]any{{"a1"}, {"b2"}},
+	)
+	assertQueryRows(t, ctx, db,
+		`SELECT payload->'meta'->'tags'->>0 AS first_tag FROM events ORDER BY id`,
+		[]string{"first_tag"},
+		[][]any{{"x"}, {"z"}},
+	)
+	assertQueryRows(t, ctx, db,
+		`SELECT raw->>'who' AS who FROM events ORDER BY id`,
+		[]string{"who"},
+		[][]any{{"alice"}, {"bob"}},
+	)
+}
+
 func TestEngineSplitsPushableAndComputedWhere(t *testing.T) {
 	ctx := context.Background()
 	db := openEventsDB(t, ctx)
