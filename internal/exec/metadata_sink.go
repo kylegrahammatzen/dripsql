@@ -33,10 +33,10 @@ func numericColumnMeta(meta storage.SegmentMeta, name string) (storage.ColumnMet
 			continue
 		}
 		switch {
-		case col.Int64 != nil:
-			return col, numericStats{min: col.Int64.Min, max: col.Int64.Max, sum: col.Int64.Sum, sumValid: col.Int64.SumValid, set: true}, true
-		case col.Int32 != nil:
-			return col, numericStats{min: int64(col.Int32.Min), max: int64(col.Int32.Max), sum: col.Int32.Sum, sumValid: col.Int32.SumValid, set: true}, true
+		case col.Stats.Int64 != nil:
+			return col, numericStats{min: col.Stats.Int64.Min, max: col.Stats.Int64.Max, sum: col.Stats.Int64.Sum, sumValid: col.Stats.Int64.SumValid, set: true}, true
+		case col.Stats.Int32 != nil:
+			return col, numericStats{min: int64(col.Stats.Int32.Min), max: int64(col.Stats.Int32.Max), sum: col.Stats.Int32.Sum, sumValid: col.Stats.Int32.SumValid, set: true}, true
 		case col.AllNull:
 			return col, numericStats{sumValid: true}, true
 		default:

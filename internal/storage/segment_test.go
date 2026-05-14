@@ -341,8 +341,8 @@ func TestWriteSegmentStoresSummaryStats(t *testing.T) {
 	if err := got.LoadAllColumns(); err != nil {
 		t.Fatalf("LoadAllColumns: %v", err)
 	}
-	if got.Columns[0].Int64 == nil || got.Columns[0].Int64.Min != 2 || got.Columns[0].Int64.Max != 30 || got.Columns[0].Int64.Sum != 42 || !got.Columns[0].Int64.SumValid {
-		t.Fatalf("int64 column stats = %#v", got.Columns[0].Int64)
+	if got.Columns[0].Stats.Int64 == nil || got.Columns[0].Stats.Int64.Min != 2 || got.Columns[0].Stats.Int64.Max != 30 || got.Columns[0].Stats.Int64.Sum != 42 || !got.Columns[0].Stats.Int64.SumValid {
+		t.Fatalf("int64 column stats = %#v", got.Columns[0].Stats.Int64)
 	}
 	valueStats := got.Columns[0].Pages[0].Int64Values
 	if valueStats == nil || valueStats.Truncated || !int64SetContains(valueStats.Values, 10) || !int64SetContains(valueStats.Values, 2) || !int64SetContains(valueStats.Values, 30) || int64SetContains(valueStats.Values, 8) {
@@ -351,8 +351,8 @@ func TestWriteSegmentStoresSummaryStats(t *testing.T) {
 	if got.Columns[0].AllValid || got.Columns[0].AllNull || got.Columns[0].Pages[0].NullCount != 1 {
 		t.Fatalf("int64 validity stats = %#v", got.Columns[0])
 	}
-	if got.Columns[1].Text == nil || !stringSetContains(got.Columns[1].Text.Values, "red") || !stringSetContains(got.Columns[1].Text.Values, "blue") || !stringSetContains(got.Columns[1].Text.Values, "green") {
-		t.Fatalf("text column stats = %#v", got.Columns[1].Text)
+	if got.Columns[1].Stats.Text == nil || !stringSetContains(got.Columns[1].Stats.Text.Values, "red") || !stringSetContains(got.Columns[1].Stats.Text.Values, "blue") || !stringSetContains(got.Columns[1].Stats.Text.Values, "green") {
+		t.Fatalf("text column stats = %#v", got.Columns[1].Stats.Text)
 	}
 	if !reflect.DeepEqual(got, meta) {
 		t.Fatalf("footer meta = %#v, want %#v", got, meta)
@@ -414,14 +414,14 @@ func TestWriteSegmentStoresBoolAndInt16Stats(t *testing.T) {
 	if err := got.LoadAllColumns(); err != nil {
 		t.Fatalf("LoadAllColumns: %v", err)
 	}
-	if got.Columns[0].Bool == nil || !got.Columns[0].Bool.HasTrue || !got.Columns[0].Bool.HasFalse {
-		t.Fatalf("bool column stats = %#v", got.Columns[0].Bool)
+	if got.Columns[0].Stats.Bool == nil || !got.Columns[0].Stats.Bool.HasTrue || !got.Columns[0].Stats.Bool.HasFalse {
+		t.Fatalf("bool column stats = %#v", got.Columns[0].Stats.Bool)
 	}
 	if got.Columns[0].Pages[0].Bool == nil || !got.Columns[0].Pages[0].Bool.HasTrue || !got.Columns[0].Pages[0].Bool.HasFalse {
 		t.Fatalf("bool page stats = %#v", got.Columns[0].Pages[0].Bool)
 	}
-	if got.Columns[1].Int32 == nil || got.Columns[1].Int32.Min != -2 || got.Columns[1].Int32.Max != 7 || got.Columns[1].Int32.Sum != 8 || !got.Columns[1].Int32.SumValid {
-		t.Fatalf("int16 column stats = %#v", got.Columns[1].Int32)
+	if got.Columns[1].Stats.Int32 == nil || got.Columns[1].Stats.Int32.Min != -2 || got.Columns[1].Stats.Int32.Max != 7 || got.Columns[1].Stats.Int32.Sum != 8 || !got.Columns[1].Stats.Int32.SumValid {
+		t.Fatalf("int16 column stats = %#v", got.Columns[1].Stats.Int32)
 	}
 	if got.Columns[1].Pages[0].Int32 == nil || got.Columns[1].Pages[0].Int32.Min != -2 || got.Columns[1].Pages[0].Int32.Max != 7 {
 		t.Fatalf("int16 page stats = %#v", got.Columns[1].Pages[0].Int32)

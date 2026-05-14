@@ -827,10 +827,10 @@ func textStatsForColumn(meta storage.SegmentMeta, column string) (*storage.TextS
 				return nil, nil, false
 			}
 			col = meta.Columns[i]
-			if !textStatsExact(col.Text) {
+			if !textStatsExact(col.Stats.Text) {
 				return nil, nil, false
 			}
-			return col.Text, col.Pages, true
+			return col.Stats.Text, col.Pages, true
 		}
 	}
 	return nil, nil, false

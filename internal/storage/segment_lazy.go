@@ -71,10 +71,10 @@ func readPageEntry(buf []byte, page *PageMeta) {
 }
 
 func parseColumnHeavy(r *segmentMetaReader, col *ColumnMeta) error {
-	col.UUID = r.readUUIDStats()
-	col.Text = r.readTextStats()
-	col.Int32Values = r.readInt32ValueStats()
-	col.Int64Values = r.readInt64ValueStats()
+	col.Stats.UUID = r.readUUIDStats()
+	col.Stats.Text = r.readTextStats()
+	col.Stats.Int32Values = r.readInt32ValueStats()
+	col.Stats.Int64Values = r.readInt64ValueStats()
 	if r.err != nil {
 		return fmt.Errorf("segment footer truncated: %w", r.err)
 	}

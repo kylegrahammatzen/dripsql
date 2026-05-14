@@ -361,7 +361,7 @@ func benchmarkFORBitPackBatch(tb testing.TB) types.Batch {
 func benchmarkPruneMeta(columns int, pages int) SegmentMeta {
 	meta := SegmentMeta{Rows: uint32(pages * types.StandardBatchRows), PageRows: types.StandardBatchRows, Columns: make([]ColumnMeta, columns)}
 	for col := range meta.Columns {
-		colMeta := ColumnMeta{Name: fmt.Sprintf("col_%02d", col), Type: types.Int64, Rows: meta.Rows, AllValid: true, Pages: make([]PageMeta, pages)}
+		colMeta := ColumnMeta{Column: types.Column{Name: fmt.Sprintf("col_%02d", col), Type: types.Int64}, Rows: meta.Rows, AllValid: true, Pages: make([]PageMeta, pages)}
 		for page := range colMeta.Pages {
 			stats := &Int64Stats{Min: int64(page * 10), Max: int64(page*10 + 9)}
 			colMeta.Pages[page] = PageMeta{RowStart: uint32(page * types.StandardBatchRows), Rows: types.StandardBatchRows, Kind: types.VecInt64, Encoding: types.EncodingFlat, AllValid: true, Int64: stats}

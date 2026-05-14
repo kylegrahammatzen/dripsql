@@ -21,8 +21,8 @@ func TestInt64BloomBuiltOnPageTruncation(t *testing.T) {
 	if !page.Int64Values.Truncated || len(page.Int64Values.HashBloom) == 0 {
 		t.Fatalf("page bloom not built: %#v", page.Int64Values)
 	}
-	if meta.Columns[0].Int64Values == nil || len(meta.Columns[0].Int64Values.HashBloom) == 0 {
-		t.Fatalf("segment bloom not built: %#v", meta.Columns[0].Int64Values)
+	if meta.Columns[0].Stats.Int64Values == nil || len(meta.Columns[0].Stats.Int64Values.HashBloom) == 0 {
+		t.Fatalf("segment bloom not built: %#v", meta.Columns[0].Stats.Int64Values)
 	}
 }
 
@@ -37,8 +37,8 @@ func TestInt64BloomNotBuiltWhenAllPagesFitInValues(t *testing.T) {
 	if page.Int64Values.Truncated || len(page.Int64Values.HashBloom) != 0 {
 		t.Fatalf("expected no bloom on small page: %#v", page.Int64Values)
 	}
-	if meta.Columns[0].Int64Values != nil {
-		t.Fatalf("expected no segment-level int64 bloom: %#v", meta.Columns[0].Int64Values)
+	if meta.Columns[0].Stats.Int64Values != nil {
+		t.Fatalf("expected no segment-level int64 bloom: %#v", meta.Columns[0].Stats.Int64Values)
 	}
 }
 
@@ -59,8 +59,8 @@ func TestInt64BloomRoundTripsThroughFooter(t *testing.T) {
 	if err := reopened.LoadAllColumns(); err != nil {
 		t.Fatalf("LoadAllColumns: %v", err)
 	}
-	originalSeg := meta.Columns[0].Int64Values
-	roundtripSeg := reopened.Columns[0].Int64Values
+	originalSeg := meta.Columns[0].Stats.Int64Values
+	roundtripSeg := reopened.Columns[0].Stats.Int64Values
 	if originalSeg == nil || roundtripSeg == nil {
 		t.Fatalf("missing segment bloom: original=%v reopened=%v", originalSeg, roundtripSeg)
 	}

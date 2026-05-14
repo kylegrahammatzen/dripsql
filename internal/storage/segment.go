@@ -53,14 +53,9 @@ type PageMeta struct {
 	Text        *TextStats
 }
 
-type ColumnMeta struct {
-	Name        string
-	Type        types.Type
-	EnumLabels  []string
-	Rows        uint32
-	NullCount   uint32
-	AllValid    bool
-	AllNull     bool
+// ColumnStats bundles every per-column stats variant so column metadata
+// carries one sidecar instead of seven parallel pointer fields.
+type ColumnStats struct {
 	Bool        *BoolStats
 	Int32       *Int32Stats
 	Int64       *Int64Stats
@@ -68,7 +63,20 @@ type ColumnMeta struct {
 	Int64Values *Int64ValueStats
 	UUID        *UUIDStats
 	Text        *TextStats
-	Pages       []PageMeta
+}
+
+// ColumnMeta embeds types.Column for Name, Type, and EnumLabels so storage
+// reuses the engine-wide column descriptor instead of carrying parallel
+// fields. The embedded Vec field stays zero in segment metadata since
+// payloads live on disk.
+type ColumnMeta struct {
+	types.Column
+	Rows      uint32
+	NullCount uint32
+	AllValid  bool
+	AllNull   bool
+	Stats     ColumnStats
+	Pages     []PageMeta
 }
 
 type SegmentMeta struct {
@@ -113,7 +121,10 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 	offset := uint64(len(segmentMagic))
 	meta := SegmentMeta{ID: id, Rows: uint32(totalBatchRows(batches)), PageRows: types.StandardBatchRows, Columns: make([]ColumnMeta, len(batches[0].Columns)), PageRowCounts: make([]uint32, 0, len(batches))}
 	for colIndex, firstCol := range batches[0].Columns {
-		meta.Columns[colIndex] = ColumnMeta{Name: firstCol.Name, Type: firstCol.Type, EnumLabels: append([]string(nil), firstCol.EnumLabels...), Rows: meta.Rows}
+		meta.Columns[colIndex] = ColumnMeta{
+			Column: types.Column{Name: firstCol.Name, Type: firstCol.Type, EnumLabels: append([]string(nil), firstCol.EnumLabels...)},
+			Rows:   meta.Rows,
+		}
 	}
 	rowStart := 0
 	scratch := make([][]byte, len(meta.Columns))
@@ -136,11 +147,11 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 
 			colMeta := &meta.Columns[colIndex]
 			colMeta.NullCount += page.meta.NullCount
-			colMeta.Bool = mergeBoolStats(colMeta.Bool, page.meta.Bool)
-			colMeta.Int32 = mergeNumericStats(colMeta.Int32, page.meta.Int32)
-			colMeta.Int64 = mergeNumericStats(colMeta.Int64, page.meta.Int64)
-			colMeta.UUID = mergeUUIDStats(colMeta.UUID, page.meta.UUID)
-			colMeta.Text = mergeTextStats(colMeta.Text, page.meta.Text)
+			colMeta.Stats.Bool = mergeBoolStats(colMeta.Stats.Bool, page.meta.Bool)
+			colMeta.Stats.Int32 = mergeNumericStats(colMeta.Stats.Int32, page.meta.Int32)
+			colMeta.Stats.Int64 = mergeNumericStats(colMeta.Stats.Int64, page.meta.Int64)
+			colMeta.Stats.UUID = mergeUUIDStats(colMeta.Stats.UUID, page.meta.UUID)
+			colMeta.Stats.Text = mergeTextStats(colMeta.Stats.Text, page.meta.Text)
 			colMeta.Pages = append(colMeta.Pages, page.meta)
 		}
 		if sma != nil {
@@ -352,18 +363,18 @@ func marshalSegmentMetaRaw(meta SegmentMeta) ([]byte, error) {
 		writeU32(&w, col.NullCount)
 		writeBool(&w, col.AllValid)
 		writeBool(&w, col.AllNull)
-		writeBoolStats(&w, col.Bool)
-		writeInt32Stats(&w, col.Int32)
-		writeInt64Stats(&w, col.Int64)
+		writeBoolStats(&w, col.Stats.Bool)
+		writeInt32Stats(&w, col.Stats.Int32)
+		writeInt64Stats(&w, col.Stats.Int64)
 		writeU32(&w, uint32(len(col.Pages)))
 		for _, page := range col.Pages {
 			writePageEntry(&w, page)
 		}
 		heavy := segmentMetaWriter{}
-		writeUUIDStats(&heavy, col.UUID)
-		writeTextStats(&heavy, col.Text)
-		writeInt32ValueStats(&heavy, col.Int32Values)
-		writeInt64ValueStats(&heavy, col.Int64Values)
+		writeUUIDStats(&heavy, col.Stats.UUID)
+		writeTextStats(&heavy, col.Stats.Text)
+		writeInt32ValueStats(&heavy, col.Stats.Int32Values)
+		writeInt64ValueStats(&heavy, col.Stats.Int64Values)
 		for _, page := range col.Pages {
 			writeBool(&heavy, page.AllValid)
 			writeBool(&heavy, page.AllNull)
@@ -541,9 +552,9 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 		col.NullCount = r.readU32()
 		col.AllValid = r.readBool()
 		col.AllNull = r.readBool()
-		col.Bool = r.readBoolStats()
-		col.Int32 = r.readInt32Stats()
-		col.Int64 = r.readInt64Stats()
+		col.Stats.Bool = r.readBoolStats()
+		col.Stats.Int32 = r.readInt32Stats()
+		col.Stats.Int64 = r.readInt64Stats()
 		if r.err != nil {
 			return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
 		}

@@ -14,10 +14,9 @@ func TestTextStatsGroupSumsRoundTripV2(t *testing.T) {
 		PageRows: 12,
 		Columns: []ColumnMeta{
 			{
-				Name: "country",
-				Type: types.Text,
-				Rows: 12,
-				Text: &TextStats{
+				Column: types.Column{Name: "country", Type: types.Text},
+				Rows:   12,
+				Stats: ColumnStats{Text: &TextStats{
 					DataBytes: 24,
 					Values:    []string{"CA", "GB", "US"},
 					Counts:    []uint32{3, 4, 5},
@@ -25,7 +24,7 @@ func TestTextStatsGroupSumsRoundTripV2(t *testing.T) {
 						"amount": {30, 40, 50},
 						"count":  {3, 4, 5},
 					},
-				},
+				}},
 				Pages: []PageMeta{{Rows: 12, Kind: types.VecText, Encoding: types.EncodingDictionary}},
 			},
 		},
@@ -41,8 +40,8 @@ func TestTextStatsGroupSumsRoundTripV2(t *testing.T) {
 	if err := decoded.LoadAllColumns(); err != nil {
 		t.Fatalf("LoadAllColumns: %v", err)
 	}
-	got := decoded.Columns[0].Text
-	want := original.Columns[0].Text
+	got := decoded.Columns[0].Stats.Text
+	want := original.Columns[0].Stats.Text
 	if !reflect.DeepEqual(got.GroupSums, want.GroupSums) {
 		t.Fatalf("GroupSums = %#v, want %#v", got.GroupSums, want.GroupSums)
 	}
@@ -58,14 +57,13 @@ func TestTextStatsTruncatedSkipsGroupSums(t *testing.T) {
 		PageRows: 12,
 		Columns: []ColumnMeta{
 			{
-				Name: "url",
-				Type: types.Text,
-				Rows: 12,
-				Text: &TextStats{
+				Column: types.Column{Name: "url", Type: types.Text},
+				Rows:   12,
+				Stats: ColumnStats{Text: &TextStats{
 					DataBytes: 80,
 					Truncated: true,
 					GroupSums: map[string][]int64{"amount": {1, 2, 3}},
-				},
+				}},
 				Pages: []PageMeta{{Rows: 12, Kind: types.VecText, Encoding: types.EncodingFlat}},
 			},
 		},
@@ -81,8 +79,8 @@ func TestTextStatsTruncatedSkipsGroupSums(t *testing.T) {
 	if err := decoded.LoadAllColumns(); err != nil {
 		t.Fatalf("LoadAllColumns: %v", err)
 	}
-	if decoded.Columns[0].Text.GroupSums != nil {
-		t.Fatalf("truncated stats kept GroupSums = %v", decoded.Columns[0].Text.GroupSums)
+	if decoded.Columns[0].Stats.Text.GroupSums != nil {
+		t.Fatalf("truncated stats kept GroupSums = %v", decoded.Columns[0].Stats.Text.GroupSums)
 	}
 }
 
@@ -93,10 +91,9 @@ func TestTextStatsGroupCountsRoundTripV2(t *testing.T) {
 		PageRows: 12,
 		Columns: []ColumnMeta{
 			{
-				Name: "country",
-				Type: types.Text,
-				Rows: 12,
-				Text: &TextStats{
+				Column: types.Column{Name: "country", Type: types.Text},
+				Rows:   12,
+				Stats: ColumnStats{Text: &TextStats{
 					DataBytes: 24,
 					Values:    []string{"CA", "US"},
 					Counts:    []uint32{4, 8},
@@ -106,7 +103,7 @@ func TestTextStatsGroupCountsRoundTripV2(t *testing.T) {
 							"login":    {3, 4},
 						},
 					},
-				},
+				}},
 				Pages: []PageMeta{{Rows: 12, Kind: types.VecText, Encoding: types.EncodingDictionary}},
 			},
 		},
@@ -122,12 +119,12 @@ func TestTextStatsGroupCountsRoundTripV2(t *testing.T) {
 	if err := decoded.LoadAllColumns(); err != nil {
 		t.Fatalf("LoadAllColumns: %v", err)
 	}
-	got := decoded.Columns[0].Text.GroupCounts
-	want := original.Columns[0].Text.GroupCounts
+	got := decoded.Columns[0].Stats.Text.GroupCounts
+	want := original.Columns[0].Stats.Text.GroupCounts
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("GroupCounts = %#v, want %#v", got, want)
 	}
-	if v, ok := decoded.Columns[0].Text.CountByValueAndPeer("event_type", "checkout", 1); !ok || v != 4 {
+	if v, ok := decoded.Columns[0].Stats.Text.CountByValueAndPeer("event_type", "checkout", 1); !ok || v != 4 {
 		t.Fatalf("CountByValueAndPeer = %d, %v; want 4, true", v, ok)
 	}
 }
@@ -208,15 +205,15 @@ func TestWriteSegmentPopulatesSMAForLowCardText(t *testing.T) {
 		t.Fatalf("column count drift")
 	}
 	textCol := smaFindColumn(t, got, "country")
-	if textCol.Text == nil || textCol.Text.GroupSums == nil {
-		t.Fatalf("country.GroupSums missing: %#v", textCol.Text)
+	if textCol.Stats.Text == nil || textCol.Stats.Text.GroupSums == nil {
+		t.Fatalf("country.GroupSums missing: %#v", textCol.Stats.Text)
 	}
-	sums, ok := textCol.Text.GroupSums["amount"]
+	sums, ok := textCol.Stats.Text.GroupSums["amount"]
 	if !ok {
-		t.Fatalf("GroupSums[amount] missing: %#v", textCol.Text.GroupSums)
+		t.Fatalf("GroupSums[amount] missing: %#v", textCol.Stats.Text.GroupSums)
 	}
 	want := map[string]int64{"US": 1 + 3 + 6, "CA": 2 + 5, "GB": 4}
-	for i, value := range textCol.Text.Values {
+	for i, value := range textCol.Stats.Text.Values {
 		if got := sums[i]; got != want[value] {
 			t.Fatalf("GroupSums[amount][%q] = %d, want %d", value, got, want[value])
 		}
@@ -251,33 +248,33 @@ func TestWriteSegmentPopulatesCrossCounts(t *testing.T) {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
 	countryCol := smaFindColumn(t, got, "country")
-	if countryCol.Text.GroupCounts == nil {
-		t.Fatalf("country.GroupCounts missing: %#v", countryCol.Text)
+	if countryCol.Stats.Text.GroupCounts == nil {
+		t.Fatalf("country.GroupCounts missing: %#v", countryCol.Stats.Text)
 	}
-	bySibling, ok := countryCol.Text.GroupCounts["event_type"]
+	bySibling, ok := countryCol.Stats.Text.GroupCounts["event_type"]
 	if !ok {
 		t.Fatalf("country.GroupCounts[event_type] missing")
 	}
 	checkout := bySibling["checkout"]
-	if len(checkout) != len(countryCol.Text.Values) {
-		t.Fatalf("checkout slice len = %d, want %d", len(checkout), len(countryCol.Text.Values))
+	if len(checkout) != len(countryCol.Stats.Text.Values) {
+		t.Fatalf("checkout slice len = %d, want %d", len(checkout), len(countryCol.Stats.Text.Values))
 	}
 	// Hand-tally: checkout matches at rows 0, 2, 3, 6, 7 → US=3, CA=0, GB=2.
 	want := map[string]int64{"US": 3, "CA": 0, "GB": 2}
-	for i, value := range countryCol.Text.Values {
+	for i, value := range countryCol.Stats.Text.Values {
 		if checkout[i] != want[value] {
 			t.Fatalf("checkout[%q] = %d, want %d", value, checkout[i], want[value])
 		}
 	}
 	// Symmetric: event_type column should also have cross-counts back to country.
 	eventCol := smaFindColumn(t, got, "event_type")
-	if eventCol.Text.GroupCounts["country"] == nil {
+	if eventCol.Stats.Text.GroupCounts["country"] == nil {
 		t.Fatalf("event_type.GroupCounts[country] missing")
 	}
-	usCounts := eventCol.Text.GroupCounts["country"]["US"]
+	usCounts := eventCol.Stats.Text.GroupCounts["country"]["US"]
 	// US matches at rows 0, 2, 5, 7 → checkout=3, login=1.
 	wantEvent := map[string]int64{"checkout": 3, "login": 1}
-	for i, value := range eventCol.Text.Values {
+	for i, value := range eventCol.Stats.Text.Values {
 		if usCounts[i] != wantEvent[value] {
 			t.Fatalf("event_type[%q] for country=US = %d, want %d", value, usCounts[i], wantEvent[value])
 		}
@@ -308,9 +305,9 @@ func TestWriteSegmentSMAHandlesInt32(t *testing.T) {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
 	textCol := smaFindColumn(t, got, "country")
-	sums := textCol.Text.GroupSums["amount"]
+	sums := textCol.Stats.Text.GroupSums["amount"]
 	want := map[string]int64{"X": 10 + 30, "Y": 20 + 40}
-	for i, value := range textCol.Text.Values {
+	for i, value := range textCol.Stats.Text.Values {
 		if sums[i] != want[value] {
 			t.Fatalf("GroupSums[amount][%q] = %d, want %d", value, sums[i], want[value])
 		}
@@ -345,11 +342,11 @@ func TestWriteSegmentSkipsSMAForTruncatedText(t *testing.T) {
 		t.Fatalf("ReadSegmentFooter: %v", err)
 	}
 	textCol := smaFindColumn(t, got, "url")
-	if !textCol.Text.Truncated {
-		t.Fatalf("expected truncated, got %#v", textCol.Text)
+	if !textCol.Stats.Text.Truncated {
+		t.Fatalf("expected truncated, got %#v", textCol.Stats.Text)
 	}
-	if textCol.Text.GroupSums != nil {
-		t.Fatalf("truncated stats should have no GroupSums, got %v", textCol.Text.GroupSums)
+	if textCol.Stats.Text.GroupSums != nil {
+		t.Fatalf("truncated stats should have no GroupSums, got %v", textCol.Stats.Text.GroupSums)
 	}
 }
 

@@ -84,7 +84,7 @@ func BenchmarkStorageDecodePage(b *testing.B) {
 		if err != nil {
 			b.Fatalf("encode %s: %v", tc.name, err)
 		}
-		colMeta := ColumnMeta{Name: tc.column.Name, Type: tc.column.Type, Rows: uint32(page.Rows)}
+		colMeta := ColumnMeta{Column: types.Column{Name: tc.column.Name, Type: tc.column.Type}, Rows: uint32(page.Rows)}
 		pageMeta := PageMeta{Rows: uint32(page.Rows), NullCount: uint32(page.NullCount), Kind: page.Kind, Encoding: page.Encoding, Length: uint64(len(page.Payload))}
 		b.Run(tc.name+"/alloc", func(b *testing.B) {
 			b.SetBytes(int64(len(page.Payload)))

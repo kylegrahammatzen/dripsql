@@ -589,7 +589,7 @@ func finalizeColumnInt64Blooms(col *ColumnMeta) {
 		}
 		page.Int64Values.hashes = nil
 	}
-	col.Int64Values = &Int64ValueStats{Truncated: true, HashBloom: bloom}
+	col.Stats.Int64Values = &Int64ValueStats{Truncated: true, HashBloom: bloom}
 }
 
 func finalizeColumnInt32Blooms(col *ColumnMeta) {
@@ -622,7 +622,7 @@ func finalizeColumnInt32Blooms(col *ColumnMeta) {
 		}
 		page.Int32Values.hashes = nil
 	}
-	col.Int32Values = &Int32ValueStats{Truncated: true, HashBloom: bloom}
+	col.Stats.Int32Values = &Int32ValueStats{Truncated: true, HashBloom: bloom}
 }
 
 func anyPageInt64Truncated(col *ColumnMeta) bool {
@@ -686,8 +686,8 @@ func countTruncatedInt32Hashes(col *ColumnMeta) (int, bool) {
 }
 
 func clearInt64ValueStatHashes(col *ColumnMeta) {
-	if col.Int64Values != nil {
-		col.Int64Values.hashes = nil
+	if col.Stats.Int64Values != nil {
+		col.Stats.Int64Values.hashes = nil
 	}
 	for i := range col.Pages {
 		if col.Pages[i].Int64Values != nil {
@@ -697,8 +697,8 @@ func clearInt64ValueStatHashes(col *ColumnMeta) {
 }
 
 func clearInt32ValueStatHashes(col *ColumnMeta) {
-	if col.Int32Values != nil {
-		col.Int32Values.hashes = nil
+	if col.Stats.Int32Values != nil {
+		col.Stats.Int32Values.hashes = nil
 	}
 	for i := range col.Pages {
 		if col.Pages[i].Int32Values != nil {
@@ -708,7 +708,7 @@ func clearInt32ValueStatHashes(col *ColumnMeta) {
 }
 
 func finalizeColumnUUIDBlooms(col *ColumnMeta) {
-	if col.UUID == nil {
+	if col.Stats.UUID == nil {
 		return
 	}
 	valueCount := 0
@@ -717,7 +717,7 @@ func finalizeColumnUUIDBlooms(col *ColumnMeta) {
 			continue
 		}
 		if len(page.UUID.hashes) == 0 {
-			col.UUID.HashBloom = nil
+			col.Stats.UUID.HashBloom = nil
 			return
 		}
 		valueCount += len(page.UUID.hashes)
@@ -732,7 +732,7 @@ func finalizeColumnUUIDBlooms(col *ColumnMeta) {
 			continue
 		}
 		if len(page.UUID.hashes) == 0 {
-			col.UUID.HashBloom = nil
+			col.Stats.UUID.HashBloom = nil
 			return
 		}
 		pageBloom := newTextPageHashBloom(len(page.UUID.hashes))
@@ -743,12 +743,12 @@ func finalizeColumnUUIDBlooms(col *ColumnMeta) {
 		page.UUID.hashes = nil
 		page.UUID.HashBloom = pageBloom
 	}
-	col.UUID.hashes = nil
-	col.UUID.HashBloom = bloom
+	col.Stats.UUID.hashes = nil
+	col.Stats.UUID.HashBloom = bloom
 }
 
 func finalizeColumnTextBlooms(col *ColumnMeta) {
-	if col.Text == nil || !col.Text.Truncated {
+	if col.Stats.Text == nil || !col.Stats.Text.Truncated {
 		return
 	}
 	valueCount := 0
@@ -758,7 +758,7 @@ func finalizeColumnTextBlooms(col *ColumnMeta) {
 		}
 		if page.Text.Truncated {
 			if len(page.Text.hashes) == 0 {
-				col.Text.HashBloom = nil
+				col.Stats.Text.HashBloom = nil
 				return
 			}
 			valueCount += len(page.Text.hashes)
@@ -778,7 +778,7 @@ func finalizeColumnTextBlooms(col *ColumnMeta) {
 		}
 		if page.Text.Truncated {
 			if len(page.Text.hashes) == 0 {
-				col.Text.HashBloom = nil
+				col.Stats.Text.HashBloom = nil
 				return
 			}
 			pageBloom := newTextPageHashBloom(len(page.Text.hashes))
@@ -799,8 +799,8 @@ func finalizeColumnTextBlooms(col *ColumnMeta) {
 	if !hasValue {
 		return
 	}
-	col.Text.hashes = nil
-	col.Text.HashBloom = bloom
+	col.Stats.Text.hashes = nil
+	col.Stats.Text.HashBloom = bloom
 }
 
 func newTextPageHashBloom(valueCount int) []uint64 {

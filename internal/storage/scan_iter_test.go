@@ -777,7 +777,7 @@ func TestPredicatePruneTextStats(t *testing.T) {
 		}
 	}
 
-	exactMeta := SegmentMeta{Columns: []ColumnMeta{{Name: "event_type", Pages: []PageMeta{{Rows: 2, Text: &TextStats{Values: []string{"checkout", "login"}, Counts: []uint32{1, 1}}}}}}}
+	exactMeta := SegmentMeta{Columns: []ColumnMeta{{Column: types.Column{Name: "event_type"}, Pages: []PageMeta{{Rows: 2, Text: &TextStats{Values: []string{"checkout", "login"}, Counts: []uint32{1, 1}}}}}}}
 	assertPruneCandidate(t, exactMeta, Predicate{Column: "event_type", Op: PredicateOpEq, Text: "missing"}, false)
 	assertPruneCandidate(t, exactMeta, Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}, true)
 	assertPruneCandidate(t, exactMeta, Predicate{Column: "event_type", Op: PredicateOpIn, Texts: []string{"missing", "absent"}}, false)
@@ -786,7 +786,7 @@ func TestPredicatePruneTextStats(t *testing.T) {
 	bloom := newTextPageHashBloom(2)
 	hashBloomAdd(bloom, textHash32String("checkout"), textPageBloomProbes)
 	hashBloomAdd(bloom, textHash32String("login"), textPageBloomProbes)
-	truncatedMeta := SegmentMeta{Columns: []ColumnMeta{{Name: "event_type", Pages: []PageMeta{{Rows: 3, Text: &TextStats{HashBloom: bloom, Truncated: true}}}}}}
+	truncatedMeta := SegmentMeta{Columns: []ColumnMeta{{Column: types.Column{Name: "event_type"}, Pages: []PageMeta{{Rows: 3, Text: &TextStats{HashBloom: bloom, Truncated: true}}}}}}
 	absent := missingTextBloomValueAcross(textPageBloomProbes, truncatedMeta.Columns[0].Pages[0].Text.HashBloom)
 	assertPruneCandidate(t, truncatedMeta, Predicate{Column: "event_type", Op: PredicateOpEq, Text: absent}, false)
 	assertPruneCandidate(t, truncatedMeta, Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}, true)
@@ -811,11 +811,11 @@ func TestPredicatePruneSegmentTextHashStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment B: %v", err)
 	}
-	if metaA.Columns[1].Text == nil || !metaA.Columns[1].Text.Truncated || len(metaA.Columns[1].Text.hashes) != 0 || len(metaA.Columns[1].Text.HashBloom) == 0 {
-		t.Fatalf("segment A text stats = %#v", metaA.Columns[1].Text)
+	if metaA.Columns[1].Stats.Text == nil || !metaA.Columns[1].Stats.Text.Truncated || len(metaA.Columns[1].Stats.Text.hashes) != 0 || len(metaA.Columns[1].Stats.Text.HashBloom) == 0 {
+		t.Fatalf("segment A text stats = %#v", metaA.Columns[1].Stats.Text)
 	}
-	if metaB.Columns[1].Text == nil || !metaB.Columns[1].Text.Truncated || len(metaB.Columns[1].Text.hashes) != 0 || len(metaB.Columns[1].Text.HashBloom) == 0 {
-		t.Fatalf("segment B text stats = %#v", metaB.Columns[1].Text)
+	if metaB.Columns[1].Stats.Text == nil || !metaB.Columns[1].Stats.Text.Truncated || len(metaB.Columns[1].Stats.Text.hashes) != 0 || len(metaB.Columns[1].Stats.Text.HashBloom) == 0 {
+		t.Fatalf("segment B text stats = %#v", metaB.Columns[1].Stats.Text)
 	}
 
 	pred := Predicate{Column: "event_type", Op: PredicateOpEq, Text: eventsB[len(eventsB)/2]}
@@ -826,7 +826,7 @@ func TestPredicatePruneSegmentTextHashStats(t *testing.T) {
 		t.Fatalf("segment B candidate for segment B value = false")
 	}
 
-	absent := missingTextBloomValueAcross(textSegmentBloomProbes, metaA.Columns[1].Text.HashBloom, metaB.Columns[1].Text.HashBloom)
+	absent := missingTextBloomValueAcross(textSegmentBloomProbes, metaA.Columns[1].Stats.Text.HashBloom, metaB.Columns[1].Stats.Text.HashBloom)
 	pred = Predicate{Column: "event_type", Op: PredicateOpEq, Text: absent}
 	if got := BindPrunePredicate(pred, metaA).SegmentCandidate(); got {
 		t.Fatalf("segment A candidate for absent value %q = true", absent)
@@ -935,7 +935,7 @@ func TestSegmentScanIteratorBloomPrunesTruncatedInt64ValueStats(t *testing.T) {
 }
 
 func TestPredicatePruneValueStatsCompoundSafety(t *testing.T) {
-	meta := SegmentMeta{Columns: []ColumnMeta{{Name: "tenant_id", Pages: []PageMeta{{Rows: 2, Int64: &Int64Stats{Min: 1, Max: 3}, Int64Values: &Int64ValueStats{Values: []int64{1, 3}}}}}}}
+	meta := SegmentMeta{Columns: []ColumnMeta{{Column: types.Column{Name: "tenant_id"}, Pages: []PageMeta{{Rows: 2, Int64: &Int64Stats{Min: 1, Max: 3}, Int64Values: &Int64ValueStats{Values: []int64{1, 3}}}}}}}
 	eq2 := Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 2}
 	eq3 := Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 3}
 	assertPruneCandidate := func(pred Predicate, want bool) {

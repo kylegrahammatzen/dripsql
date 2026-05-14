@@ -254,19 +254,19 @@ func (a *segmentSMAAccumulator) finalize(cols []ColumnMeta) {
 	}
 	for ti, tcolIdx := range a.textCols {
 		col := &cols[tcolIdx]
-		if col.Text == nil || col.Text.Truncated {
+		if col.Stats.Text == nil || col.Stats.Text.Truncated {
 			continue
 		}
 		if len(a.segmentSums) > 0 {
-			col.Text.GroupSums = make(map[string][]int64, len(a.intCols))
+			col.Stats.Text.GroupSums = make(map[string][]int64, len(a.intCols))
 			for ji, icolIdx := range a.intCols {
 				intColName := cols[icolIdx].Name
 				sums := a.segmentSums[ti][ji]
-				parallel := make([]int64, len(col.Text.Values))
-				for i, value := range col.Text.Values {
+				parallel := make([]int64, len(col.Stats.Text.Values))
+				for i, value := range col.Stats.Text.Values {
 					parallel[i] = sums[value]
 				}
-				col.Text.GroupSums[intColName] = parallel
+				col.Stats.Text.GroupSums[intColName] = parallel
 			}
 		}
 		if len(a.segmentCross) == 0 {
@@ -274,28 +274,28 @@ func (a *segmentSMAAccumulator) finalize(cols []ColumnMeta) {
 		}
 		// Cross-counts: this column's GroupCounts[siblingCol][siblingValue]
 		// gets a slice parallel to this column's Values.
-		col.Text.GroupCounts = make(map[string]map[string][]int64, len(a.textCols)-1)
+		col.Stats.Text.GroupCounts = make(map[string]map[string][]int64, len(a.textCols)-1)
 		for tj, tcolIdx2 := range a.textCols {
 			if ti == tj {
 				continue
 			}
 			sibling := &cols[tcolIdx2]
-			if sibling.Text == nil || sibling.Text.Truncated {
+			if sibling.Stats.Text == nil || sibling.Stats.Text.Truncated {
 				continue
 			}
 			pairs := a.segmentCross[ti][tj]
 			if len(pairs) == 0 {
 				continue
 			}
-			bySibling := make(map[string][]int64, len(sibling.Text.Values))
-			for _, siblingValue := range sibling.Text.Values {
-				parallel := make([]int64, len(col.Text.Values))
-				for i, ownValue := range col.Text.Values {
+			bySibling := make(map[string][]int64, len(sibling.Stats.Text.Values))
+			for _, siblingValue := range sibling.Stats.Text.Values {
+				parallel := make([]int64, len(col.Stats.Text.Values))
+				for i, ownValue := range col.Stats.Text.Values {
 					parallel[i] = pairs[crossKey{v1: ownValue, v2: siblingValue}]
 				}
 				bySibling[siblingValue] = parallel
 			}
-			col.Text.GroupCounts[cols[tcolIdx2].Name] = bySibling
+			col.Stats.Text.GroupCounts[cols[tcolIdx2].Name] = bySibling
 		}
 	}
 }

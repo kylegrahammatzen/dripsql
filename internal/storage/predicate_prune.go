@@ -102,13 +102,13 @@ func pruneSegmentLeafCandidate(meta SegmentMeta, pred boundNode) bool {
 	if col.AllNull {
 		return false
 	}
-	if col.Bool != nil && !pruneBoolCandidate(*col.Bool, pred) {
+	if col.Stats.Bool != nil && !pruneBoolCandidate(*col.Stats.Bool, pred) {
 		return false
 	}
-	if col.Int64 != nil && !pruneInt64RangeCandidate(*col.Int64, pred) {
+	if col.Stats.Int64 != nil && !pruneInt64RangeCandidate(*col.Stats.Int64, pred) {
 		return false
 	}
-	if col.Int32 != nil && !pruneInt64RangeCandidate(Int64Stats{Min: int64(col.Int32.Min), Max: int64(col.Int32.Max)}, pred) {
+	if col.Stats.Int32 != nil && !pruneInt64RangeCandidate(Int64Stats{Min: int64(col.Stats.Int32.Min), Max: int64(col.Stats.Int32.Max)}, pred) {
 		return false
 	}
 	// Heavy stats may give tighter pruning. Conservatively keep the segment
@@ -117,16 +117,16 @@ func pruneSegmentLeafCandidate(meta SegmentMeta, pred boundNode) bool {
 		return true
 	}
 	col = meta.Columns[pred.colIndex]
-	if col.Int64Values != nil && !pruneInt64ValueSegmentCandidate(*col.Int64Values, pred) {
+	if col.Stats.Int64Values != nil && !pruneInt64ValueSegmentCandidate(*col.Stats.Int64Values, pred) {
 		return false
 	}
-	if col.Int32Values != nil && !pruneInt32ValueSegmentCandidate(*col.Int32Values, pred) {
+	if col.Stats.Int32Values != nil && !pruneInt32ValueSegmentCandidate(*col.Stats.Int32Values, pred) {
 		return false
 	}
-	if col.Text != nil && !pruneTextSegmentCandidate(*col.Text, pred) {
+	if col.Stats.Text != nil && !pruneTextSegmentCandidate(*col.Stats.Text, pred) {
 		return false
 	}
-	if col.UUID != nil && !pruneUUIDSegmentCandidate(*col.UUID, pred) {
+	if col.Stats.UUID != nil && !pruneUUIDSegmentCandidate(*col.Stats.UUID, pred) {
 		return false
 	}
 	return true
