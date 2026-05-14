@@ -19,13 +19,13 @@ func (base SegmentScanIterator) RunParallel(
 	ctx context.Context,
 	workers int,
 	fn func(workerIdx int, it SegmentScanIterator) error,
-) ([]ExecStats, error) {
+) ([]QueryStats, error) {
 	if workers <= 0 || len(base.Segments) == 0 {
 		return nil, nil
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	stats := make([]ExecStats, workers)
+	stats := make([]QueryStats, workers)
 	errCh := make(chan error, workers)
 	var wg sync.WaitGroup
 	for w := range workers {

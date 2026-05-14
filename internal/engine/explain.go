@@ -20,19 +20,19 @@ type executionTrace struct {
 type scanTrace struct {
 	table v3sql.BoundTableDef
 	where *v3sql.BoundExpr
-	stats storage.ExecStats
+	stats storage.QueryStats
 }
 
 // recordScan is the nil-safe wrapper around addScan; nearly every caller
 // guarded the underlying call with `if trace != nil`, which adds 2 lines
 // per call site. Keeping the guard in one place is cleaner.
-func (t *executionTrace) recordScan(plan *v3sql.ScanPlan, stats storage.ExecStats) {
+func (t *executionTrace) recordScan(plan *v3sql.ScanPlan, stats storage.QueryStats) {
 	if t != nil {
 		t.addScan(plan, stats)
 	}
 }
 
-func (t *executionTrace) addScan(plan *v3sql.ScanPlan, stats storage.ExecStats) {
+func (t *executionTrace) addScan(plan *v3sql.ScanPlan, stats storage.QueryStats) {
 	if t == nil || plan == nil {
 		return
 	}
@@ -138,8 +138,8 @@ func explainReport(plan v3sql.Plan, trace *executionTrace, counter *v3exec.Expla
 	return report
 }
 
-func combinedScanStats(trace *executionTrace) storage.ExecStats {
-	var out storage.ExecStats
+func combinedScanStats(trace *executionTrace) storage.QueryStats {
+	var out storage.QueryStats
 	if trace == nil {
 		return out
 	}
@@ -468,7 +468,7 @@ func intPruneKind(kind types.Kind) bool {
 	}
 }
 
-func pruneEffect(stats storage.ExecStats, eligible bool) string {
+func pruneEffect(stats storage.QueryStats, eligible bool) string {
 	if !eligible {
 		return "not eligible"
 	}
@@ -560,7 +560,7 @@ func aggregateStrategy(spec v3sql.AggSpec, metadataOnly bool) string {
 	}
 }
 
-func explainRead(plan v3sql.Plan, trace *executionTrace, stats storage.ExecStats) Read {
+func explainRead(plan v3sql.Plan, trace *executionTrace, stats storage.QueryStats) Read {
 	read := Read{PayloadBytes: stats.PayloadBytesRead}
 	if hasPredicateScan(trace) {
 		read.PredicatePayloadBytes = stats.PayloadBytesRead

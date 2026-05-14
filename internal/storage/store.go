@@ -409,7 +409,7 @@ func bufferedScanSegment(buffer *IngestBuffer) *ScanSegment {
 	return &ScanSegment{Pages: pages}
 }
 
-func (s *Store) ScanIterator(ctx context.Context, table types.TableSpec, pred PredicateEvaluator, stats *ExecStats) (SegmentScanIterator, error) {
+func (s *Store) ScanIterator(ctx context.Context, table types.TableSpec, pred PredicateEvaluator, stats *QueryStats) (SegmentScanIterator, error) {
 	segments, err := s.ScanSegments(ctx, table)
 	if err != nil {
 		return SegmentScanIterator{}, err
@@ -417,7 +417,7 @@ func (s *Store) ScanIterator(ctx context.Context, table types.TableSpec, pred Pr
 	return SegmentScanIterator{Context: ctx, Segments: segments, Predicate: pred, Stats: stats, fileCache: s.files, byteCache: s.byteCache}, nil
 }
 
-func (s *Store) ScanIteratorForPredicate(ctx context.Context, table types.TableSpec, pred Predicate, stats *ExecStats) (SegmentScanIterator, error) {
+func (s *Store) ScanIteratorForPredicate(ctx context.Context, table types.TableSpec, pred Predicate, stats *QueryStats) (SegmentScanIterator, error) {
 	segments, err := s.ScanSegments(ctx, table)
 	if err != nil {
 		return SegmentScanIterator{}, err

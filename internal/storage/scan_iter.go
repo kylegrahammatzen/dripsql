@@ -26,7 +26,7 @@ type SegmentScanIterator struct {
 	Prune                Predicate
 	OutputColumns        []string
 	EncodedOutputColumns map[string]struct{}
-	Stats                *ExecStats
+	Stats                *QueryStats
 	fileCache            *segmentFileCache
 	byteCache            *segmentByteCache
 	readPlans            []*SegmentReadPlan

@@ -81,7 +81,7 @@ type Timing struct {
 	Samples int   `json:"samples"`
 }
 
-func ReductionFromStats(stats storage.ExecStats) Reduction {
+func ReductionFromStats(stats storage.QueryStats) Reduction {
 	return Reduction{
 		Segments: NewCounter(stats.SegmentsTotal, stats.SegmentsCandidate),
 		Pages:    NewCounter(stats.PagesTotal, stats.PagesCandidate),

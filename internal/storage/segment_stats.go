@@ -40,19 +40,19 @@ const (
 	textPageBloomProbes          = 8
 )
 
-type Int32Stats struct {
-	Min      int32
-	Max      int32
+// NumericStats carries min/max plus a checked-overflow int64 sum for any
+// integer kind, replacing the parallel Int32Stats and Int64Stats. The old
+// names remain as aliases so external code that still references them
+// compiles unchanged.
+type NumericStats[T int32 | int64] struct {
+	Min      T
+	Max      T
 	Sum      int64
 	SumValid bool
 }
 
-type Int64Stats struct {
-	Min      int64
-	Max      int64
-	Sum      int64
-	SumValid bool
-}
+type Int32Stats = NumericStats[int32]
+type Int64Stats = NumericStats[int64]
 
 type BoolStats struct {
 	HasTrue  bool
@@ -132,7 +132,7 @@ type UUIDStats struct {
 	hashes    []uint32
 }
 
-type ExecStats struct {
+type QueryStats struct {
 	SegmentsTotal     int64
 	SegmentsCandidate int64
 	PagesTotal        int64
@@ -143,7 +143,7 @@ type ExecStats struct {
 	PayloadBytesRead  int64
 }
 
-func (s *ExecStats) ObserveSegment(candidate bool) {
+func (s *QueryStats) ObserveSegment(candidate bool) {
 	if s == nil {
 		return
 	}
@@ -153,7 +153,7 @@ func (s *ExecStats) ObserveSegment(candidate bool) {
 	}
 }
 
-func (s *ExecStats) ObservePage(rows int, payloadBytes int, matched int, candidate bool) {
+func (s *QueryStats) ObservePage(rows int, payloadBytes int, matched int, candidate bool) {
 	if s == nil {
 		return
 	}
@@ -174,14 +174,14 @@ func applyPageStats(page *PageMeta, v types.Vec) {
 	case types.VecBool:
 		page.Bool = boolStats(v.BoolBits, v.Len, v.Valid)
 	case types.VecInt16:
-		page.Int32 = int32Stats(v.I16[:v.Len], v.Valid)
-		page.Int32Values = int32ValueStats(v.I16[:v.Len], v.Valid)
+		page.Int32 = int16NumericStats(v.I16[:v.Len], v.Valid)
+		page.Int32Values = int16NumericValueStats(v.I16[:v.Len], v.Valid)
 	case types.VecInt32, types.VecDate:
-		page.Int32 = int32Stats(v.I32[:v.Len], v.Valid)
-		page.Int32Values = int32ValueStats(v.I32[:v.Len], v.Valid)
+		page.Int32 = computeNumericStats(v.I32[:v.Len], v.Valid)
+		page.Int32Values = computeNumericValueStats(v.I32[:v.Len], v.Valid)
 	case types.VecInt64, types.VecDecimal64, types.VecTimestamp, types.VecTime:
-		page.Int64 = int64Stats(v.I64[:v.Len], v.Valid)
-		page.Int64Values = int64ValueStats(v.I64[:v.Len], v.Valid)
+		page.Int64 = computeNumericStats(v.I64[:v.Len], v.Valid)
+		page.Int64Values = computeNumericValueStats(v.I64[:v.Len], v.Valid)
 	case types.VecText, types.VecBytes, types.VecJSON:
 		page.Text = textStats(v.Var, v.Valid)
 	case types.VecUUID:
@@ -210,41 +210,18 @@ func boolStats(values []uint64, rows int, valid types.Validity) *BoolStats {
 	return &out
 }
 
-func int32Stats[T ~int16 | ~int32](values []T, valid types.Validity) *Int32Stats {
-	out := Int32Stats{SumValid: true}
-	ok := false
-	for row, value := range values {
-		if !types.IsValid(valid, row) {
-			continue
-		}
-		v := int32(value)
-		out.Sum += int64(v)
-		if !ok {
-			out.Min, out.Max, ok = v, v, true
-			continue
-		}
-		if v < out.Min {
-			out.Min = v
-		}
-		if v > out.Max {
-			out.Max = v
-		}
-	}
-	if !ok {
-		return nil
-	}
-	return &out
-}
-
-func int64Stats(values []int64, valid types.Validity) *Int64Stats {
-	out := Int64Stats{SumValid: true}
+// computeNumericStats walks a slice of integer values and produces min/max
+// plus an overflow-checked int64 sum, used at both page and segment level
+// for any width once promoted into NumericStats[int32] or [int64].
+func computeNumericStats[T int32 | int64](values []T, valid types.Validity) *NumericStats[T] {
+	out := NumericStats[T]{SumValid: true}
 	ok := false
 	for row, value := range values {
 		if !types.IsValid(valid, row) {
 			continue
 		}
 		if out.SumValid {
-			if sum, ok := addInt64Stat(out.Sum, value); ok {
+			if sum, sok := addInt64Stat(out.Sum, int64(value)); sok {
 				out.Sum = sum
 			} else {
 				out.SumValid = false
@@ -267,16 +244,52 @@ func int64Stats(values []int64, valid types.Validity) *Int64Stats {
 	return &out
 }
 
-func int32ValueStats[T ~int16 | ~int32](values []T, valid types.Validity) *Int32ValueStats {
-	out := &Int32ValueStats{Values: make([]int32, 0, min(len(values), ValueStatsMaxValues))}
-	seen := make(map[int32]struct{}, min(len(values), ValueStatsMaxValues))
+// int16NumericStats promotes int16 values into NumericStats[int32] inline
+// so VecInt16 columns share the same NumericStats slot as VecInt32.
+func int16NumericStats(values []int16, valid types.Validity) *NumericStats[int32] {
+	out := NumericStats[int32]{SumValid: true}
+	ok := false
+	for row, value := range values {
+		if !types.IsValid(valid, row) {
+			continue
+		}
+		v := int32(value)
+		if out.SumValid {
+			if sum, sok := addInt64Stat(out.Sum, int64(v)); sok {
+				out.Sum = sum
+			} else {
+				out.SumValid = false
+			}
+		}
+		if !ok {
+			out.Min, out.Max, ok = v, v, true
+			continue
+		}
+		if v < out.Min {
+			out.Min = v
+		}
+		if v > out.Max {
+			out.Max = v
+		}
+	}
+	if !ok {
+		return nil
+	}
+	return &out
+}
+
+// computeNumericValueStats records up to ValueStatsMaxValues distinct values
+// from a numeric column, falling back to a hash list once the cap blows.
+func computeNumericValueStats[T int32 | int64](values []T, valid types.Validity) *ValueStats[T] {
+	out := &ValueStats[T]{Values: make([]T, 0, min(len(values), ValueStatsMaxValues))}
+	seen := make(map[T]struct{}, min(len(values), ValueStatsMaxValues))
 	ok := false
 	for row, value := range values {
 		if !types.IsValid(valid, row) {
 			continue
 		}
 		ok = true
-		addValueStat(out, seen, int32(value), int64(value))
+		addValueStat(out, seen, value, int64(value))
 	}
 	if !ok {
 		return nil
@@ -284,16 +297,19 @@ func int32ValueStats[T ~int16 | ~int32](values []T, valid types.Validity) *Int32
 	return out
 }
 
-func int64ValueStats(values []int64, valid types.Validity) *Int64ValueStats {
-	out := &Int64ValueStats{Values: make([]int64, 0, min(len(values), ValueStatsMaxValues))}
-	seen := make(map[int64]struct{}, min(len(values), ValueStatsMaxValues))
+// int16NumericValueStats promotes int16 inline so VecInt16 reuses the
+// int32-keyed ValueStats slot on PageMeta.
+func int16NumericValueStats(values []int16, valid types.Validity) *ValueStats[int32] {
+	out := &ValueStats[int32]{Values: make([]int32, 0, min(len(values), ValueStatsMaxValues))}
+	seen := make(map[int32]struct{}, min(len(values), ValueStatsMaxValues))
 	ok := false
 	for row, value := range values {
 		if !types.IsValid(valid, row) {
 			continue
 		}
 		ok = true
-		addValueStat(out, seen, value, value)
+		v := int32(value)
+		addValueStat(out, seen, v, int64(v))
 	}
 	if !ok {
 		return nil
@@ -458,29 +474,10 @@ func mergeBoolStats(left *BoolStats, right *BoolStats) *BoolStats {
 	return left
 }
 
-func mergeInt32Stats(left *Int32Stats, right *Int32Stats) *Int32Stats {
-	if right == nil {
-		return left
-	}
-	if left == nil {
-		copy := *right
-		return &copy
-	}
-	if left.SumValid && right.SumValid {
-		left.Sum += right.Sum
-	} else {
-		left.SumValid = false
-	}
-	if right.Min < left.Min {
-		left.Min = right.Min
-	}
-	if right.Max > left.Max {
-		left.Max = right.Max
-	}
-	return left
-}
-
-func mergeInt64Stats(left *Int64Stats, right *Int64Stats) *Int64Stats {
+// mergeNumericStats folds right into left for either int32- or int64-typed
+// NumericStats, using checked addition so segment-level sums survive long
+// chains of merges without silent overflow.
+func mergeNumericStats[T int32 | int64](left, right *NumericStats[T]) *NumericStats[T] {
 	if right == nil {
 		return left
 	}

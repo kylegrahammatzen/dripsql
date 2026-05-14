@@ -142,7 +142,7 @@ func (db *DB) runScan(ctx context.Context, plan *v3sql.ScanPlan, consumer v3exec
 		}
 	}
 
-	stats := &storage.ExecStats{}
+	stats := &storage.QueryStats{}
 	var it storage.SegmentScanIterator
 	if pushExpr == nil {
 		it, err = db.data.ScanIterator(ctx, entry.spec, nil, stats)
@@ -840,7 +840,7 @@ func textStatsForColumn(meta storage.SegmentMeta, column string) (*storage.TextS
 // metadata fast-paths. Returns ok=true when every page was pruned (so the
 // fast-path can answer the aggregate from metadata alone), ok=false when at
 // least one page survives and the caller must fall back to a scan.
-func metadataPruneAllPages(segments []storage.ScanSegment, pred storage.Predicate, stats *storage.ExecStats) bool {
+func metadataPruneAllPages(segments []storage.ScanSegment, pred storage.Predicate, stats *storage.QueryStats) bool {
 	for _, segment := range segments {
 		prune := storage.BindPrunePredicate(pred, segment.Meta)
 		if !prune.SegmentCandidate() {
@@ -882,7 +882,7 @@ func (db *DB) scalarMetadataBatch(ctx context.Context, source v3sql.Plan, specs 
 		}
 		metas[i] = ms
 	}
-	stats := storage.ExecStats{}
+	stats := storage.QueryStats{}
 	for _, segment := range segments {
 		stats.ObserveSegment(true)
 		for _, info := range segment.PageInfos {
@@ -923,7 +923,7 @@ func (db *DB) countStarMetadataBatch(ctx context.Context, source v3sql.Plan, spe
 		return batch, true, err
 	}
 
-	stats := storage.ExecStats{}
+	stats := storage.QueryStats{}
 	if !metadataPruneAllPages(segments, pred, &stats) {
 		return types.Batch{}, false, nil
 	}
@@ -932,7 +932,7 @@ func (db *DB) countStarMetadataBatch(ctx context.Context, source v3sql.Plan, spe
 	return batch, true, err
 }
 
-func observeMetadataSkippedPages(stats *storage.ExecStats, infos []storage.SegmentPageInfo) {
+func observeMetadataSkippedPages(stats *storage.QueryStats, infos []storage.SegmentPageInfo) {
 	for _, info := range infos {
 		stats.ObservePage(int(info.Rows), 0, 0, false)
 	}
@@ -958,7 +958,7 @@ func (db *DB) sumMetadataBatch(ctx context.Context, source v3sql.Plan, specs []v
 		return types.Batch{}, false, err
 	}
 
-	stats := storage.ExecStats{}
+	stats := storage.QueryStats{}
 	if !metadataPruneAllPages(segments, pred, &stats) {
 		return types.Batch{}, false, nil
 	}
@@ -1031,7 +1031,7 @@ func (db *DB) parallelScanIterator(ctx context.Context, scan *v3sql.ScanPlan) (s
 	if err != nil {
 		return storage.SegmentScanIterator{}, storage.Predicate{}, false, false, err
 	}
-	baseStats := &storage.ExecStats{}
+	baseStats := &storage.QueryStats{}
 	if pushExpr == nil {
 		base, err := db.data.ScanIterator(ctx, entry.spec, nil, baseStats)
 		if err != nil {
@@ -1070,7 +1070,7 @@ func consumeAggregateIterator(it storage.SegmentScanIterator, sinks []v3exec.Agg
 	})
 }
 
-func mergeExecStats(dst *storage.ExecStats, src storage.ExecStats) {
+func mergeExecStats(dst *storage.QueryStats, src storage.QueryStats) {
 	dst.SegmentsTotal += src.SegmentsTotal
 	dst.SegmentsCandidate += src.SegmentsCandidate
 	dst.PagesTotal += src.PagesTotal
@@ -1092,14 +1092,14 @@ func runParallelAggregate[S any](
 	configure func(base *storage.SegmentScanIterator),
 	factory func() S,
 	consume func(it storage.SegmentScanIterator, state S) error,
-) (states []S, stats storage.ExecStats, ok bool, err error) {
+) (states []S, stats storage.QueryStats, ok bool, err error) {
 	base, pushPred, hasPushPred, ok, err := db.parallelScanIterator(ctx, scan)
 	if err != nil || !ok {
-		return nil, storage.ExecStats{}, false, err
+		return nil, storage.QueryStats{}, false, err
 	}
 	workers := min(len(base.Segments), runtime.GOMAXPROCS(0))
 	if workers < 2 {
-		return nil, storage.ExecStats{}, false, nil
+		return nil, storage.QueryStats{}, false, nil
 	}
 	if configure != nil {
 		configure(&base)
@@ -1115,7 +1115,7 @@ func runParallelAggregate[S any](
 		return consume(it, states[w])
 	})
 	if err != nil {
-		return states, storage.ExecStats{}, true, err
+		return states, storage.QueryStats{}, true, err
 	}
 	for w := range states {
 		mergeExecStats(&stats, perWorkerStats[w])
@@ -1282,26 +1282,26 @@ func groupTextCountSumBatch(group v3sql.BoundExpr, specs []v3sql.AggSpec, groups
 	return types.NewBatch(cols)
 }
 
-func countStarTextPredicateMetadata(segments []storage.ScanSegment, pred storage.Predicate) (int64, storage.ExecStats, bool) {
+func countStarTextPredicateMetadata(segments []storage.ScanSegment, pred storage.Predicate) (int64, storage.QueryStats, bool) {
 	if pred.Op != storage.PredicateOpEq && pred.Op != storage.PredicateOpIn {
-		return 0, storage.ExecStats{}, false
+		return 0, storage.QueryStats{}, false
 	}
 	var count int64
-	stats := storage.ExecStats{}
+	stats := storage.QueryStats{}
 	for _, segment := range segments {
 		text, pages, ok := textStatsForColumn(segment.Meta, pred.Column)
 		if !ok {
-			return 0, storage.ExecStats{}, false
+			return 0, storage.QueryStats{}, false
 		}
 		segmentCount, ok := textStatsPredicateCount(text, pred)
 		if !ok {
-			return 0, storage.ExecStats{}, false
+			return 0, storage.QueryStats{}, false
 		}
 		stats.ObserveSegment(segmentCount != 0)
 		for pageIndex, info := range segment.PageInfos {
 			pageCount, ok := textStatsPredicateCount(pages[pageIndex].Text, pred)
 			if !ok {
-				return 0, storage.ExecStats{}, false
+				return 0, storage.QueryStats{}, false
 			}
 			stats.ObservePage(int(info.Rows), 0, int(pageCount), pageCount != 0)
 		}
@@ -1358,7 +1358,7 @@ func (db *DB) groupedTextCountMetadataBatch(ctx context.Context, source v3sql.Pl
 	if sumCol != "" {
 		sums = make(map[string]int64)
 	}
-	stats := storage.ExecStats{}
+	stats := storage.QueryStats{}
 	for _, segment := range segments {
 		text, _, ok := textStatsForColumn(segment.Meta, group.Column)
 		if !ok || !textStatsExact(text) {

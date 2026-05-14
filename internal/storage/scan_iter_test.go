@@ -12,7 +12,7 @@ import (
 
 func TestSegmentScanIteratorWalksPagesAndStats(t *testing.T) {
 	batch := predicateBatch(t)
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	it := SegmentScanIterator{
 		Segments: []ScanSegment{{Pages: []ScanPage{{Batch: batch, PayloadBytes: 64}, {Batch: batch, PayloadBytes: 32}}}},
 		Stats:    stats,
@@ -65,7 +65,7 @@ func TestSegmentScanIteratorReusesSelectionMaskAcrossPages(t *testing.T) {
 
 func TestSegmentScanIteratorPredicateSkipsEmptyPage(t *testing.T) {
 	batch := predicateBatch(t)
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	it := SegmentScanIterator{
 		Segments:  []ScanSegment{{Pages: []ScanPage{{Batch: batch, PayloadBytes: 64}}}},
 		Predicate: NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 999}),
@@ -102,7 +102,7 @@ func TestSegmentScanIteratorReadsPersistedSegment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Stats: stats}
 
 	visits := 0
@@ -174,7 +174,7 @@ func TestSegmentScanIteratorPersistedPredicateSkipsEmptyPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	it := SegmentScanIterator{
 		Segments:  []ScanSegment{{Path: path, Meta: meta}},
 		Predicate: NewPredicateEvaluator(Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 42}),
@@ -207,7 +207,7 @@ func TestSegmentScanIteratorReadsOutputColumns(t *testing.T) {
 		t.Fatalf("buildSegmentPageInfos: %v", err)
 	}
 	pred := Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	it := SegmentScanIterator{
 		Segments:      []ScanSegment{{Path: path, Meta: meta, PageInfos: infos}},
 		Predicate:     NewPredicateEvaluator(pred),
@@ -280,7 +280,7 @@ func TestSegmentScanIteratorLateMaterializesSelectedFOROutput(t *testing.T) {
 	if meta.Columns[0].Pages[0].Encoding != types.EncodingFORBitPack {
 		t.Fatalf("encoding = %s, want for+bitpack", meta.Columns[0].Pages[0].Encoding)
 	}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	pred := Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}
 	it := SegmentScanIterator{
 		Segments:      []ScanSegment{{Path: path, Meta: meta}},
@@ -469,7 +469,7 @@ func TestSegmentScanIteratorSkipsLateOutputWhenPredicateMatchesNothing(t *testin
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	pred := Predicate{Column: "event_type", Op: PredicateOpNotEq, Text: "checkout"}
 	it := SegmentScanIterator{
 		Segments:      []ScanSegment{{Path: path, Meta: meta}},
@@ -503,7 +503,7 @@ func TestSegmentScanIteratorPrunesPersistedPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 42}
 	it := SegmentScanIterator{
 		Segments:  []ScanSegment{{Path: path, Meta: meta}},
@@ -541,7 +541,7 @@ func TestSegmentScanIteratorPrunesPersistedSegments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 999999}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 
@@ -570,7 +570,7 @@ func TestSegmentScanIteratorPrunesPersistedTextPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	pred := Predicate{Column: "event_type", Op: PredicateOpEq, Text: "checkout"}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 
@@ -596,7 +596,7 @@ func TestSegmentScanIteratorPrunesPersistedBoolPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	pred := Predicate{Column: "flag", Op: PredicateOpEq, Bool: true}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 
@@ -625,7 +625,7 @@ func TestSegmentScanIteratorPrunesPersistedInt16Pages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	pred := Predicate{Column: "small_id", Op: PredicateOpEq, Int64: 1}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 
@@ -657,7 +657,7 @@ func TestSegmentScanIteratorPrunesPersistedInt16ValuePages(t *testing.T) {
 	if meta.Columns[0].Pages[0].Int32Values == nil || meta.Columns[0].Pages[0].Int32Values.Truncated {
 		t.Fatalf("int16 value stats = %#v", meta.Columns[0].Pages[0].Int32Values)
 	}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	pred := Predicate{Column: "small_id", Op: PredicateOpEq, Int64: 2}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 
@@ -687,7 +687,7 @@ func TestSegmentScanIteratorPrunesPersistedInt64ValuePages(t *testing.T) {
 		t.Fatalf("int64 value stats = %#v", meta.Columns[0].Pages[0].Int64Values)
 	}
 
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 2}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 
@@ -702,7 +702,7 @@ func TestSegmentScanIteratorPrunesPersistedInt64ValuePages(t *testing.T) {
 		t.Fatalf("absent visits = %d stats = %#v", visits, stats)
 	}
 
-	stats = &ExecStats{}
+	stats = &QueryStats{}
 	pred = Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 3}
 	it = SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 	visits = 0
@@ -736,7 +736,7 @@ func TestSegmentScanIteratorPrunesTruncatedTextStatsWithBloom(t *testing.T) {
 		t.Fatalf("text stats = %#v", textStats)
 	}
 
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	pred := Predicate{Column: "event_type", Op: PredicateOpEq, Text: missingTextBloomValueAcross(textPageBloomProbes, textStats.HashBloom)}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 
@@ -751,7 +751,7 @@ func TestSegmentScanIteratorPrunesTruncatedTextStatsWithBloom(t *testing.T) {
 		t.Fatalf("visits = %d stats = %#v", visits, stats)
 	}
 
-	stats = &ExecStats{}
+	stats = &QueryStats{}
 	pred = Predicate{Column: "event_type", Op: PredicateOpEq, Text: events[len(events)-1]}
 	it = SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 	visits = 0
@@ -851,7 +851,7 @@ func TestSegmentScanIteratorPrunesUUIDStatsWithBloom(t *testing.T) {
 		t.Fatalf("uuid stats = %#v", uuidStats)
 	}
 
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	absent := missingUUIDBloomValueAcross(textPageBloomProbes, uuidStats.HashBloom)
 	pred := Predicate{Column: "event_uuid", Op: PredicateOpEq, UUID: absent}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
@@ -866,7 +866,7 @@ func TestSegmentScanIteratorPrunesUUIDStatsWithBloom(t *testing.T) {
 		t.Fatalf("absent visits = %d stats = %#v", visits, stats)
 	}
 
-	stats = &ExecStats{}
+	stats = &QueryStats{}
 	pred = Predicate{Column: "event_uuid", Op: PredicateOpEq, UUID: values[len(values)-1]}
 	it = SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 	visits = 0
@@ -918,7 +918,7 @@ func TestSegmentScanIteratorBloomPrunesTruncatedInt64ValueStats(t *testing.T) {
 	if len(page.Int64Values.HashBloom) == 0 {
 		t.Fatalf("expected per-page bloom on truncated int64 value stats")
 	}
-	stats := &ExecStats{}
+	stats := &QueryStats{}
 	pred := Predicate{Column: "tenant_id", Op: PredicateOpEq, Int64: 1}
 	it := SegmentScanIterator{Segments: []ScanSegment{{Path: path, Meta: meta}}, Predicate: NewPredicateEvaluator(pred), Prune: pred, Stats: stats}
 

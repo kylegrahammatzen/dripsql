@@ -137,8 +137,8 @@ func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta
 			colMeta := &meta.Columns[colIndex]
 			colMeta.NullCount += page.meta.NullCount
 			colMeta.Bool = mergeBoolStats(colMeta.Bool, page.meta.Bool)
-			colMeta.Int32 = mergeInt32Stats(colMeta.Int32, page.meta.Int32)
-			colMeta.Int64 = mergeInt64Stats(colMeta.Int64, page.meta.Int64)
+			colMeta.Int32 = mergeNumericStats(colMeta.Int32, page.meta.Int32)
+			colMeta.Int64 = mergeNumericStats(colMeta.Int64, page.meta.Int64)
 			colMeta.UUID = mergeUUIDStats(colMeta.UUID, page.meta.UUID)
 			colMeta.Text = mergeTextStats(colMeta.Text, page.meta.Text)
 			colMeta.Pages = append(colMeta.Pages, page.meta)
