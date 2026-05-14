@@ -4,7 +4,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-func evalFORBitPackLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalFORBitPackLeafBound(v types.Vec, pred BoundPredicate, input *types.SelectionMask, out *types.SelectionMask) int {
 	switch pred.op {
 	case PredicateOpEq:
 		return evalFORBitPackEq(v, pred.int64Value, false, input, out)
@@ -157,7 +157,7 @@ func evalFORBitPackBetween(v types.Vec, lo int64, hi int64, input *types.Selecti
 	return matched
 }
 
-func evalFORBitPackIn(v types.Vec, matcher int64Matcher, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalFORBitPackIn(v types.Vec, matcher setMatcher[int64], invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	enc := v.Encoded
 	matched := 0
 	if input == nil {

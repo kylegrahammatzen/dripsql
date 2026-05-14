@@ -7,11 +7,13 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-// boundNode is the shared predicate tree for row evaluation and segment pruning.
-// colIndex points to the bound column source: batch.Columns for eval, meta.Columns
-// for pruning. A negative leaf colIndex means the column is missing: eval fails
-// at bind time, while pruning treats it as possibly matching.
-type boundNode struct {
+// BoundPredicate is the predicate tree used for both row evaluation and
+// segment pruning. colIndex points to the bound column source: batch.Columns
+// for eval, meta.Columns for pruning. A negative leaf colIndex means the
+// column is missing: eval fails at bind time, while pruning treats it as
+// possibly matching. The root carries cached rebind state (pred, columns,
+// schema, bound); inner nodes leave those zero.
+type BoundPredicate struct {
 	op       PredicateOp
 	colIndex int
 
@@ -22,21 +24,15 @@ type boundNode struct {
 	textValue  string
 	uuidValue  types.UUID16
 
-	boolSet boolMatcher
-	intSet  int64Matcher
-	textSet textMatcher
-	uuidSet uuidMatcher
+	boolSet setMatcher[bool]
+	intSet  setMatcher[int64]
+	textSet setMatcher[string]
+	uuidSet setMatcher[types.UUID16]
 
-	children []boundNode
-}
+	children []BoundPredicate
 
-// BoundPredicate is the single public predicate handle. It owns the AST,
-// lazily binds against each batch's column layout, and serves the row-level
-// evaluation API.
-type BoundPredicate struct {
 	pred    Predicate
 	columns []string
-	root    boundNode
 	schema  []string
 	bound   bool
 }
@@ -56,7 +52,7 @@ func (b *BoundPredicate) Eval(batch types.Batch, sel *types.SelectionMask) (int,
 	if err := b.rebindIfNeeded(batch); err != nil {
 		return 0, err
 	}
-	return evalBoundInto(batch, b.root, sel)
+	return evalBoundInto(batch, *b, sel)
 }
 
 func (b *BoundPredicate) EvalSelected(batch types.Batch, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
@@ -74,50 +70,30 @@ func (b *BoundPredicate) EvalSelected(batch types.Batch, input types.SelectionMa
 	if err := b.rebindIfNeeded(batch); err != nil {
 		return 0, err
 	}
-	return evalBoundSelectedInto(batch, b.root, input, sel)
+	return evalBoundSelectedInto(batch, *b, input, sel)
 }
 
 func (b *BoundPredicate) rebindIfNeeded(batch types.Batch) error {
 	if b.bound && sameBatchSchema(b.schema, batch) {
 		return nil
 	}
-	root, err := bindEvalNode(b.pred, batch)
+	bound, err := bindPredicate(b.pred, batch)
 	if err != nil {
 		return err
 	}
-	b.root = root
-	b.schema = batchSchema(b.schema[:0], batch)
-	b.bound = true
+	bound.pred = b.pred
+	bound.columns = b.columns
+	bound.schema = batchSchema(b.schema[:0], batch)
+	bound.bound = true
+	*b = bound
 	return nil
 }
 
-func bindEvalNode(pred Predicate, batch types.Batch) (boundNode, error) {
-	node := newBoundNode(pred)
-	switch pred.Op {
-	case PredicateNone:
-		return node, nil
-	case PredicateAnd, PredicateOr, PredicateNot:
-		node.children = make([]boundNode, len(pred.Children))
-		for i, child := range pred.Children {
-			boundChild, err := bindEvalNode(child, batch)
-			if err != nil {
-				return boundNode{}, err
-			}
-			node.children[i] = boundChild
-		}
-		return node, nil
-	default:
-		colIndex, ok := columnIndexByName(batch, pred.Column)
-		if !ok {
-			return boundNode{}, fmt.Errorf("missing predicate column %q", pred.Column)
-		}
-		node.colIndex = colIndex
-		return node, nil
-	}
-}
-
-func newBoundNode(pred Predicate) boundNode {
-	return boundNode{
+// newBoundLeaf builds a BoundPredicate node with all per-predicate value
+// fields populated but colIndex unresolved. Eval-bind resolves colIndex via
+// batch.Columns; prune-bind resolves it via meta.Columns.
+func newBoundLeaf(pred Predicate) BoundPredicate {
+	return BoundPredicate{
 		op:         pred.Op,
 		colIndex:   -1,
 		boolValue:  pred.Bool,
@@ -133,7 +109,32 @@ func newBoundNode(pred Predicate) boundNode {
 	}
 }
 
-func evalBoundInto(batch types.Batch, pred boundNode, sel *types.SelectionMask) (int, error) {
+func bindPredicate(pred Predicate, batch types.Batch) (BoundPredicate, error) {
+	node := newBoundLeaf(pred)
+	switch pred.Op {
+	case PredicateNone:
+		return node, nil
+	case PredicateAnd, PredicateOr, PredicateNot:
+		node.children = make([]BoundPredicate, len(pred.Children))
+		for i, child := range pred.Children {
+			boundChild, err := bindPredicate(child, batch)
+			if err != nil {
+				return BoundPredicate{}, err
+			}
+			node.children[i] = boundChild
+		}
+		return node, nil
+	default:
+		colIndex, ok := columnIndexByName(batch, pred.Column)
+		if !ok {
+			return BoundPredicate{}, fmt.Errorf("missing predicate column %q", pred.Column)
+		}
+		node.colIndex = colIndex
+		return node, nil
+	}
+}
+
+func evalBoundInto(batch types.Batch, pred BoundPredicate, sel *types.SelectionMask) (int, error) {
 	switch pred.op {
 	case PredicateNone:
 		sel.Resize(batch.Len)
@@ -191,7 +192,7 @@ func evalBoundInto(batch types.Batch, pred boundNode, sel *types.SelectionMask) 
 	}
 }
 
-func evalBoundSelectedInto(batch types.Batch, pred boundNode, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
+func evalBoundSelectedInto(batch types.Batch, pred BoundPredicate, input types.SelectionMask, sel *types.SelectionMask) (int, error) {
 	switch pred.op {
 	case PredicateNone:
 		return copySelectionInto(sel, input), nil

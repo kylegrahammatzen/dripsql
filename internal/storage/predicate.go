@@ -92,14 +92,7 @@ func (m setMatcher[T]) Each(fn func(T) bool) {
 	}
 }
 
-type (
-	boolMatcher  = setMatcher[bool]
-	int64Matcher = setMatcher[int64]
-	textMatcher  = setMatcher[string]
-	uuidMatcher  = setMatcher[types.UUID16]
-)
-
-func anyIntBetween(m int64Matcher, lo int64, hi int64) bool {
+func anyIntBetween(m setMatcher[int64], lo int64, hi int64) bool {
 	match := false
 	m.Each(func(value int64) bool {
 		if lo <= value && value <= hi {
@@ -111,7 +104,7 @@ func anyIntBetween(m int64Matcher, lo int64, hi int64) bool {
 	return match
 }
 
-func anyTextInBloom(m textMatcher, bloom []uint64, probes uint64) bool {
+func anyTextInBloom(m setMatcher[string], bloom []uint64, probes uint64) bool {
 	if len(bloom) == 0 {
 		return true
 	}
@@ -126,7 +119,7 @@ func anyTextInBloom(m textMatcher, bloom []uint64, probes uint64) bool {
 	return match
 }
 
-func anyUUIDInBloom(m uuidMatcher, bloom []uint64, probes uint64) bool {
+func anyUUIDInBloom(m setMatcher[types.UUID16], bloom []uint64, probes uint64) bool {
 	if len(bloom) == 0 {
 		return true
 	}

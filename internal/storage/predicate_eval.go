@@ -6,15 +6,15 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-func evalLeafInto(batch types.Batch, pred boundNode, mask *types.SelectionMask) (int, error) {
+func evalLeafInto(batch types.Batch, pred BoundPredicate, mask *types.SelectionMask) (int, error) {
 	return evalLeafWithInput(batch, pred, nil, mask)
 }
 
-func evalLeafSelectedInto(batch types.Batch, pred boundNode, input types.SelectionMask, mask *types.SelectionMask) (int, error) {
+func evalLeafSelectedInto(batch types.Batch, pred BoundPredicate, input types.SelectionMask, mask *types.SelectionMask) (int, error) {
 	return evalLeafWithInput(batch, pred, &input, mask)
 }
 
-func evalLeafWithInput(batch types.Batch, pred boundNode, input *types.SelectionMask, mask *types.SelectionMask) (int, error) {
+func evalLeafWithInput(batch types.Batch, pred BoundPredicate, input *types.SelectionMask, mask *types.SelectionMask) (int, error) {
 	col := batch.Columns[pred.colIndex]
 	mask.Resize(batch.Len)
 	switch col.V.Kind {
@@ -35,7 +35,7 @@ func evalLeafWithInput(batch types.Batch, pred boundNode, input *types.Selection
 	}
 }
 
-func evalUUIDLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalUUIDLeafBound(v types.Vec, pred BoundPredicate, input *types.SelectionMask, out *types.SelectionMask) int {
 	switch pred.op {
 	case PredicateOpEq:
 		return evalUUIDEq(v.UUID, v.Valid, v.Len, pred.uuidValue, false, input, out)
@@ -70,7 +70,7 @@ func evalUUIDEq(values []types.UUID16, valid types.Validity, rows int, want type
 	return matched
 }
 
-func evalUUIDIn(values []types.UUID16, valid types.Validity, rows int, matcher uuidMatcher, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalUUIDIn(values []types.UUID16, valid types.Validity, rows int, matcher setMatcher[types.UUID16], invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
 		for row := range rows {
@@ -96,7 +96,7 @@ func evalUUIDIn(values []types.UUID16, valid types.Validity, rows int, matcher u
 	return matched
 }
 
-func evalBoolLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalBoolLeafBound(v types.Vec, pred BoundPredicate, input *types.SelectionMask, out *types.SelectionMask) int {
 	switch pred.op {
 	case PredicateOpEq:
 		return evalBoolEq(v, pred.boolValue, input, out)
@@ -139,7 +139,7 @@ func evalBoolEq(v types.Vec, want bool, input *types.SelectionMask, out *types.S
 	return matched
 }
 
-func evalBoolIn(v types.Vec, matcher boolMatcher, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalBoolIn(v types.Vec, matcher setMatcher[bool], invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
 		for row := 0; row < v.Len; row++ {
@@ -167,14 +167,14 @@ func evalBoolIn(v types.Vec, matcher boolMatcher, invert bool, input *types.Sele
 	return matched
 }
 
-func evalIntLeafBound[T ~int16 | ~int32 | ~int64](v types.Vec, values []T, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalIntLeafBound[T ~int16 | ~int32 | ~int64](v types.Vec, values []T, pred BoundPredicate, input *types.SelectionMask, out *types.SelectionMask) int {
 	if v.Encoding == types.EncodingFORBitPack {
 		return evalFORBitPackLeafBound(v, pred, input, out)
 	}
 	return evalFlatIntLeafBound(values, v.Valid, v.Len, pred, input, out)
 }
 
-func evalFlatIntLeafBound[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalFlatIntLeafBound[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, pred BoundPredicate, input *types.SelectionMask, out *types.SelectionMask) int {
 	if valid == nil {
 		return evalFlatIntLeafBoundAllValid(values, rows, pred, input, out)
 	}
@@ -202,7 +202,7 @@ func evalFlatIntLeafBound[T ~int16 | ~int32 | ~int64](values []T, valid types.Va
 	}
 }
 
-func evalFlatIntLeafBoundAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalFlatIntLeafBoundAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, pred BoundPredicate, input *types.SelectionMask, out *types.SelectionMask) int {
 	switch pred.op {
 	case PredicateOpEq:
 		return evalIntEqAllValid(values, rows, pred.int64Value, input, out)
@@ -369,7 +369,7 @@ func evalIntBetweenAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, lo
 	return matched
 }
 
-func evalIntInAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, matcher int64Matcher, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalIntInAllValid[T ~int16 | ~int32 | ~int64](values []T, rows int, matcher setMatcher[int64], invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
 		for row := range rows {
@@ -531,7 +531,7 @@ func evalIntBetween[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity
 	return matched
 }
 
-func evalIntIn[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, matcher int64Matcher, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalIntIn[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, rows int, matcher setMatcher[int64], invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
 		for row := range rows {
@@ -551,7 +551,7 @@ func evalIntIn[T ~int16 | ~int32 | ~int64](values []T, valid types.Validity, row
 	return matched
 }
 
-func evalTextLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) (int, error) {
+func evalTextLeafBound(v types.Vec, pred BoundPredicate, input *types.SelectionMask, out *types.SelectionMask) (int, error) {
 	switch v.Encoding {
 	case types.EncodingFlat:
 		return evalFlatTextLeafBound(v, pred, input, out), nil
@@ -562,7 +562,7 @@ func evalTextLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, 
 	}
 }
 
-func evalFlatTextLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalFlatTextLeafBound(v types.Vec, pred BoundPredicate, input *types.SelectionMask, out *types.SelectionMask) int {
 	switch pred.op {
 	case PredicateOpEq:
 		return evalTextEq(v, pred.textValue, false, input, out)
@@ -612,7 +612,7 @@ func evalTextEq(v types.Vec, want string, invert bool, input *types.SelectionMas
 	return matched
 }
 
-func evalTextIn(v types.Vec, matcher textMatcher, invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
+func evalTextIn(v types.Vec, matcher setMatcher[string], invert bool, input *types.SelectionMask, out *types.SelectionMask) int {
 	matched := 0
 	if input == nil {
 		for row := 0; row < v.Len; row++ {
@@ -632,7 +632,7 @@ func evalTextIn(v types.Vec, matcher textMatcher, invert bool, input *types.Sele
 	return matched
 }
 
-func evalDictTextLeafBound(v types.Vec, pred boundNode, input *types.SelectionMask, out *types.SelectionMask) (int, error) {
+func evalDictTextLeafBound(v types.Vec, pred BoundPredicate, input *types.SelectionMask, out *types.SelectionMask) (int, error) {
 	if v.Encoded == nil {
 		return 0, fmt.Errorf("dictionary vector missing encoded state")
 	}

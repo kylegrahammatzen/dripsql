@@ -320,8 +320,8 @@ func constantAllEqual(v types.Vec) bool {
 }
 
 func constantValueSize(v types.Vec) (int, bool) {
-	if size, ok := fixedKindBytes(v.Kind); ok {
-		return size, true
+	if w := v.Kind.FixedWidth(); w > 0 {
+		return int(w), true
 	}
 	switch v.Kind {
 	case types.VecBool:

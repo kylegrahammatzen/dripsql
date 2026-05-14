@@ -6,18 +6,6 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-// fixedKindBytes returns the per-row byte width for fixed-width kinds.
-// VecBool is excluded because it packs into validity-style words rather than
-// per-row bytes; varlen kinds (text/bytes/json) return (0, false). This is a
-// thin compatibility shim over types.VecKind.FixedWidth so legacy codec
-// callsites don't need to handle the Width sentinel themselves.
-func fixedKindBytes(kind types.VecKind) (int, bool) {
-	if w := kind.FixedWidth(); w > 0 {
-		return int(w), true
-	}
-	return 0, false
-}
-
 // resizeSlice returns a slice of length n that reuses dst's backing array
 // when cap(dst) >= n, allocating fresh otherwise. Used by every codec's
 // DecodeInto path to amortize allocations across repeated decodes.
@@ -31,11 +19,11 @@ func resizeSlice[S ~[]E, E any](dst S, n int) S {
 // expectFixedPayload validates that a single-value fixed-width payload has the
 // right length for kind.
 func expectFixedPayload(payload []byte, kind types.VecKind, label string) error {
-	size, ok := fixedKindBytes(kind)
-	if !ok {
+	w := kind.FixedWidth()
+	if w <= 0 {
 		return fmt.Errorf("%s codec unsupported kind %s", label, kind)
 	}
-	if len(payload) != size {
+	if len(payload) != int(w) {
 		return fmt.Errorf("%s %s payload length %d", label, kind, len(payload))
 	}
 	return nil

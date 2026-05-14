@@ -84,11 +84,11 @@ func TestInt64BloomPruneAcceptsKnownAbsentValue(t *testing.T) {
 	for i := int64(0); i < 100; i += 2 {
 		hashBloomAdd(stats.HashBloom, intHash32(i), textPageBloomProbes)
 	}
-	pred := boundNode{op: PredicateOpEq, int64Value: 7}
+	pred := BoundPredicate{op: PredicateOpEq, int64Value: 7}
 	if pruneInt64ValuePageCandidate(stats, pred) {
 		t.Fatal("expected bloom to prune absent value 7")
 	}
-	predHit := boundNode{op: PredicateOpEq, int64Value: 4}
+	predHit := BoundPredicate{op: PredicateOpEq, int64Value: 4}
 	if !pruneInt64ValuePageCandidate(stats, predHit) {
 		t.Fatal("expected bloom to keep candidate value 4")
 	}
@@ -99,7 +99,7 @@ func TestInt64BloomPruneFallsThroughOnGtLt(t *testing.T) {
 	for i := int64(0); i < 100; i += 2 {
 		hashBloomAdd(stats.HashBloom, intHash32(i), textPageBloomProbes)
 	}
-	pred := boundNode{op: PredicateOpGreater, int64Value: 7}
+	pred := BoundPredicate{op: PredicateOpGreater, int64Value: 7}
 	if !pruneInt64ValuePageCandidate(stats, pred) {
 		t.Fatal("range predicates must not be pruned by hash bloom")
 	}

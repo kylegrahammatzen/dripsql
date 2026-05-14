@@ -228,8 +228,8 @@ func (Plain) Estimate(v types.Vec) (int, bool) {
 }
 
 func plainValuesSize(v types.Vec) (int, bool) {
-	if size, ok := fixedKindBytes(v.Kind); ok {
-		return v.Len * size, true
+	if w := v.Kind.FixedWidth(); w > 0 {
+		return v.Len * int(w), true
 	}
 	switch v.Kind {
 	case types.VecBool:

@@ -9,7 +9,7 @@ const (
 
 type PredicatePrunePlan struct {
 	meta SegmentMeta
-	root boundNode
+	root BoundPredicate
 }
 
 type pruneStatsScope struct {
@@ -21,10 +21,10 @@ type pruneStatsScope struct {
 	int32Vals   *Int32ValueStats
 	textStats   *TextStats
 	uuidStats   *UUIDStats
-	pruneText   func(TextStats, boundNode) bool
-	pruneUUID   func(UUIDStats, boundNode) bool
-	pruneInt64V func(Int64ValueStats, boundNode) bool
-	pruneInt32V func(Int32ValueStats, boundNode) bool
+	pruneText   func(TextStats, BoundPredicate) bool
+	pruneUUID   func(UUIDStats, BoundPredicate) bool
+	pruneInt64V func(Int64ValueStats, BoundPredicate) bool
+	pruneInt32V func(Int32ValueStats, BoundPredicate) bool
 }
 
 func BindPrunePredicate(pred Predicate, meta SegmentMeta) PredicatePrunePlan {
@@ -32,24 +32,24 @@ func BindPrunePredicate(pred Predicate, meta SegmentMeta) PredicatePrunePlan {
 }
 
 func (p PredicatePrunePlan) PageCandidate(pageIndex int) bool {
-	return pruneCandidate(p.root, func(pred boundNode) bool {
+	return pruneCandidate(p.root, func(pred BoundPredicate) bool {
 		return prunePageLeafCandidate(p.meta, pageIndex, pred)
 	})
 }
 
 func (p PredicatePrunePlan) SegmentCandidate() bool {
-	return pruneCandidate(p.root, func(pred boundNode) bool {
+	return pruneCandidate(p.root, func(pred BoundPredicate) bool {
 		return pruneSegmentLeafCandidate(p.meta, pred)
 	})
 }
 
-func bindPruneNode(pred Predicate, meta SegmentMeta) boundNode {
-	node := newBoundNode(pred)
+func bindPruneNode(pred Predicate, meta SegmentMeta) BoundPredicate {
+	node := newBoundLeaf(pred)
 	switch pred.Op {
 	case PredicateNone:
 		return node
 	case PredicateAnd, PredicateOr, PredicateNot:
-		node.children = make([]boundNode, len(pred.Children))
+		node.children = make([]BoundPredicate, len(pred.Children))
 		for i, child := range pred.Children {
 			node.children[i] = bindPruneNode(child, meta)
 		}
@@ -65,7 +65,7 @@ func bindPruneNode(pred Predicate, meta SegmentMeta) boundNode {
 	}
 }
 
-func pruneCandidate(pred boundNode, leaf func(boundNode) bool) bool {
+func pruneCandidate(pred BoundPredicate, leaf func(BoundPredicate) bool) bool {
 	switch pred.op {
 	case PredicateNone:
 		return true
@@ -93,7 +93,7 @@ func pruneCandidate(pred boundNode, leaf func(boundNode) bool) bool {
 	}
 }
 
-func pruneSegmentLeafCandidate(meta SegmentMeta, pred boundNode) bool {
+func pruneSegmentLeafCandidate(meta SegmentMeta, pred BoundPredicate) bool {
 	if pred.colIndex < 0 || pred.colIndex >= len(meta.Columns) {
 		return true
 	}
@@ -132,7 +132,7 @@ func pruneSegmentLeafCandidate(meta SegmentMeta, pred boundNode) bool {
 	return true
 }
 
-func prunePageLeafCandidate(meta SegmentMeta, pageIndex int, pred boundNode) bool {
+func prunePageLeafCandidate(meta SegmentMeta, pageIndex int, pred BoundPredicate) bool {
 	if pred.colIndex < 0 || pred.colIndex >= len(meta.Columns) {
 		return true
 	}
@@ -160,7 +160,7 @@ func prunePageLeafCandidate(meta SegmentMeta, pageIndex int, pred boundNode) boo
 	}, pred)
 }
 
-func pruneStatsCandidate(stats pruneStatsScope, pred boundNode) bool {
+func pruneStatsCandidate(stats pruneStatsScope, pred BoundPredicate) bool {
 	if stats.allNull {
 		return false
 	}
@@ -188,7 +188,7 @@ func pruneStatsCandidate(stats pruneStatsScope, pred boundNode) bool {
 	return true
 }
 
-func pruneBoolCandidate(stats BoolStats, pred boundNode) bool {
+func pruneBoolCandidate(stats BoolStats, pred BoundPredicate) bool {
 	switch pred.op {
 	case PredicateOpEq:
 		return boolStatsHas(stats, pred.boolValue)
@@ -203,7 +203,7 @@ func pruneBoolCandidate(stats BoolStats, pred boundNode) bool {
 	}
 }
 
-func pruneInt64RangeCandidate(stats Int64Stats, pred boundNode) bool {
+func pruneInt64RangeCandidate(stats Int64Stats, pred BoundPredicate) bool {
 	switch pred.op {
 	case PredicateOpEq:
 		return stats.Min <= pred.int64Value && pred.int64Value <= stats.Max
@@ -224,7 +224,7 @@ func pruneInt64RangeCandidate(stats Int64Stats, pred boundNode) bool {
 	}
 }
 
-func pruneInt64ValuePageCandidate(stats Int64ValueStats, pred boundNode) bool {
+func pruneInt64ValuePageCandidate(stats Int64ValueStats, pred BoundPredicate) bool {
 	if stats.Truncated {
 		return pruneInt64ValueBloom(stats.HashBloom, pred, textPageBloomProbes)
 	}
@@ -241,7 +241,7 @@ func pruneInt64ValuePageCandidate(stats Int64ValueStats, pred boundNode) bool {
 	}
 }
 
-func pruneInt64ValueSegmentCandidate(stats Int64ValueStats, pred boundNode) bool {
+func pruneInt64ValueSegmentCandidate(stats Int64ValueStats, pred BoundPredicate) bool {
 	if stats.Truncated {
 		return pruneInt64ValueBloom(stats.HashBloom, pred, textSegmentBloomProbes)
 	}
@@ -258,7 +258,7 @@ func pruneInt64ValueSegmentCandidate(stats Int64ValueStats, pred boundNode) bool
 	}
 }
 
-func pruneInt32ValuePageCandidate(stats Int32ValueStats, pred boundNode) bool {
+func pruneInt32ValuePageCandidate(stats Int32ValueStats, pred BoundPredicate) bool {
 	if stats.Truncated {
 		return pruneInt32ValueBloom(stats.HashBloom, pred, textPageBloomProbes)
 	}
@@ -281,7 +281,7 @@ func pruneInt32ValuePageCandidate(stats Int32ValueStats, pred boundNode) bool {
 	}
 }
 
-func pruneInt32ValueSegmentCandidate(stats Int32ValueStats, pred boundNode) bool {
+func pruneInt32ValueSegmentCandidate(stats Int32ValueStats, pred BoundPredicate) bool {
 	if stats.Truncated {
 		return pruneInt32ValueBloom(stats.HashBloom, pred, textSegmentBloomProbes)
 	}
@@ -304,7 +304,7 @@ func pruneInt32ValueSegmentCandidate(stats Int32ValueStats, pred boundNode) bool
 	}
 }
 
-func pruneInt64ValueBloom(bloom []uint64, pred boundNode, probes uint64) bool {
+func pruneInt64ValueBloom(bloom []uint64, pred BoundPredicate, probes uint64) bool {
 	if len(bloom) == 0 {
 		return true
 	}
@@ -326,7 +326,7 @@ func pruneInt64ValueBloom(bloom []uint64, pred boundNode, probes uint64) bool {
 	}
 }
 
-func pruneInt32ValueBloom(bloom []uint64, pred boundNode, probes uint64) bool {
+func pruneInt32ValueBloom(bloom []uint64, pred BoundPredicate, probes uint64) bool {
 	if len(bloom) == 0 {
 		return true
 	}
@@ -356,7 +356,7 @@ func pruneInt32ValueBloom(bloom []uint64, pred boundNode, probes uint64) bool {
 	}
 }
 
-func pruneTextPageCandidate(stats TextStats, pred boundNode) bool {
+func pruneTextPageCandidate(stats TextStats, pred BoundPredicate) bool {
 	if stats.Truncated {
 		switch pred.op {
 		case PredicateOpEq:
@@ -383,7 +383,7 @@ func pruneTextPageCandidate(stats TextStats, pred boundNode) bool {
 	}
 }
 
-func pruneTextSegmentCandidate(stats TextStats, pred boundNode) bool {
+func pruneTextSegmentCandidate(stats TextStats, pred BoundPredicate) bool {
 	if stats.Truncated && len(stats.HashBloom) != 0 {
 		switch pred.op {
 		case PredicateOpEq:
@@ -397,7 +397,7 @@ func pruneTextSegmentCandidate(stats TextStats, pred boundNode) bool {
 	return pruneTextPageCandidate(stats, pred)
 }
 
-func pruneUUIDPageCandidate(stats UUIDStats, pred boundNode) bool {
+func pruneUUIDPageCandidate(stats UUIDStats, pred BoundPredicate) bool {
 	switch pred.op {
 	case PredicateOpEq:
 		return uuidPageHashBloomHas(stats.HashBloom, pred.uuidValue)
@@ -408,7 +408,7 @@ func pruneUUIDPageCandidate(stats UUIDStats, pred boundNode) bool {
 	}
 }
 
-func pruneUUIDSegmentCandidate(stats UUIDStats, pred boundNode) bool {
+func pruneUUIDSegmentCandidate(stats UUIDStats, pred BoundPredicate) bool {
 	switch pred.op {
 	case PredicateOpEq:
 		return uuidSegmentHashBloomHas(stats.HashBloom, pred.uuidValue)
