@@ -237,7 +237,7 @@ func encodeSegmentBatchPage(col types.Column, rowStart int, scratch []byte, out 
 }
 
 func ReadSegmentFooter(path string) (SegmentMeta, int64, error) {
-	file, err := os.Open(path)
+	file, err := openSegmentForRead(path)
 	if err != nil {
 		return SegmentMeta{}, 0, err
 	}
@@ -535,7 +535,7 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 	meta.lazyOnce = make([]sync.Once, int(cols))
 	meta.lazyErrs = make([]error, int(cols))
 	meta.lazyVersion = version
-	for i := uint32(0); i < cols; i++ {
+	for i := range cols {
 		col := &meta.Columns[i]
 		col.Name = r.readString()
 		col.Type = r.readType()
@@ -579,7 +579,7 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 		if i == 0 {
 			meta.PageRowCounts = make([]uint32, int(pages))
 		}
-		for j := uint32(0); j < pages; j++ {
+		for j := range pages {
 			rows := r.skipPageMetaCapturingRows()
 			if r.err != nil {
 				return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
@@ -817,7 +817,7 @@ func (r *segmentMetaReader) readTextStats() *TextStats {
 		}
 		if groupCount != 0 {
 			out.GroupSums = make(map[string][]int64, int(groupCount))
-			for g := uint32(0); g < groupCount; g++ {
+			for range groupCount {
 				key := r.readString()
 				n := r.readU32()
 				if r.err != nil {
@@ -841,14 +841,14 @@ func (r *segmentMetaReader) readTextStats() *TextStats {
 		}
 		if siblingCount != 0 {
 			out.GroupCounts = make(map[string]map[string][]int64, int(siblingCount))
-			for s := uint32(0); s < siblingCount; s++ {
+			for range siblingCount {
 				col := r.readString()
 				valueCount := r.readU32()
 				if r.err != nil {
 					return nil
 				}
 				bySibling := make(map[string][]int64, int(valueCount))
-				for v := uint32(0); v < valueCount; v++ {
+				for range valueCount {
 					value := r.readString()
 					n := r.readU32()
 					if r.err != nil {

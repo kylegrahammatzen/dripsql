@@ -37,7 +37,7 @@ func newSegmentFileCache() *segmentFileCache {
 
 func (c *segmentFileCache) Open(path string) (*os.File, func(), error) {
 	if c == nil {
-		file, err := os.Open(path)
+		file, err := openSegmentForRead(path)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -54,7 +54,7 @@ func (c *segmentFileCache) Open(path string) (*os.File, func(), error) {
 		c.hits++
 		return entry.file, func() { c.release(path, entry) }, nil
 	}
-	file, err := os.Open(path)
+	file, err := openSegmentForRead(path)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -78,7 +78,7 @@ func (c *segmentFileCache) Prewarm(path string) {
 	if c.closed || c.files[path] != nil {
 		return
 	}
-	file, err := os.Open(path)
+	file, err := openSegmentForRead(path)
 	if err != nil {
 		return
 	}

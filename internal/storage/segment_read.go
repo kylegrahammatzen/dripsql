@@ -298,7 +298,7 @@ func openSegmentFile(path string, cache *segmentFileCache) (*os.File, func(), er
 		}
 		return file, release, nil
 	}
-	file, err := os.Open(path)
+	file, err := openSegmentForRead(path)
 	if err != nil {
 		return nil, nil, err
 	}
