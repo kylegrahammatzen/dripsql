@@ -16,27 +16,21 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-const segmentMagic = "DRIPV3S1"
+const segmentMagic = "DRIPV4S1"
 
 const segmentWriteBufferBytes = 4 << 20
 
 const (
-	segmentFooterPlainMagic   = "DRIPFTR0"
-	segmentFooterFlateMagic   = "DRIPFTZ1"
-	segmentFooterPlainMagicV2 = "DRIPFTR2"
-	segmentFooterFlateMagicV2 = "DRIPFTZ3"
-	segmentFooterPlainMagicV3 = "DRIPFTR4"
-	segmentFooterFlateMagicV3 = "DRIPFTZ5"
+	segmentFooterPlainMagicV4 = "DRIPFTR6"
+	segmentFooterFlateMagicV4 = "DRIPFTZ7"
 )
 
-// v2 footer encoding adds TextStats.GroupSums for SMA-style metadata-only
-// GROUP BY + SUM. Old segments encoded at v1 are still read; GroupSums comes
-// back nil and the engine falls back to scan-based execution.
-
-// Minimum encoded bytes for a PageMeta before optional stats payloads:
-// rowStart(4), rows(4), nullCount(4), offset(8), length(8), kind(1),
-// encoding(1), allValid/allNull(2), and seven stats presence flags.
-const segmentPageMetaFooterBytes = 4 + 4 + 4 + 8 + 8 + 1 + 1 + 2 + 7
+// v4 wire format: the page directory is a fixed-size table of 32-byte
+// entries indexed by pageIndex, so cold open skims it with pointer
+// arithmetic instead of parsing variable-length per-page records. Per-page
+// stats live in a length-prefixed heavy section after the directory, lazy
+// decoded on first LoadColumn.
+const segmentPageEntryBytes = 4 + 4 + 4 + 8 + 8 + 1 + 1 + 1 + 1
 
 type SegmentID uint64
 
@@ -88,11 +82,10 @@ type SegmentMeta struct {
 	PageRowCounts []uint32
 
 	// Lazy heavy-field decoding state. See segment_lazy.go.
-	lazyBody    []byte
-	lazyRanges  []byteRange
-	lazyOnce    []sync.Once
-	lazyErrs    []error
-	lazyVersion int
+	lazyBody   []byte
+	lazyRanges []byteRange
+	lazyOnce   []sync.Once
+	lazyErrs   []error
 }
 
 func WriteSegment(path string, id SegmentID, batches []types.Batch) (SegmentMeta, error) {
@@ -362,96 +355,89 @@ func marshalSegmentMetaRaw(meta SegmentMeta) ([]byte, error) {
 		writeBoolStats(&w, col.Bool)
 		writeInt32Stats(&w, col.Int32)
 		writeInt64Stats(&w, col.Int64)
-		writeUUIDStats(&w, col.UUID)
-		writeTextStats(&w, col.Text)
-		writeInt32ValueStats(&w, col.Int32Values)
-		writeInt64ValueStats(&w, col.Int64Values)
 		writeU32(&w, uint32(len(col.Pages)))
 		for _, page := range col.Pages {
-			writeU32(&w, page.RowStart)
-			writeU32(&w, page.Rows)
-			writeU32(&w, page.NullCount)
-			writeU64(&w, page.Offset)
-			writeU64(&w, page.Length)
-			w.writeByte(byte(page.Kind))
-			w.writeByte(byte(page.Encoding))
-			writeBool(&w, page.AllValid)
-			writeBool(&w, page.AllNull)
-			writeBoolStats(&w, page.Bool)
-			writeInt32Stats(&w, page.Int32)
-			writeInt64Stats(&w, page.Int64)
-			writeInt32ValueStats(&w, page.Int32Values)
-			writeInt64ValueStats(&w, page.Int64Values)
-			writeUUIDStats(&w, page.UUID)
-			writeTextStats(&w, page.Text)
+			writePageEntry(&w, page)
 		}
+		heavy := segmentMetaWriter{}
+		writeUUIDStats(&heavy, col.UUID)
+		writeTextStats(&heavy, col.Text)
+		writeInt32ValueStats(&heavy, col.Int32Values)
+		writeInt64ValueStats(&heavy, col.Int64Values)
+		for _, page := range col.Pages {
+			writeBool(&heavy, page.AllValid)
+			writeBool(&heavy, page.AllNull)
+			writeBoolStats(&heavy, page.Bool)
+			writeInt32Stats(&heavy, page.Int32)
+			writeInt64Stats(&heavy, page.Int64)
+			writeInt32ValueStats(&heavy, page.Int32Values)
+			writeInt64ValueStats(&heavy, page.Int64Values)
+			writeUUIDStats(&heavy, page.UUID)
+			writeTextStats(&heavy, page.Text)
+		}
+		heavyBytes, err := heavy.bytes()
+		if err != nil {
+			return nil, err
+		}
+		writeU32(&w, uint32(len(heavyBytes)))
+		w.write(heavyBytes)
 	}
 	return w.bytes()
 }
 
+// writePageEntry writes the 32-byte fixed-size page directory entry. Keep
+// the field order in lockstep with readPageEntry below; cold open relies on
+// the layout staying stable so the page directory is a contiguous table.
+func writePageEntry(w *segmentMetaWriter, page PageMeta) {
+	writeU32(w, page.RowStart)
+	writeU32(w, page.Rows)
+	writeU32(w, page.NullCount)
+	writeU64(w, page.Offset)
+	writeU64(w, page.Length)
+	w.writeByte(byte(page.Kind))
+	w.writeByte(byte(page.Encoding))
+	w.writeByte(0)
+	w.writeByte(0)
+}
+
 // encodeSegmentFooter only invokes flate when the compressed payload is at
-// least 4× smaller than the raw payload. Bloom-heavy footers (high-cardinality
-// columns like user_id, event_uuid) are essentially random and compress ~1.0×;
-// paying the per-segment flate decode at cold-open time to "save" near-zero
-// bytes shows up as ~60% of cold-ish CPU at 100M scale. Footers dominated by
-// dictionaries / small stats still hit the 4× ratio and keep being flate'd.
+// least 4x smaller than the raw payload. Bloom-heavy footers compress poorly
+// and the decode cost was 60% of cold-ish CPU at 100M scale before this
+// gate. Footers dominated by dictionaries still hit the ratio and stay
+// flate'd.
 func encodeSegmentFooter(raw []byte) ([]byte, error) {
 	compressed, err := compressSegmentFooter(raw)
 	if err == nil && len(compressed)*4 < len(raw) {
-		return segmentFooterEnvelope(segmentFooterFlateMagicV3, uint64(len(raw)), compressed), nil
+		return segmentFooterEnvelope(segmentFooterFlateMagicV4, uint64(len(raw)), compressed), nil
 	}
-	return segmentFooterEnvelope(segmentFooterPlainMagicV3, uint64(len(raw)), raw), nil
+	return segmentFooterEnvelope(segmentFooterPlainMagicV4, uint64(len(raw)), raw), nil
 }
 
-// decodeSegmentFooter returns the raw footer body and the format version. v1
-// (the DRIPFTR0/DRIPFTZ1 magics) is still read so existing on-disk segments
-// keep working; new segments are always written at v2.
-func decodeSegmentFooter(data []byte) ([]byte, int, error) {
-	if len(data) < len(segmentFooterPlainMagic)+8 {
-		return nil, 0, fmt.Errorf("segment footer missing encoding header")
+// decodeSegmentFooter returns the raw v4 footer body. v1/v2/v3 are not read.
+func decodeSegmentFooter(data []byte) ([]byte, error) {
+	if len(data) < len(segmentFooterPlainMagicV4)+8 {
+		return nil, fmt.Errorf("segment footer missing encoding header")
 	}
-	magic := string(data[:len(segmentFooterPlainMagic)])
-	rawLen := binary.LittleEndian.Uint64(data[len(segmentFooterPlainMagic) : len(segmentFooterPlainMagic)+8])
-	body := data[len(segmentFooterPlainMagic)+8:]
+	magic := string(data[:len(segmentFooterPlainMagicV4)])
+	rawLen := binary.LittleEndian.Uint64(data[len(segmentFooterPlainMagicV4) : len(segmentFooterPlainMagicV4)+8])
+	body := data[len(segmentFooterPlainMagicV4)+8:]
 	if rawLen > uint64(math.MaxInt) {
-		return nil, 0, fmt.Errorf("segment footer raw length exceeds int capacity")
+		return nil, fmt.Errorf("segment footer raw length exceeds int capacity")
 	}
 	switch magic {
-	case segmentFooterPlainMagic:
+	case segmentFooterPlainMagicV4:
 		if uint64(len(body)) != rawLen {
-			return nil, 0, fmt.Errorf("segment footer raw length %d does not match body length %d", rawLen, len(body))
+			return nil, fmt.Errorf("segment footer raw length %d does not match body length %d", rawLen, len(body))
 		}
-		return body, 1, nil
-	case segmentFooterPlainMagicV2:
-		if uint64(len(body)) != rawLen {
-			return nil, 0, fmt.Errorf("segment footer raw length %d does not match body length %d", rawLen, len(body))
-		}
-		return body, 2, nil
-	case segmentFooterFlateMagic:
+		return body, nil
+	case segmentFooterFlateMagicV4:
 		raw, err := decompressSegmentFooter(body, int(rawLen))
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
-		return raw, 1, nil
-	case segmentFooterFlateMagicV2:
-		raw, err := decompressSegmentFooter(body, int(rawLen))
-		if err != nil {
-			return nil, 0, err
-		}
-		return raw, 2, nil
-	case segmentFooterPlainMagicV3:
-		if uint64(len(body)) != rawLen {
-			return nil, 0, fmt.Errorf("segment footer raw length %d does not match body length %d", rawLen, len(body))
-		}
-		return body, 3, nil
-	case segmentFooterFlateMagicV3:
-		raw, err := decompressSegmentFooter(body, int(rawLen))
-		if err != nil {
-			return nil, 0, err
-		}
-		return raw, 3, nil
+		return raw, nil
 	default:
-		return nil, 0, fmt.Errorf("segment footer has unknown encoding %q", magic)
+		return nil, fmt.Errorf("segment footer has unknown encoding %q", magic)
 	}
 }
 
@@ -516,11 +502,11 @@ func decompressSegmentFooter(body []byte, rawLen int) ([]byte, error) {
 }
 
 func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
-	body, version, err := decodeSegmentFooter(data)
+	body, err := decodeSegmentFooter(data)
 	if err != nil {
 		return SegmentMeta{}, err
 	}
-	r := segmentMetaReader{data: body, version: version}
+	r := segmentMetaReader{data: body}
 	meta := SegmentMeta{ID: SegmentID(r.readU64()), Rows: r.readU32(), PageRows: r.readU32()}
 	cols := r.readU32()
 	if r.err != nil {
@@ -534,7 +520,6 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 	meta.lazyRanges = make([]byteRange, int(cols))
 	meta.lazyOnce = make([]sync.Once, int(cols))
 	meta.lazyErrs = make([]error, int(cols))
-	meta.lazyVersion = version
 	for i := range cols {
 		col := &meta.Columns[i]
 		col.Name = r.readString()
@@ -562,33 +547,32 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 		if r.err != nil {
 			return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
 		}
-		heavyStart := r.pos
-		r.skipUUIDStats()
-		r.skipTextStats()
-		if r.version >= 3 {
-			r.skipInt32ValueStats()
-			r.skipInt64ValueStats()
-		}
 		pages := r.readU32()
 		if r.err != nil {
 			return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
 		}
-		if uint64(pages) > uint64(r.remaining()/segmentPageMetaFooterBytes) {
+		if uint64(pages) > uint64(r.remaining()/segmentPageEntryBytes) {
 			return SegmentMeta{}, fmt.Errorf("segment footer column %d page count %d exceeds remaining metadata", i, pages)
 		}
 		if i == 0 {
 			meta.PageRowCounts = make([]uint32, int(pages))
 		}
-		for j := range pages {
-			rows := r.skipPageMetaCapturingRows()
-			if r.err != nil {
-				return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
-			}
-			if i == 0 {
-				meta.PageRowCounts[j] = rows
+		dirStart := r.pos
+		if i == 0 {
+			for j := range pages {
+				meta.PageRowCounts[j] = binary.LittleEndian.Uint32(body[dirStart+int(j)*segmentPageEntryBytes+4:])
 			}
 		}
-		meta.lazyRanges[i] = byteRange{start: heavyStart, end: r.pos}
+		r.skip(int(pages) * segmentPageEntryBytes)
+		heavyLen := r.readU32()
+		if r.err != nil {
+			return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
+		}
+		if uint64(heavyLen) > uint64(r.remaining()) {
+			return SegmentMeta{}, fmt.Errorf("segment footer column %d heavy length %d exceeds remaining metadata", i, heavyLen)
+		}
+		meta.lazyRanges[i] = byteRange{start: r.pos, end: r.pos + int(heavyLen), pageDir: dirStart, pageCount: int(pages)}
+		r.skip(int(heavyLen))
 	}
 	if r.err != nil {
 		return SegmentMeta{}, fmt.Errorf("segment footer truncated: %w", r.err)
@@ -603,10 +587,9 @@ func unmarshalSegmentMeta(data []byte) (SegmentMeta, error) {
 // One bounds check per read is meaningfully faster than bytes.Reader at
 // cold-open scale.
 type segmentMetaReader struct {
-	data    []byte
-	pos     int
-	err     error
-	version int
+	data []byte
+	pos  int
+	err  error
 }
 
 func (r *segmentMetaReader) remaining() int {
@@ -685,24 +668,22 @@ func (r *segmentMetaReader) readInt32ValueStats() *Int32ValueStats {
 	if r.err != nil {
 		return nil
 	}
-	if r.version >= 3 {
-		bloomCount := r.readU32()
-		if r.err != nil {
-			return nil
+	bloomCount := r.readU32()
+	if r.err != nil {
+		return nil
+	}
+	if uint64(bloomCount) > uint64(r.remaining()/8) {
+		r.err = io.ErrUnexpectedEOF
+		return nil
+	}
+	if bloomCount != 0 {
+		out.HashBloom = make([]uint64, int(bloomCount))
+		for i := range out.HashBloom {
+			out.HashBloom[i] = r.readU64()
 		}
-		if uint64(bloomCount) > uint64(r.remaining()/8) {
-			r.err = io.ErrUnexpectedEOF
-			return nil
-		}
-		if bloomCount != 0 {
-			out.HashBloom = make([]uint64, int(bloomCount))
-			for i := range out.HashBloom {
-				out.HashBloom[i] = r.readU64()
-			}
-		}
-		if r.err != nil {
-			return nil
-		}
+	}
+	if r.err != nil {
+		return nil
 	}
 	return out
 }
@@ -727,24 +708,22 @@ func (r *segmentMetaReader) readInt64ValueStats() *Int64ValueStats {
 	if r.err != nil {
 		return nil
 	}
-	if r.version >= 3 {
-		bloomCount := r.readU32()
-		if r.err != nil {
-			return nil
+	bloomCount := r.readU32()
+	if r.err != nil {
+		return nil
+	}
+	if uint64(bloomCount) > uint64(r.remaining()/8) {
+		r.err = io.ErrUnexpectedEOF
+		return nil
+	}
+	if bloomCount != 0 {
+		out.HashBloom = make([]uint64, int(bloomCount))
+		for i := range out.HashBloom {
+			out.HashBloom[i] = r.readU64()
 		}
-		if uint64(bloomCount) > uint64(r.remaining()/8) {
-			r.err = io.ErrUnexpectedEOF
-			return nil
-		}
-		if bloomCount != 0 {
-			out.HashBloom = make([]uint64, int(bloomCount))
-			for i := range out.HashBloom {
-				out.HashBloom[i] = r.readU64()
-			}
-		}
-		if r.err != nil {
-			return nil
-		}
+	}
+	if r.err != nil {
+		return nil
 	}
 	return out
 }
@@ -810,15 +789,44 @@ func (r *segmentMetaReader) readTextStats() *TextStats {
 	if r.err != nil {
 		return nil
 	}
-	if r.version >= 2 {
-		groupCount := r.readU32()
-		if r.err != nil {
-			return nil
+	groupCount := r.readU32()
+	if r.err != nil {
+		return nil
+	}
+	if groupCount != 0 {
+		out.GroupSums = make(map[string][]int64, int(groupCount))
+		for range groupCount {
+			key := r.readString()
+			n := r.readU32()
+			if r.err != nil {
+				return nil
+			}
+			if uint64(n) > uint64(r.remaining()/8) {
+				r.err = io.ErrUnexpectedEOF
+				return nil
+			}
+			sums := make([]int64, int(n))
+			for i := range sums {
+				sums[i] = int64(r.readU64())
+			}
+			out.GroupSums[key] = sums
 		}
-		if groupCount != 0 {
-			out.GroupSums = make(map[string][]int64, int(groupCount))
-			for range groupCount {
-				key := r.readString()
+	}
+	siblingCount := r.readU32()
+	if r.err != nil {
+		return nil
+	}
+	if siblingCount != 0 {
+		out.GroupCounts = make(map[string]map[string][]int64, int(siblingCount))
+		for range siblingCount {
+			col := r.readString()
+			valueCount := r.readU32()
+			if r.err != nil {
+				return nil
+			}
+			bySibling := make(map[string][]int64, int(valueCount))
+			for range valueCount {
+				value := r.readString()
 				n := r.readU32()
 				if r.err != nil {
 					return nil
@@ -827,49 +835,17 @@ func (r *segmentMetaReader) readTextStats() *TextStats {
 					r.err = io.ErrUnexpectedEOF
 					return nil
 				}
-				sums := make([]int64, int(n))
-				for i := range sums {
-					sums[i] = int64(r.readU64())
+				counts := make([]int64, int(n))
+				for i := range counts {
+					counts[i] = int64(r.readU64())
 				}
-				out.GroupSums[key] = sums
+				bySibling[value] = counts
 			}
+			out.GroupCounts[col] = bySibling
 		}
-		// GroupCounts (cross-text counts).
-		siblingCount := r.readU32()
-		if r.err != nil {
-			return nil
-		}
-		if siblingCount != 0 {
-			out.GroupCounts = make(map[string]map[string][]int64, int(siblingCount))
-			for range siblingCount {
-				col := r.readString()
-				valueCount := r.readU32()
-				if r.err != nil {
-					return nil
-				}
-				bySibling := make(map[string][]int64, int(valueCount))
-				for range valueCount {
-					value := r.readString()
-					n := r.readU32()
-					if r.err != nil {
-						return nil
-					}
-					if uint64(n) > uint64(r.remaining()/8) {
-						r.err = io.ErrUnexpectedEOF
-						return nil
-					}
-					counts := make([]int64, int(n))
-					for i := range counts {
-						counts[i] = int64(r.readU64())
-					}
-					bySibling[value] = counts
-				}
-				out.GroupCounts[col] = bySibling
-			}
-		}
-		if r.err != nil {
-			return nil
-		}
+	}
+	if r.err != nil {
+		return nil
 	}
 	return out
 }

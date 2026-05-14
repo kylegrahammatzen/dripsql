@@ -7,13 +7,13 @@ import (
 )
 
 // TestFooterColumnBreakdown measures the cost of fully decoding a segment
-// footer vs. only decoding a single column's worth of metadata, simulating
-// what a "footer v4 with per-column blobs" format would buy. Run with:
+// footer vs. only decoding a single column's worth of metadata. Run with:
 //
 //	go test ./internal/storage -run TestFooterColumnBreakdown -v
 //
 // It reads a real segment file from the structured bench DB so the numbers
-// reflect production-shaped metadata. Skipped if the file is missing.
+// reflect production-shaped metadata. Skipped when the file is missing or
+// written in a pre-v4 format (regenerate by running cmd/bench).
 func TestFooterColumnBreakdown(t *testing.T) {
 	const path = `..\..\db\bench\structured\seg-default\tables\events\segments\0000000000000001.dsv3`
 	if _, err := os.Stat(path); err != nil {
@@ -22,7 +22,7 @@ func TestFooterColumnBreakdown(t *testing.T) {
 
 	meta, segSize, err := ReadSegmentFooter(path)
 	if err != nil {
-		t.Fatalf("ReadSegmentFooter: %v", err)
+		t.Skipf("bench segment at %s not readable as v4 (regenerate with cmd/bench): %v", path, err)
 	}
 	if err := meta.LoadAllColumns(); err != nil {
 		t.Fatalf("LoadAllColumns: %v", err)
