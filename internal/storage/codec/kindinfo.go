@@ -8,17 +8,12 @@ import (
 
 // fixedKindBytes returns the per-row byte width for fixed-width kinds.
 // VecBool is excluded because it packs into validity-style words rather than
-// per-row bytes; varlen kinds (text/bytes/json) return (0, false).
+// per-row bytes; varlen kinds (text/bytes/json) return (0, false). This is a
+// thin compatibility shim over types.VecKind.FixedWidth so legacy codec
+// callsites don't need to handle the Width sentinel themselves.
 func fixedKindBytes(kind types.VecKind) (int, bool) {
-	switch kind {
-	case types.VecInt16:
-		return 2, true
-	case types.VecInt32, types.VecDate, types.VecFloat32, types.VecEnum32:
-		return 4, true
-	case types.VecInt64, types.VecDecimal64, types.VecTimestamp, types.VecTime, types.VecFloat64:
-		return 8, true
-	case types.VecUUID:
-		return 16, true
+	if w := kind.FixedWidth(); w > 0 {
+		return int(w), true
 	}
 	return 0, false
 }

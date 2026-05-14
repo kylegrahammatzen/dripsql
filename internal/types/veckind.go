@@ -53,6 +53,39 @@ func (k VecKind) IsVarBytes() bool {
 	}
 }
 
+// Width is the per-row physical byte width discriminator. Positive values are
+// byte widths for fixed-width kinds; the negative sentinels mark cases that
+// need bespoke handling (bools pack into validity-style words; var-bytes have
+// no fixed width).
+type Width int
+
+const (
+	WidthVarBytes Width = -1
+	WidthBool     Width = -2
+)
+
+// FixedWidth returns the per-row byte width for fixed-width kinds, or
+// WidthVarBytes/WidthBool for variable-length and packed-bool kinds. Callers
+// take the fixed-width fast path with the single test `w := k.FixedWidth();
+// w > 0`.
+func (k VecKind) FixedWidth() Width {
+	switch k {
+	case VecInt16:
+		return 2
+	case VecInt32, VecDate, VecFloat32, VecEnum32:
+		return 4
+	case VecInt64, VecDecimal64, VecTimestamp, VecTime, VecFloat64:
+		return 8
+	case VecUUID:
+		return 16
+	case VecBool:
+		return WidthBool
+	case VecText, VecBytes, VecJSON:
+		return WidthVarBytes
+	}
+	return 0
+}
+
 // IsFORPackable reports whether k is acceptable input to the FOR+BitPack
 // codec. Excludes VecDecimal64 because the decimal scale lives outside the
 // vector and cannot be reconstructed from a packed offset alone.
