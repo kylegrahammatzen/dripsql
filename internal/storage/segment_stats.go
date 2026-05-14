@@ -21,7 +21,7 @@ const (
 	// Segment-level bloom: at 8 bits/value with 3 probes the FPR is ~3%,
 	// which is fine for the "min/max already pruned most segments, bloom
 	// catches the rest" role. The previous 16 bits/value at 3 probes was
-	// ~0.5% FPR but 2× the storage; the high-cardinality int/UUID columns
+	// ~0.5% FPR but 2x the storage; the high-cardinality int/UUID columns
 	// (user_id, event_uuid, etc.) carried ~500 KB blooms per segment as a
 	// result. Halving bits-per-value halves the on-disk bloom footprint
 	// and cuts ~50% off the per-segment flate-decompress work during cold

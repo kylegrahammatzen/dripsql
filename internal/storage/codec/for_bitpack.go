@@ -11,7 +11,7 @@ import (
 
 // FORBitPack encodes integer-shaped vectors as a frame-of-reference base plus
 // bit-packed offsets. Best for clustered numeric ranges: a page of int64 values
-// in a 1024-wide window encodes at ~10 bits/row, ~6× smaller than Plain.
+// in a 1024-wide window encodes at ~10 bits/row, ~6x smaller than Plain.
 type FORBitPack struct{}
 
 func (FORBitPack) Encoding() types.Encoding { return types.EncodingFORBitPack }
@@ -165,7 +165,7 @@ func (FORBitPack) DecodeInto(page Page, dst *types.Vec) error {
 	return nil
 }
 
-// DecodeSelected bulk-decodes the page and ignores sel because the per-row offset-extraction path benchmarked 3-11× slower than DecodeInto at every density we measured.
+// DecodeSelected bulk-decodes the page and ignores sel because the per-row offset-extraction path benchmarked 3-11x slower than DecodeInto at every density we measured.
 func (FORBitPack) DecodeSelected(page Page, sel types.SelectionMask) (types.Vec, error) {
 	if page.Encoding != types.EncodingFORBitPack {
 		return types.Vec{}, fmt.Errorf("for+bitpack cannot decode selected %s", page.Encoding)

@@ -87,7 +87,7 @@ func (Plain) Decode(page Page) (types.Vec, error) {
 	return v, nil
 }
 
-// DecodeSelected bulk-decodes fixed-width pages and ignores sel because the per-row IterSet path benchmarked 36-56× slower than DecodeInto at every density we measured; var-bytes kinds keep the compact path since only copying selected bytes is a real memory win.
+// DecodeSelected bulk-decodes fixed-width pages and ignores sel because the per-row IterSet path benchmarked 36-56x slower than DecodeInto at every density we measured; var-bytes kinds keep the compact path since only copying selected bytes is a real memory win.
 func (Plain) DecodeSelected(page Page, sel types.SelectionMask) (types.Vec, error) {
 	if page.Encoding != types.EncodingFlat {
 		return types.Vec{}, fmt.Errorf("plain codec cannot decode selected %s", page.Encoding)

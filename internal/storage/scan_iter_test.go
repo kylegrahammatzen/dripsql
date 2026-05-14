@@ -374,7 +374,7 @@ func TestSegmentScanIteratorLateMaterializesSelectedPlainOutput(t *testing.T) {
 			t.Fatalf("score vector = %#v", col.V)
 		}
 		// Plain.DecodeSelected for fixed-width kinds bulk-decodes the page
-		// (benchmarks show this is 2-3× faster than per-row IterSet at every
+		// (benchmarks show this is 2-3x faster than per-row IterSet at every
 		// density), so unselected rows hold real page values rather than zeros.
 		// Callers must gate reads on sel — which the assertion below verifies.
 		assertMaskRows(t, sel, []int{1})
