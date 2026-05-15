@@ -82,7 +82,135 @@ func (p *Planner) planSelect(stmt *SelectStmt) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
+	pruneJoinedScans(rel)
 	return &Plan{Kind: PlanQuery, Rel: rel}, nil
+}
+
+// pruneJoinedScans walks the rel tree and narrows each joined RelScan to the columns its
+// alias is actually referenced under. The single-table scan already prunes through
+// scanProjectionColumnIDs; joined scans build with allColumnIDs and rely on this post-pass.
+func pruneJoinedScans(root *Rel) {
+	if root == nil {
+		return
+	}
+	scans := map[string]*Rel{}
+	var collectScans func(r *Rel)
+	collectScans = func(r *Rel) {
+		if r == nil {
+			return
+		}
+		if r.Op == RelScan && r.Alias != "" {
+			scans[types.NormalizeName(r.Alias)] = r
+		}
+		for _, in := range r.Inputs {
+			collectScans(in)
+		}
+	}
+	collectScans(root)
+	if len(scans) == 0 {
+		return
+	}
+	refs := make(map[string]map[ColumnID]struct{}, len(scans))
+	addRef := func(qualified string) {
+		dot := -1
+		for i := range len(qualified) {
+			if qualified[i] == '.' {
+				dot = i
+				break
+			}
+		}
+		if dot < 0 {
+			return
+		}
+		alias := types.NormalizeName(qualified[:dot])
+		colName := types.NormalizeName(qualified[dot+1:])
+		scan, ok := scans[alias]
+		if !ok {
+			return
+		}
+		for _, c := range scan.Table.Columns {
+			if types.NormalizeName(c.Name) == colName {
+				set := refs[alias]
+				if set == nil {
+					set = map[ColumnID]struct{}{}
+					refs[alias] = set
+				}
+				set[c.ID] = struct{}{}
+				return
+			}
+		}
+	}
+	var walkExpr func(e BoundExpr)
+	walkExpr = func(e BoundExpr) {
+		if e.Op == ExprColumn {
+			addRef(e.Column)
+			return
+		}
+		for _, a := range e.Args {
+			walkExpr(a)
+		}
+	}
+	var walkRel func(r *Rel)
+	walkRel = func(r *Rel) {
+		if r == nil {
+			return
+		}
+		switch r.Op {
+		case RelProject:
+			for _, p := range r.Projection {
+				walkExpr(p.Expr)
+			}
+		case RelFilter:
+			walkExpr(r.Predicate)
+		case RelSort:
+			for _, k := range r.SortKeys {
+				walkExpr(k.Expr)
+			}
+		case RelJoin:
+			for _, k := range r.JoinKeys {
+				walkExpr(k.Left)
+				walkExpr(k.Right)
+			}
+		case RelAggregate:
+			for _, g := range r.GroupBy {
+				walkExpr(g)
+			}
+			if r.Having != nil {
+				walkExpr(*r.Having)
+			}
+			for _, spec := range r.Aggregates {
+				if !spec.Star && spec.ArgName != "" {
+					addRef(spec.ArgName)
+				}
+			}
+			for _, spec := range r.Hidden {
+				if !spec.Star && spec.ArgName != "" {
+					addRef(spec.ArgName)
+				}
+			}
+		case RelScan:
+			if r.Where != nil {
+				walkExpr(*r.Where)
+			}
+		}
+		for _, in := range r.Inputs {
+			walkRel(in)
+		}
+	}
+	walkRel(root)
+	for alias, scan := range scans {
+		used := refs[alias]
+		if len(used) == 0 {
+			continue
+		}
+		narrowed := make([]ColumnID, 0, len(used))
+		for _, id := range scan.Columns {
+			if _, ok := used[id]; ok {
+				narrowed = append(narrowed, id)
+			}
+		}
+		narrowScanColumns(scan, narrowed)
+	}
 }
 
 // planFrom builds the source *Rel (RelScan for single-table, RelJoin chain for joined) and

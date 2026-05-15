@@ -64,6 +64,45 @@ type keyEncoder struct {
 	seed maphash.Seed
 }
 
+type joinKeyCol struct {
+	idx        int
+	kind       types.VecKind
+	enumLabels []string
+}
+
+// resolveJoinKeyCols pre-resolves the column index for each join key. splitJoinEquality
+// already requires keys to be column references, so the type switch in encodeRow can
+// dispatch on VecKind without going through evalCtx or ColumnByName per row.
+func resolveJoinKeyCols(batch types.Batch, keys []sql.BoundExpr) ([]joinKeyCol, error) {
+	cols := make([]joinKeyCol, len(keys))
+	for i, k := range keys {
+		if k.Op != sql.ExprColumn {
+			return nil, fmt.Errorf("hashjoin: join key must be a column reference, got op %v", k.Op)
+		}
+		col, ok := batch.ColumnByName(k.Column)
+		if !ok {
+			return nil, fmt.Errorf("hashjoin: column %q not in batch", k.Column)
+		}
+		idx := -1
+		for j := range batch.Columns {
+			if &batch.Columns[j] == col {
+				idx = j
+				break
+			}
+		}
+		if idx < 0 {
+			for j := range batch.Columns {
+				if batch.Columns[j].Name == col.Name {
+					idx = j
+					break
+				}
+			}
+		}
+		cols[i] = joinKeyCol{idx: idx, kind: col.V.Kind, enumLabels: col.EnumLabels}
+	}
+	return cols, nil
+}
+
 type columnTemplate struct {
 	Name       string
 	Type       types.Type
@@ -181,13 +220,16 @@ func (h *HashJoinOp) buildIndex() error {
 		}
 	}
 	for bi, bb := range build.batches {
-		ctx := newEvalCtx(bb.batch)
+		cols, err := resolveJoinKeyCols(bb.batch, h.RightKeys)
+		if err != nil {
+			return err
+		}
 		var loopErr error
 		bb.sel.IterSet(func(row int) {
 			if loopErr != nil {
 				return
 			}
-			key, sum, ok, err := h.rt.key.encode(ctx, h.RightKeys, row)
+			key, sum, ok, err := h.rt.key.encodeRow(bb.batch, cols, row)
 			if err != nil {
 				loopErr = err
 				return
@@ -233,14 +275,17 @@ func (h *HashJoinOp) collectPairs(leftBatch types.Batch, leftSel *types.Selectio
 	probe := &h.rt.probe
 	build := &h.rt.build
 	probe.pairs = probe.pairs[:0]
-	leftCtx := newEvalCtx(leftBatch)
+	cols, err := resolveJoinKeyCols(leftBatch, h.LeftKeys)
+	if err != nil {
+		return err
+	}
 	leftOuter := h.Kind == sql.JoinLeft || h.Kind == sql.JoinFull
 	var loopErr error
 	leftSel.IterSet(func(row int) {
 		if loopErr != nil {
 			return
 		}
-		key, sum, ok, err := h.rt.key.encode(leftCtx, h.LeftKeys, row)
+		key, sum, ok, err := h.rt.key.encodeRow(leftBatch, cols, row)
 		if err != nil {
 			loopErr = err
 			return
@@ -268,19 +313,65 @@ func (h *HashJoinOp) collectPairs(leftBatch types.Batch, leftSel *types.Selectio
 	return loopErr
 }
 
-func (e *keyEncoder) encode(ctx *evalCtx, keys []sql.BoundExpr, row int) ([]byte, uint64, bool, error) {
+func (e *keyEncoder) encodeRow(batch types.Batch, cols []joinKeyCol, row int) ([]byte, uint64, bool, error) {
 	e.buf = e.buf[:0]
-	for _, key := range keys {
-		v, err := ctx.eval(key, row)
-		if err != nil {
-			return nil, 0, false, err
-		}
-		if v == nil {
+	for _, kc := range cols {
+		col := &batch.Columns[kc.idx]
+		if col.V.Valid != nil && !col.V.Valid.IsValid(row) {
 			return nil, 0, false, nil
 		}
-		e.buf, err = appendJoinKey(e.buf, v)
-		if err != nil {
-			return nil, 0, false, err
+		switch kc.kind {
+		case types.VecInt16:
+			e.buf = append(e.buf, 'i')
+			e.buf = binary.BigEndian.AppendUint64(e.buf, uint64(int64(col.V.I16()[row])))
+		case types.VecInt32, types.VecDate:
+			e.buf = append(e.buf, 'i')
+			e.buf = binary.BigEndian.AppendUint64(e.buf, uint64(int64(col.V.I32()[row])))
+		case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+			e.buf = append(e.buf, 'i')
+			e.buf = binary.BigEndian.AppendUint64(e.buf, uint64(col.V.I64()[row]))
+		case types.VecFloat32:
+			x := float64(col.V.F32()[row])
+			if x == 0 {
+				x = 0
+			}
+			e.buf = append(e.buf, 'f')
+			e.buf = binary.BigEndian.AppendUint64(e.buf, math.Float64bits(x))
+		case types.VecFloat64:
+			x := col.V.F64()[row]
+			if x == 0 {
+				x = 0
+			}
+			e.buf = append(e.buf, 'f')
+			e.buf = binary.BigEndian.AppendUint64(e.buf, math.Float64bits(x))
+		case types.VecBool:
+			e.buf = append(e.buf, 'b')
+			if col.V.BoolBits()[row>>3]&(1<<(row&7)) != 0 {
+				e.buf = append(e.buf, 1)
+			} else {
+				e.buf = append(e.buf, 0)
+			}
+		case types.VecText, types.VecBytes, types.VecJSON:
+			b := col.V.Var().Bytes(row)
+			e.buf = append(e.buf, 's')
+			e.buf = binary.BigEndian.AppendUint32(e.buf, uint32(len(b)))
+			e.buf = append(e.buf, b...)
+		case types.VecUUID:
+			s := types.FormatUUID(col.V.UUID()[row])
+			e.buf = append(e.buf, 's')
+			e.buf = binary.BigEndian.AppendUint32(e.buf, uint32(len(s)))
+			e.buf = append(e.buf, s...)
+		case types.VecEnum32:
+			code := col.V.U32()[row]
+			if code == 0 || int(code-1) >= len(kc.enumLabels) {
+				return nil, 0, false, fmt.Errorf("hashjoin: enum code %d out of range", code)
+			}
+			label := kc.enumLabels[code-1]
+			e.buf = append(e.buf, 's')
+			e.buf = binary.BigEndian.AppendUint32(e.buf, uint32(len(label)))
+			e.buf = append(e.buf, label...)
+		default:
+			return nil, 0, false, fmt.Errorf("hashjoin: unsupported key kind %v", kc.kind)
 		}
 	}
 	return e.buf, maphash.Bytes(e.seed, e.buf), true, nil
