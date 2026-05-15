@@ -301,8 +301,8 @@ func (s *SortOp) canFastText() bool {
 	return false
 }
 
-// Keys are not copied. The comparator reads StringViews live out of each batch's
-// VarBytes. s.bufs retains source buffers so the backing storage outlives the sort.
+// Comparator reads bytes live from each batch's VarBytes, so s.bufs must retain every
+// source batch until the sort completes.
 func (s *SortOp) buildFastText() error {
 	total := s.countSelectedRows()
 	if total == 0 {
