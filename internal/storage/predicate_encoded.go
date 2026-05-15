@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
@@ -46,6 +47,65 @@ func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *types.Selectio
 	}
 	narrowDictEq(indices, code, valid, sel)
 	return true, newScratch, nil
+}
+
+func (b boundEqInt64) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+	colIdx, ok := findSegmentColumnIdx(seg, b.column)
+	if !ok {
+		return false, scratch, nil
+	}
+	page := seg.Cols[colIdx].Pages[pageIdx]
+	enc, ok := types.EncodingFromWire(page.Encoding)
+	if !ok || enc != types.EncodingFORBitPack {
+		return false, scratch, nil
+	}
+	rows := int(page.Rows)
+	ensureMaskSize(sel, rows)
+	if page.Flags&PageFlagAllNull != 0 {
+		return true, scratch, nil
+	}
+	payload, valid, allNull, newScratch, err := seg.ReadPagePayload(colIdx, pageIdx, scratch)
+	if err != nil {
+		return false, newScratch, err
+	}
+	if allNull {
+		return true, newScratch, nil
+	}
+	const forHeaderSize = 9
+	if len(payload) < forHeaderSize {
+		return false, newScratch, fmt.Errorf("EvalEncoded FOR: header truncated")
+	}
+	base := int64(binary.LittleEndian.Uint64(payload[0:8]))
+	width := int(payload[8])
+	if width < 1 || width > 64 {
+		return false, newScratch, fmt.Errorf("EvalEncoded FOR: width %d out of range", width)
+	}
+	residualSigned := b.value - base
+	if residualSigned < 0 {
+		sel.Clear()
+		return true, newScratch, nil
+	}
+	residual := uint64(residualSigned)
+	if width < 64 && residual >= (uint64(1)<<uint(width)) {
+		sel.Clear()
+		return true, newScratch, nil
+	}
+	residuals := make([]uint64, rows)
+	codec.Unpack(width, payload[forHeaderSize:], rows, residuals)
+	narrowFOREq(residuals, residual, valid, sel)
+	return true, newScratch, nil
+}
+
+func narrowFOREq(residuals []uint64, target uint64, valid types.Validity, sel *types.SelectionMask) {
+	sel.Clear()
+	for i, r := range residuals {
+		if r == target {
+			sel.Set(i)
+		}
+	}
+	if valid != nil {
+		applyValidity(valid, sel, len(residuals))
+	}
 }
 
 func findSegmentColumnIdx(seg *Segment, name string) (int, bool) {
