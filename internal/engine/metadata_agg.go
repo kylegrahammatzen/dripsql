@@ -22,7 +22,7 @@ func (db *DB) tryMetadataAggregate(plan *sql.Plan) (*Rows, bool, error) {
 		return nil, false, nil
 	}
 	agg := rel.Inputs[0]
-	if agg.Op != sql.RelAggregate || len(agg.GroupBy) != 0 || len(agg.Hidden) != 0 || agg.Having != nil || len(agg.Inputs) != 1 {
+	if agg.Op != sql.RelAggregate || len(agg.Hidden) != 0 || agg.Having != nil || len(agg.Inputs) != 1 {
 		return nil, false, nil
 	}
 	scan := agg.Inputs[0]
@@ -37,6 +37,12 @@ func (db *DB) tryMetadataAggregate(plan *sql.Plan) (*Rows, bool, error) {
 		if seg.DV != nil {
 			return nil, false, nil
 		}
+	}
+	if len(agg.GroupBy) == 1 {
+		return db.tryGroupByDictHistogram(plan, rel, agg, scan, segs)
+	}
+	if len(agg.GroupBy) != 0 {
+		return nil, false, nil
 	}
 	values := make(map[string]any, len(agg.Aggregates))
 	for _, a := range agg.Aggregates {
@@ -65,6 +71,85 @@ func (db *DB) tryMetadataAggregate(plan *sql.Plan) (*Rows, bool, error) {
 		row[i] = v
 	}
 	rows := &Rows{Columns: planOutputNames(plan), Values: [][]any{row}}
+	return rows, true, nil
+}
+
+// tryGroupByDictHistogram resolves `SELECT <col>, count(*) FROM t GROUP BY <col>` (plus
+// optional aliases / projections that reference only the group key and aggregate outputs)
+// from per-segment dict histograms written as .dh sidecars at seal time. All aggregates
+// must be count(*); the group key must be a single ExprColumn over a varbytes column;
+// every segment must have a sidecar (else fall back). Result row order is map order.
+func (db *DB) tryGroupByDictHistogram(plan *sql.Plan, rel, agg, scan *sql.Rel, segs []*storage.Segment) (*Rows, bool, error) {
+	if agg.GroupBy[0].Op != sql.ExprColumn {
+		return nil, false, nil
+	}
+	for _, a := range agg.Aggregates {
+		if a.Func != sql.AggregateCount {
+			return nil, false, nil
+		}
+		if !a.Star {
+			argCol, ok := scanColumnDefByID(scan, a.ArgColumn)
+			if !ok || argCol.Nullable {
+				return nil, false, nil
+			}
+		}
+	}
+	keyName := types.NormalizeName(agg.GroupBy[0].Column)
+	keyCol, ok := scanColumnDefByID(scan, agg.GroupBy[0].ColumnID)
+	if !ok {
+		return nil, false, nil
+	}
+	switch keyCol.Type.Kind {
+	case types.KindText, types.KindBytes, types.KindJSON:
+	default:
+		return nil, false, nil
+	}
+	merged := storage.DictHistogram{}
+	for _, seg := range segs {
+		h, ok := seg.DictHists[keyName]
+		if !ok {
+			return nil, false, nil
+		}
+		for k, v := range h {
+			merged[k] += v
+		}
+	}
+	if len(merged) == 0 {
+		return &Rows{Columns: planOutputNames(plan)}, true, nil
+	}
+	rows := &Rows{Columns: planOutputNames(plan), Values: make([][]any, 0, len(merged))}
+	countNames := make(map[string]struct{}, len(agg.Aggregates))
+	for _, a := range agg.Aggregates {
+		alias := a.Alias
+		if alias == "" {
+			alias = defaultAggOutputName(a.Func)
+		}
+		countNames[alias] = struct{}{}
+	}
+	for value, count := range merged {
+		row := make([]any, len(rel.Outputs))
+		ok := true
+		for i, o := range rel.Outputs {
+			if o.Expr.Op != sql.ExprColumn {
+				ok = false
+				break
+			}
+			if o.Expr.Column == agg.GroupBy[0].Column {
+				row[i] = value
+				continue
+			}
+			if _, isCount := countNames[o.Expr.Column]; isCount {
+				row[i] = int64(count)
+				continue
+			}
+			ok = false
+			break
+		}
+		if !ok {
+			return nil, false, nil
+		}
+		rows.Values = append(rows.Values, row)
+	}
 	return rows, true, nil
 }
 

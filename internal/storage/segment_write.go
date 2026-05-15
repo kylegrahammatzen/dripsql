@@ -56,7 +56,15 @@ func WriteSegmentWithCodecs(path string, pages []types.Batch, codecs map[string]
 		os.Remove(tmpPath)
 		return err
 	}
-	return syncDir(filepath.Dir(path))
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return err
+	}
+	// Dict histogram sidecar is best-effort: a failed write doesn't fail the segment,
+	// it just means the GROUP BY SMA falls back to the operator path for this segment.
+	if hist := buildDictHistograms(pages); hist != nil {
+		_ = writeDictHistogramSidecar(path, hist)
+	}
+	return nil
 }
 
 func writeSegmentBody(path string, pages []types.Batch, cols []writerColumn, codecs map[string]types.Encoding) error {

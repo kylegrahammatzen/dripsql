@@ -24,11 +24,12 @@ type SegmentColumn struct {
 }
 
 type Segment struct {
-	f       *os.File
-	path    string
-	bodyEnd int64
-	Cols    []SegmentColumn
-	DV      types.Validity
+	f         *os.File
+	path      string
+	bodyEnd   int64
+	Cols      []SegmentColumn
+	DV        types.Validity
+	DictHists DictHistograms
 }
 
 func (s *Segment) Path() string { return s.path }
@@ -74,7 +75,12 @@ func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
 		f.Close()
 		return nil, fmt.Errorf("OpenSegment: load DV: %w", err)
 	}
-	return &Segment{f: f, path: path, bodyEnd: bodyEnd, Cols: cols, DV: dv}, nil
+	hist, err := LoadDictHistograms(path)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("OpenSegment: load dict histograms: %w", err)
+	}
+	return &Segment{f: f, path: path, bodyEnd: bodyEnd, Cols: cols, DV: dv, DictHists: hist}, nil
 }
 
 const knownPageFlags = PageFlagAllValid | PageFlagAllNull | PageFlagInMembership | PageFlagEncodedEvalOK
