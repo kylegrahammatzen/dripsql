@@ -5,6 +5,7 @@ package exec
 
 import (
 	"fmt"
+	"runtime"
 
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
@@ -259,7 +260,11 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown) (O
 			residual = rel.Where
 		}
 	}
-	var op Operator = &ScanOp{Opts: opts, ColumnAlias: rel.Alias}
+	parallelism := 1
+	if topK == nil && len(segs) > 1 {
+		parallelism = runtime.GOMAXPROCS(0)
+	}
+	var op Operator = &ScanOp{Opts: opts, ColumnAlias: rel.Alias, Parallelism: parallelism}
 	if residual != nil {
 		op = &FilterOp{Source: op, Predicate: *residual}
 	}

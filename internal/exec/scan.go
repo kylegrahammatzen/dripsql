@@ -1,9 +1,12 @@
-// ScanOp adapts the push-based storage.Scan to a pull-based Operator via a goroutine + channel.
-// The producer goroutine pushes batches into a 1-buffered chan; Next reads them.
+// ScanOp adapts the push-based storage.Scan to a pull-based Operator. With Parallelism > 1
+// segments are partitioned across worker goroutines that share one output channel; output
+// order is then unordered across the segment set. Top-K pushdown requires a single
+// invocation across all segments so callers must leave Parallelism at 1 when Opts.TopK is set.
 package exec
 
 import (
 	"context"
+	"sync"
 
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
@@ -11,12 +14,14 @@ import (
 
 type ScanOp struct {
 	Opts        storage.ScanOpts
-	ColumnAlias string // when set, output columns are renamed to "alias.col"
+	ColumnAlias string
+	Parallelism int
 
 	ctx    context.Context
 	cancel context.CancelFunc
 	out    chan types.Batch
 	err    chan error
+	wg     sync.WaitGroup
 	state  operatorState
 }
 
@@ -28,17 +33,51 @@ func (s *ScanOp) Open(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	s.ctx, s.cancel = context.WithCancel(ctx)
-	s.out = make(chan types.Batch, 1)
-	s.err = make(chan error, 1)
-	go s.run()
+
+	workers := s.Parallelism
+	if workers < 1 || len(s.Opts.Segments) <= 1 || s.Opts.TopK != nil {
+		workers = 1
+	}
+	if workers > len(s.Opts.Segments) {
+		workers = len(s.Opts.Segments)
+	}
+
+	s.out = make(chan types.Batch, workers)
+	s.err = make(chan error, workers)
+
+	if workers == 1 {
+		go s.runShardClose(s.Opts.Segments)
+		return nil
+	}
+	shards := partitionSegments(s.Opts.Segments, workers)
+	for _, shard := range shards {
+		if len(shard) == 0 {
+			continue
+		}
+		s.wg.Add(1)
+		go s.runShard(shard)
+	}
+	go func() {
+		s.wg.Wait()
+		close(s.out)
+	}()
 	return nil
 }
 
-func (s *ScanOp) run() {
+func (s *ScanOp) runShardClose(segs []*storage.Segment) {
 	defer close(s.out)
-	err := storage.Scan(s.Opts, func(batch types.Batch, sel *types.SelectionMask) error {
-		// storage.Scan reuses decoded columns and the mask across pages.
-		// Deep-copy here so each emitted batch survives the next page decode.
+	s.runScan(segs)
+}
+
+func (s *ScanOp) runShard(segs []*storage.Segment) {
+	defer s.wg.Done()
+	s.runScan(segs)
+}
+
+func (s *ScanOp) runScan(segs []*storage.Segment) {
+	opts := s.Opts
+	opts.Segments = segs
+	err := storage.Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error {
 		cloned := cloneBatch(batch, s.ColumnAlias)
 		clonedSel := sel.Clone()
 		cloned.Sel = &clonedSel
@@ -49,7 +88,21 @@ func (s *ScanOp) run() {
 			return nil
 		}
 	})
-	s.err <- err
+	if err != nil {
+		select {
+		case s.err <- err:
+		default:
+		}
+	}
+}
+
+func partitionSegments(segs []*storage.Segment, workers int) [][]*storage.Segment {
+	out := make([][]*storage.Segment, workers)
+	for i, seg := range segs {
+		bucket := i % workers
+		out[bucket] = append(out[bucket], seg)
+	}
+	return out
 }
 
 func cloneBatch(b types.Batch, alias string) types.Batch {
@@ -78,8 +131,12 @@ func (s *ScanOp) Next() (types.Batch, bool, error) {
 		return types.Batch{}, false, s.ctx.Err()
 	case batch, ok := <-s.out:
 		if !ok {
-			err := <-s.err
-			return types.Batch{}, false, err
+			select {
+			case err := <-s.err:
+				return types.Batch{}, false, err
+			default:
+				return types.Batch{}, false, nil
+			}
 		}
 		return batch, true, nil
 	}
@@ -93,13 +150,6 @@ func (s *ScanOp) Close() error {
 		for range s.out {
 		}
 	}
-	if s.err != nil {
-		select {
-		case <-s.err:
-		default:
-		}
-	}
 	s.state.close()
 	return nil
 }
-
