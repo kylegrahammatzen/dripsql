@@ -32,8 +32,15 @@ type writerColumn struct {
 }
 
 func WriteSegment(path string, pages []types.Batch) error {
-	// Any pre-existing path.tmp is debris from a crashed prior write.
-	// The contract is that after WriteSegment returns no tmp file remains.
+	return WriteSegmentWithCodecs(path, pages, nil)
+}
+
+// WriteSegmentWithCodecs writes a segment and honors per-column codec overrides keyed by
+// normalized column name. An entry mapped to EncodingAuto (or absent / empty) keeps the
+// cascade chooser; any other Encoding bypasses Pick and uses that codec directly. The
+// caller is responsible for ensuring the codec actually supports the column kind; an
+// unsupported override surfaces as an Encode error at write time.
+func WriteSegmentWithCodecs(path string, pages []types.Batch, codecs map[string]types.Encoding) error {
 	tmpPath := path + ".tmp"
 	_ = os.Remove(tmpPath)
 
@@ -41,7 +48,7 @@ func WriteSegment(path string, pages []types.Batch) error {
 	if err != nil {
 		return err
 	}
-	if err := writeSegmentBody(tmpPath, pages, cols); err != nil {
+	if err := writeSegmentBody(tmpPath, pages, cols, codecs); err != nil {
 		os.Remove(tmpPath)
 		return err
 	}
@@ -52,7 +59,7 @@ func WriteSegment(path string, pages []types.Batch) error {
 	return syncDir(filepath.Dir(path))
 }
 
-func writeSegmentBody(path string, pages []types.Batch, cols []writerColumn) error {
+func writeSegmentBody(path string, pages []types.Batch, cols []writerColumn, codecs map[string]types.Encoding) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -67,7 +74,7 @@ func writeSegmentBody(path string, pages []types.Batch, cols []writerColumn) err
 	if _, err := f.Write([]byte(Magic)); err != nil {
 		return err
 	}
-	if err := writePayloads(f, pages, cols); err != nil {
+	if err := writePayloads(f, pages, cols, codecs); err != nil {
 		return err
 	}
 	footer, err := encodeFooter(cols)
@@ -305,10 +312,14 @@ func marshalColumnStats(k types.VecKind, pages []types.Batch, colIdx int, dst []
 	}
 }
 
-func writePayloads(f *os.File, pages []types.Batch, cols []writerColumn) error {
+func writePayloads(f *os.File, pages []types.Batch, cols []writerColumn, codecs map[string]types.Encoding) error {
 	bodyOff := uint64(MagicLen)
 	var scratch []byte
 	for ci := range cols {
+		override := types.EncodingAuto
+		if codecs != nil {
+			override = codecs[types.NormalizeName(cols[ci].Schema.Name)]
+		}
 		var rowStart uint32
 		for pageIdx, batch := range pages {
 			col := batch.Columns[ci]
@@ -333,10 +344,20 @@ func writePayloads(f *os.File, pages []types.Batch, cols []writerColumn) error {
 				page.Encoding = types.EncodingFlat.Wire()
 				page.Flags = PageFlagAllNull
 			case pageNulls == 0:
-				// All-valid: existing codec-cascade behavior.
-				codecImpl, _, ok := codec.Pick(col.V)
-				if !ok {
-					return fmt.Errorf("WriteSegment: no codec accepts col %q page %d kind %v", col.Name, pageIdx, col.V.Kind)
+				// All-valid: cascade chooser by default, user override when set.
+				var codecImpl codec.Codec
+				if override != types.EncodingAuto {
+					c, err := codec.Lookup(override)
+					if err != nil {
+						return fmt.Errorf("WriteSegment: col %q codec override %v: %w", col.Name, override, err)
+					}
+					codecImpl = c
+				} else {
+					c, _, ok := codec.Pick(col.V)
+					if !ok {
+						return fmt.Errorf("WriteSegment: no codec accepts col %q page %d kind %v", col.Name, pageIdx, col.V.Kind)
+					}
+					codecImpl = c
 				}
 				payload, err := codecImpl.Encode(col.V, scratch[:0])
 				if err != nil {

@@ -44,7 +44,7 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan) (int64, error) {
 			return err
 		}
 		path := db.nextSegmentPath(def.Name)
-		if err := storage.WriteSegment(path, []types.Batch{batch}); err != nil {
+		if err := storage.WriteSegmentWithCodecs(path, []types.Batch{batch}, columnCodecs(def)); err != nil {
 			return err
 		}
 		stage.adds = append(stage.adds, storage.ManifestSegmentAdd{Path: path, Rows: uint32(pending.rows)})

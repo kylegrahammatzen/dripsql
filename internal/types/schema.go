@@ -24,6 +24,7 @@ type ColumnSpec struct {
 	Name     string
 	Type     Type
 	Nullable bool
+	Codec    Encoding
 }
 
 type TableOptions struct {

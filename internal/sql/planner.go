@@ -463,10 +463,15 @@ func BindCreateTableSpec(stmt *CreateTableStmt) (types.TableSpec, error) {
 
 	columns := make([]types.ColumnSpec, 0, len(stmt.Columns))
 	for _, col := range stmt.Columns {
+		codec, err := parseCodecName(col.Codec)
+		if err != nil {
+			return types.TableSpec{}, fmt.Errorf("column %q: %w", col.Name, err)
+		}
 		columns = append(columns, types.ColumnSpec{
 			Name:     types.NormalizeName(col.Name),
 			Type:     types.Parse(types.NormalizeName(col.Type)),
 			Nullable: !col.NotNull,
+			Codec:    codec,
 		})
 	}
 
@@ -484,6 +489,20 @@ func BindCreateTableSpec(stmt *CreateTableStmt) (types.TableSpec, error) {
 		return types.TableSpec{}, err
 	}
 	return spec, nil
+}
+
+// parseCodecName converts a user-declared `codec = '...'` string into types.Encoding.
+// Empty string means "no override" (cascade chooser picks). Unknown names are a binder
+// error so typos surface before any catalog mutation lands.
+func parseCodecName(name string) (types.Encoding, error) {
+	if name == "" {
+		return types.EncodingAuto, nil
+	}
+	enc, ok := types.EncodingFromName(name)
+	if !ok {
+		return types.EncodingAuto, fmt.Errorf("unknown codec %q", name)
+	}
+	return enc, nil
 }
 
 func bindTableOptions(options []TableOption) (types.TableOptions, error) {

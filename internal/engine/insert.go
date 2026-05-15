@@ -36,7 +36,7 @@ func (db *DB) insert(ctx context.Context, plan *sql.Plan) (int64, error) {
 			os.Remove(path)
 		}
 	}()
-	if err := storage.WriteSegment(path, []types.Batch{batch}); err != nil {
+	if err := storage.WriteSegmentWithCodecs(path, []types.Batch{batch}, columnCodecs(def)); err != nil {
 		return 0, err
 	}
 	m, err := db.manifestFor(def.Name)

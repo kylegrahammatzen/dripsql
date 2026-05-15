@@ -23,6 +23,7 @@ type BoundColumnDef struct {
 	Type     types.Type
 	Labels   []string
 	Nullable bool
+	Codec    types.Encoding
 }
 
 type BoundTableDef struct {

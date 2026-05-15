@@ -55,6 +55,7 @@ type ColumnDef struct {
 	Name    string
 	Type    string
 	NotNull bool
+	Codec   string
 }
 
 type TableOption struct {

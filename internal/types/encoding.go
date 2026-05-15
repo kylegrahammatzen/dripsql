@@ -73,3 +73,26 @@ func EncodingFromWire(b uint8) (Encoding, bool) {
 	}
 	return e, true
 }
+
+// EncodingFromName maps a user-facing string (case-insensitive) to an Encoding. The
+// "auto" name is rejected so DDL cannot smuggle the sentinel onto the wire; callers that
+// want the default behaviour should leave the Codec field zero (which IS EncodingAuto).
+// "plain" is accepted as a friendlier alias for the internal "flat" name.
+func EncodingFromName(name string) (Encoding, bool) {
+	if name == "" {
+		return EncodingAuto, false
+	}
+	want := NormalizeName(name)
+	if want == "plain" {
+		return EncodingFlat, true
+	}
+	for i, info := range encodingTable {
+		if Encoding(i) == EncodingAuto {
+			continue
+		}
+		if info.name == want {
+			return Encoding(i), true
+		}
+	}
+	return EncodingAuto, false
+}

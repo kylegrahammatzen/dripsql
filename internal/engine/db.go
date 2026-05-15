@@ -149,6 +149,23 @@ func (db *DB) table(name string) (tableEntry, error) {
 	return entry, nil
 }
 
+// columnCodecs converts a BoundTableDef into a name -> Encoding map for use with
+// storage.WriteSegmentWithCodecs. Columns left at EncodingAuto are omitted so the
+// storage layer falls back to the cascade chooser for them.
+func columnCodecs(def sql.BoundTableDef) map[string]types.Encoding {
+	var out map[string]types.Encoding
+	for _, c := range def.Columns {
+		if c.Codec == types.EncodingAuto {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]types.Encoding, len(def.Columns))
+		}
+		out[types.NormalizeName(c.Name)] = c.Codec
+	}
+	return out
+}
+
 func (db *DB) boundTable(entry tableEntry) sql.BoundTableDef {
 	cols := make([]sql.BoundColumnDef, len(entry.spec.Columns))
 	for i, col := range entry.spec.Columns {
@@ -164,6 +181,7 @@ func (db *DB) boundTable(entry tableEntry) sql.BoundTableDef {
 			Type:     col.Type,
 			Nullable: col.Nullable,
 			Labels:   labels,
+			Codec:    col.Codec,
 		}
 	}
 	return sql.BoundTableDef{

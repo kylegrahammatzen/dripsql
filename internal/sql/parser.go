@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 type parser struct {
@@ -476,6 +478,23 @@ func (p *parser) parseColumnDef() (ColumnDef, error) {
 			col.NotNull = false
 		case "primary", "unique", "check", "default", "references", "constraint", "foreign":
 			return ColumnDef{}, p.errorAt(tok, "unsupported column constraint %q", tok.lit)
+		case "with":
+			_, _ = p.next()
+			opts, err := p.parseColumnOptions()
+			if err != nil {
+				return ColumnDef{}, err
+			}
+			for _, o := range opts {
+				switch types.NormalizeName(o.Name) {
+				case "codec":
+					if o.Value.Kind != ValueString {
+						return ColumnDef{}, p.errorAt(tok, "codec value must be a string literal")
+					}
+					col.Codec = o.Value.String
+				default:
+					return ColumnDef{}, p.errorAt(tok, "unknown column option %q", o.Name)
+				}
+			}
 		default:
 			return ColumnDef{}, p.errorAt(tok, "unexpected token %q in column definition", tok.lit)
 		}
@@ -489,7 +508,22 @@ func (p *parser) parseType() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if tok.typ != tokIdent || isColumnConstraintStart(tok.lit) {
+		if tok.typ != tokIdent {
+			break
+		}
+		// "with" terminates the type only when followed by "(" — that's our column
+		// option marker. Bare "with" inside multi-word types like
+		// `timestamp with time zone` keeps flowing into the type name.
+		if tok.lit == "with" {
+			state := p.mark()
+			_, _ = p.next()
+			next, err := p.peek()
+			p.restore(state)
+			if err == nil && next.typ == tokLParen {
+				break
+			}
+		}
+		if tok.lit != "with" && isColumnConstraintStart(tok.lit) {
 			break
 		}
 		_, _ = p.next()
@@ -509,6 +543,12 @@ func (p *parser) parseOptionalTableOptions() ([]TableOption, error) {
 	if ok, err := p.maybeWord("with"); err != nil || !ok {
 		return nil, err
 	}
+	return p.parseColumnOptions()
+}
+
+// parseColumnOptions reads `( name = scalar [, ...] )` starting at the opening paren.
+// Used by both table-level WITH (already consumed the keyword) and per-column WITH.
+func (p *parser) parseColumnOptions() ([]TableOption, error) {
 	if _, err := p.expect(tokLParen); err != nil {
 		return nil, err
 	}
@@ -526,7 +566,6 @@ func (p *parser) parseOptionalTableOptions() ([]TableOption, error) {
 			return nil, err
 		}
 		options = append(options, TableOption{Name: name, Value: value})
-
 		tok, err := p.peek()
 		if err != nil {
 			return nil, err
@@ -571,7 +610,7 @@ func (p *parser) parseOptionScalar() (Value, error) {
 }
 
 func isColumnConstraintStart(word string) bool {
-	return word == "not" || word == "null" || word == "default" || word == "references" || isUnsupportedTableConstraint(word)
+	return word == "not" || word == "null" || word == "default" || word == "references" || word == "with" || isUnsupportedTableConstraint(word)
 }
 
 func isUnsupportedTableConstraint(word string) bool {
