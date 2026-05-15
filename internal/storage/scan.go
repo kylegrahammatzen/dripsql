@@ -4,6 +4,7 @@ package storage
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/types"
@@ -134,21 +135,38 @@ func selectTopKPages(segments []*Segment, tk *TopKPushdown) map[[2]int]bool {
 	if total <= need {
 		return nil
 	}
+	// Linear pruning via sort + prefix/suffix sums.
+	// DESC: page r is dominated by pages with min > r.max. Sort refs by min ascending;
+	// for each r, binary-search the first index with min > r.max and read a precomputed
+	// suffix-sum of rows from that index. ASC mirrors with max ascending + prefix sum
+	// of rows for indices with max < r.min.
+	sorted := make([]pageRef, len(refs))
+	copy(sorted, refs)
+	if tk.Desc {
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].min < sorted[j].min })
+	} else {
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].max < sorted[j].max })
+	}
+	cum := make([]int64, len(sorted)+1)
+	if tk.Desc {
+		for i := len(sorted) - 1; i >= 0; i-- {
+			cum[i] = cum[i+1] + int64(sorted[i].rows)
+		}
+	} else {
+		for i := 0; i < len(sorted); i++ {
+			cum[i+1] = cum[i] + int64(sorted[i].rows)
+		}
+	}
 	selected := make(map[[2]int]bool, len(refs))
 	pruned := false
 	for _, r := range refs {
 		var betterRows int64
-		for _, other := range refs {
-			if tk.Desc {
-				if other.min > r.max {
-					betterRows += int64(other.rows)
-				}
-			} else if other.max < r.min {
-				betterRows += int64(other.rows)
-			}
-			if betterRows >= need {
-				break
-			}
+		if tk.Desc {
+			idx := sort.Search(len(sorted), func(i int) bool { return sorted[i].min > r.max })
+			betterRows = cum[idx]
+		} else {
+			idx := sort.Search(len(sorted), func(i int) bool { return sorted[i].max >= r.min })
+			betterRows = cum[idx]
 		}
 		if betterRows >= need {
 			pruned = true
