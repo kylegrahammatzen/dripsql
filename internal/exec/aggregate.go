@@ -219,9 +219,8 @@ func (a *AggregateOp) aggregateBatchIntKey(batch types.Batch, col *types.Column,
 	return loopErr
 }
 
-// aggregateBatchTextKey is the hot path for `GROUP BY <text-col>`. The map index uses
-// string(byteSlice) which Go's compiler converts without allocation when used purely as a
-// map key. Allocation only happens on a miss when we materialize the key into the group.
+// `idx[string(b)]` is the well-known compiler trick that avoids the per-lookup string
+// allocation. The miss branch materializes the key only when we record a new group.
 func (a *AggregateOp) aggregateBatchTextKey(batch types.Batch, col *types.Column, specCols []aggCol, idx map[string]int) error {
 	valid := col.V.Valid
 	vb := col.V.Var()

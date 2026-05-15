@@ -1,5 +1,5 @@
 // EXPLAIN emits the bound Rel tree as text rows via Rel.String. ANALYZE prefixes a
-// header until per-operator timing wrappers land.
+// placeholder header until per-operator timing wrappers land.
 package engine
 
 import (

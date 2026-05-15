@@ -230,8 +230,6 @@ func (s *SortOp) canFastInt64() bool {
 	return false
 }
 
-// buildFastInt64 is the K==0 full-sort path; K>0 is captured by buildTopKInt64Streaming
-// before any rows get buffered. Reaches here only when full materialization is required.
 func (s *SortOp) buildFastInt64() error {
 	total := s.countSelectedRows()
 	if total == 0 {
@@ -303,9 +301,8 @@ func (s *SortOp) canFastText() bool {
 	return false
 }
 
-// buildFastText sorts a single varbytes key with bytes.Compare. Keys are not copied: the
-// comparator reads StringViews live out of each batch's VarBytes. Source buffers are
-// retained by s.bufs so the backing storage outlives the sort.
+// Keys are not copied. The comparator reads StringViews live out of each batch's
+// VarBytes. s.bufs retains source buffers so the backing storage outlives the sort.
 func (s *SortOp) buildFastText() error {
 	total := s.countSelectedRows()
 	if total == 0 {

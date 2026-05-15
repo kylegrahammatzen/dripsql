@@ -1,5 +1,4 @@
-// Plan formatter: textual operator tree for EXPLAIN and debugging.
-// Rel.String walks the bound tree top-down, two-space indent per depth.
+// Textual operator tree for EXPLAIN and debugging. Two-space indent per depth.
 package sql
 
 import (

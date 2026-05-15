@@ -35,11 +35,8 @@ func WriteSegment(path string, pages []types.Batch) error {
 	return WriteSegmentWithCodecs(path, pages, nil)
 }
 
-// WriteSegmentWithCodecs writes a segment and honors per-column codec overrides keyed by
-// normalized column name. An entry mapped to EncodingAuto (or absent / empty) keeps the
-// cascade chooser; any other Encoding bypasses Pick and uses that codec directly. The
-// caller is responsible for ensuring the codec actually supports the column kind; an
-// unsupported override surfaces as an Encode error at write time.
+// An override of EncodingAuto (or absent) keeps the cascade. Any other Encoding
+// bypasses Pick. Codec/kind mismatches surface as an Encode error at write time.
 func WriteSegmentWithCodecs(path string, pages []types.Batch, codecs map[string]types.Encoding) error {
 	tmpPath := path + ".tmp"
 	_ = os.Remove(tmpPath)

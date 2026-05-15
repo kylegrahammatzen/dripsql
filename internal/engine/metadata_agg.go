@@ -1,7 +1,6 @@
-// Metadata-only aggregate short-circuit: count(*), min(col), max(col) without WHERE and
-// without GROUP BY resolve from per-segment row counts and column stats. Skipped when
-// any segment carries a deletion vector (live count + min/max in the presence of deletes
-// would need to consult the DV bitmap, not just metadata).
+// Metadata-only aggregate short-circuit. Resolves count, min, max, and varbytes
+// GROUP BY count from manifest row counts, per-column stats, and the dict-histogram
+// sidecar. Skipped when any segment carries a deletion vector.
 package engine
 
 import (
@@ -74,11 +73,8 @@ func (db *DB) tryMetadataAggregate(plan *sql.Plan) (*Rows, bool, error) {
 	return rows, true, nil
 }
 
-// tryGroupByDictHistogram resolves `SELECT <col>, count(*) FROM t GROUP BY <col>` (plus
-// optional aliases / projections that reference only the group key and aggregate outputs)
-// from per-segment dict histograms written as .dh sidecars at seal time. All aggregates
-// must be count(*); the group key must be a single ExprColumn over a varbytes column;
-// every segment must have a sidecar (else fall back). Result row order is map order.
+// All aggregates must be count() (Star or over a non-nullable column). Every segment
+// must have a .dh sidecar for the group column or we fall back to the operator path.
 func (db *DB) tryGroupByDictHistogram(plan *sql.Plan, rel, agg, scan *sql.Rel, segs []*storage.Segment) (*Rows, bool, error) {
 	if agg.GroupBy[0].Op != sql.ExprColumn {
 		return nil, false, nil

@@ -1,7 +1,7 @@
-// ScanOp adapts the push-based storage.Scan to a pull-based Operator. With Parallelism > 1
-// segments are partitioned across worker goroutines that share one output channel; output
-// order is then unordered across the segment set. Top-K pushdown requires a single
-// invocation across all segments so callers must leave Parallelism at 1 when Opts.TopK is set.
+// ScanOp adapts push-based storage.Scan to pull-based Operator. Parallelism > 1
+// partitions segments across workers sharing one output channel; output order is
+// unordered. TopK pushdown requires a single pass across all segments to stay sound,
+// so callers must leave Parallelism at 1 when Opts.TopK is set.
 package exec
 
 import (

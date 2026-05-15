@@ -1,7 +1,5 @@
-// Dict-histogram sidecar (.dh) for SELECT <col>, count(*) GROUP BY <col> SMA.
-// Per-segment per-varbytes-column map[value][]byte -> row count, computed once at seal
-// time and aggregated across segments at query time. The sidecar lives next to the
-// .dsv4 segment; absence is tolerated (metadata SMA falls back to operator scan).
+// Dict-histogram sidecar for GROUP BY count SMA on varbytes columns. Built at seal
+// time, loaded at segment open, consulted by engine.tryGroupByDictHistogram.
 package storage
 
 import (
@@ -19,21 +17,16 @@ const (
 	dictHistFileExtension = ".dh"
 )
 
-// DictHistogram maps a varbytes value to its row count within a segment. Encoded values
-// are raw bytes (the same bytes stored in the page payload), not parsed strings.
 type DictHistogram map[string]uint64
 
-// DictHistograms is keyed by normalized column name.
 type DictHistograms map[string]DictHistogram
 
-// dictHistogramPath returns the sidecar path for a given segment path.
 func dictHistogramPath(segPath string) string {
 	return segPath + dictHistFileExtension
 }
 
-// buildDictHistograms scans batch columns for varbytes kinds and computes per-column
-// row-count histograms. Returns nil when no column qualifies. Columns whose distinct
-// count exceeds dictHistMaxDistinct are skipped (the SMA wouldn't speed them up).
+// Columns whose distinct value count exceeds dictHistMaxDistinct are skipped: the SMA
+// would not pay back the sidecar storage on a high-cardinality column.
 func buildDictHistograms(pages []types.Batch) DictHistograms {
 	if len(pages) == 0 {
 		return nil
@@ -73,8 +66,6 @@ func buildDictHistograms(pages []types.Batch) DictHistograms {
 	return out
 }
 
-// writeDictHistogramSidecar writes the histograms next to the segment via tmp+rename
-// followed by a parent dir fsync on POSIX. Empty input is a no-op (no file created).
 func writeDictHistogramSidecar(segPath string, h DictHistograms) error {
 	if len(h) == 0 {
 		return nil
@@ -109,8 +100,8 @@ func encodeDictHistograms(h DictHistograms) []byte {
 	return w.Bytes()
 }
 
-// LoadDictHistograms reads a sidecar file if it exists. A missing file returns nil
-// without an error; any other I/O or decode error is surfaced.
+// Missing sidecar returns (nil, nil). Bad magic or truncated payload is an error so
+// silent corruption never serves stale data.
 func LoadDictHistograms(segPath string) (DictHistograms, error) {
 	path := dictHistogramPath(segPath)
 	data, err := os.ReadFile(path)

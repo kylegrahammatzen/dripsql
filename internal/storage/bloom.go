@@ -1,8 +1,5 @@
-// Per-segment Bloom filter sidecar (.bf) for int equality pruning. Built at seal time
-// for every Int16/Int32/Int64-class column; consulted by boundEqInt64.PruneSegment when
-// the value falls inside the column min/max range but is not in the per-segment set.
-// Verify-after-prediction per goals.md non-negotiables: Bloom only proves absence;
-// false positives fall through to the regular scan.
+// Per-segment Bloom filter sidecar for int equality. Built at seal time, consulted by
+// boundEqInt64.PruneSegment. Bloom only proves absence; false positives fall through.
 package storage
 
 import (
@@ -31,8 +28,7 @@ type IntBlooms map[string]*IntBloom
 
 func bloomPath(segPath string) string { return segPath + bloomFileSuffix }
 
-// newIntBloom sizes the filter for n distinct keys at the target bits-per-entry. m is
-// rounded up to a multiple of 64 so reset / get can address whole words.
+// m is rounded up to a multiple of 64 so word-aligned bit ops cover the whole array.
 func newIntBloom(n int) *IntBloom {
 	if n <= 0 {
 		n = 1
@@ -47,8 +43,6 @@ func newIntBloom(n int) *IntBloom {
 	return &IntBloom{Bits: make([]uint64, m/64), M: m, K: bloomMaxK}
 }
 
-// Add records `v` in the filter. Uses double-hashing over splitmix64 derivatives so
-// neighbouring values do not collide trivially.
 func (b *IntBloom) Add(v int64) {
 	h1, h2 := bloomHashes(uint64(v))
 	for i := uint8(0); i < b.K; i++ {
@@ -57,8 +51,6 @@ func (b *IntBloom) Add(v int64) {
 	}
 }
 
-// Contains reports whether `v` MIGHT be present. False positives possible (~1%); a false
-// return is a hard absence proof for the segment.
 func (b *IntBloom) Contains(v int64) bool {
 	h1, h2 := bloomHashes(uint64(v))
 	for i := uint8(0); i < b.K; i++ {
@@ -87,8 +79,6 @@ func bloomHashes(x uint64) (uint64, uint64) {
 	return h1, h2
 }
 
-// buildIntBlooms scans every column whose kind decodes into int64 keys and builds a
-// per-column Bloom. Columns with no rows or all-null are skipped.
 func buildIntBlooms(pages []types.Batch) IntBlooms {
 	if len(pages) == 0 {
 		return nil
@@ -183,7 +173,6 @@ func encodeBlooms(blooms IntBlooms) []byte {
 	return w.Bytes()
 }
 
-// LoadIntBlooms reads a .bf sidecar if present. Missing file returns nil without error.
 func LoadIntBlooms(segPath string) (IntBlooms, error) {
 	path := bloomPath(segPath)
 	data, err := os.ReadFile(path)

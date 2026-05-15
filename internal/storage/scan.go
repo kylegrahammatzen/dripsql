@@ -135,11 +135,9 @@ func selectTopKPages(segments []*Segment, tk *TopKPushdown) map[[2]int]bool {
 	if total <= need {
 		return nil
 	}
-	// Linear pruning via sort + prefix/suffix sums.
-	// DESC: page r is dominated by pages with min > r.max. Sort refs by min ascending;
-	// for each r, binary-search the first index with min > r.max and read a precomputed
-	// suffix-sum of rows from that index. ASC mirrors with max ascending + prefix sum
-	// of rows for indices with max < r.min.
+	// DESC: page r is dominated by pages with min > r.max. Sort by min ascending,
+	// binary-search the first index past r.max, read a precomputed suffix sum of rows.
+	// ASC mirrors with max ascending + prefix sum for indices with max < r.min.
 	sorted := make([]pageRef, len(refs))
 	copy(sorted, refs)
 	if tk.Desc {

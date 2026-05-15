@@ -491,9 +491,8 @@ func BindCreateTableSpec(stmt *CreateTableStmt) (types.TableSpec, error) {
 	return spec, nil
 }
 
-// parseCodecName converts a user-declared `codec = '...'` string into types.Encoding.
-// Empty string means "no override" (cascade chooser picks). Unknown names are a binder
-// error so typos surface before any catalog mutation lands.
+// Empty string means no override. Unknown names are a binder error so typos surface
+// before any catalog mutation lands.
 func parseCodecName(name string) (types.Encoding, error) {
 	if name == "" {
 		return types.EncodingAuto, nil

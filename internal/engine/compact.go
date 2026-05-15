@@ -1,7 +1,5 @@
-// Compact rewrites segments whose deletion-vector marks more than half their rows as
-// invalid: read the live rows out, write a fresh single-page segment, and commit one
-// atomic manifest entry that adds the replacement and tombstones the source. Vacuum
-// removes versioned .dv files no longer referenced by the latest manifest snapshot.
+// Compact rewrites half-or-more-deleted segments via one atomic manifest swap. Vacuum
+// removes versioned .dv files no longer referenced by the manifest snapshot.
 package engine
 
 import (
@@ -15,8 +13,6 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-// Compact rewrites any segment in `table` whose DV invalidates strictly more than half
-// its rows. Returns the number of segments rewritten. Caller must not hold db.mu.
 func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -92,9 +88,6 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 	return rewritten, nil
 }
 
-// Vacuum walks each table's segments directory and removes any versioned .dv file (the
-// `<segment>.dv.<token>` form written by UPDATE / DELETE / Compact) that the current
-// manifest snapshot no longer references. Returns the count of files removed.
 func (db *DB) Vacuum() (int, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -153,9 +146,9 @@ func (db *DB) vacuumTableLocked(table string) (int, error) {
 	return removed, nil
 }
 
-// readSegmentLiveRows decodes every live row from seg into one Batch. Used by compaction
-// to materialize a small replacement. Caller's responsibility to ensure the live row count
-// fits in a single batch (StandardBatchRows).
+// Caller must ensure the segment's live row count fits in a single batch
+// (StandardBatchRows). Compact only invokes this when liveCount <= rows/2, and rows
+// is bounded by the seal-time page size.
 func readSegmentLiveRows(seg *storage.Segment) (types.Batch, error) {
 	opts := storage.ScanOpts{Segments: []*storage.Segment{seg}}
 	var collected []types.Column
