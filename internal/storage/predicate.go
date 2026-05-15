@@ -3,7 +3,6 @@
 package storage
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 
@@ -279,21 +278,8 @@ func (b boundEqInt64) Eval(batch types.Batch, sel *types.SelectionMask) {
 	if !ok {
 		return
 	}
-	vals := col.V.I64()
-	if col.V.Valid == nil {
-		for i, v := range vals {
-			if v == b.value {
-				sel.Set(i)
-			}
-		}
-		return
-	}
-	valid := col.V.Valid
-	for i, v := range vals {
-		if v == b.value && valid.IsValid(i) {
-			sel.Set(i)
-		}
-	}
+	sel.FillAll()
+	types.FilterOrdered(col.V.I64(), col.V.Valid, b.value, types.FilterEqual, *sel, sel)
 }
 
 func (b boundEqInt64) PruneSegment(seg *Segment) bool {
@@ -334,21 +320,8 @@ func (b boundLtInt64) Eval(batch types.Batch, sel *types.SelectionMask) {
 	if !ok {
 		return
 	}
-	vals := col.V.I64()
-	if col.V.Valid == nil {
-		for i, v := range vals {
-			if v < b.value {
-				sel.Set(i)
-			}
-		}
-		return
-	}
-	valid := col.V.Valid
-	for i, v := range vals {
-		if v < b.value && valid.IsValid(i) {
-			sel.Set(i)
-		}
-	}
+	sel.FillAll()
+	types.FilterOrdered(col.V.I64(), col.V.Valid, b.value, types.FilterLess, *sel, sel)
 }
 
 func (b boundLtInt64) PruneSegment(seg *Segment) bool {
@@ -389,21 +362,8 @@ func (b boundGtInt64) Eval(batch types.Batch, sel *types.SelectionMask) {
 	if !ok {
 		return
 	}
-	vals := col.V.I64()
-	if col.V.Valid == nil {
-		for i, v := range vals {
-			if v > b.value {
-				sel.Set(i)
-			}
-		}
-		return
-	}
-	valid := col.V.Valid
-	for i, v := range vals {
-		if v > b.value && valid.IsValid(i) {
-			sel.Set(i)
-		}
-	}
+	sel.FillAll()
+	types.FilterOrdered(col.V.I64(), col.V.Valid, b.value, types.FilterGreater, *sel, sel)
 }
 
 func (b boundGtInt64) PruneSegment(seg *Segment) bool {
@@ -444,22 +404,8 @@ func (b boundEqBytes) Eval(batch types.Batch, sel *types.SelectionMask) {
 	if !ok {
 		return
 	}
-	vb := col.V.Var()
-	rows := int(col.V.Len)
-	if col.V.Valid == nil {
-		for i := range rows {
-			if bytes.Equal(vb.Bytes(i), b.value) {
-				sel.Set(i)
-			}
-		}
-		return
-	}
-	valid := col.V.Valid
-	for i := range rows {
-		if valid.IsValid(i) && bytes.Equal(vb.Bytes(i), b.value) {
-			sel.Set(i)
-		}
-	}
+	sel.FillAll()
+	types.FilterBytes(col.V.Var(), col.V.Valid, b.value, types.FilterEqual, *sel, sel)
 }
 
 func (b boundEqBytes) PruneSegment(seg *Segment) bool {

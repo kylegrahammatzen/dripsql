@@ -1580,7 +1580,9 @@ func applyOrderLimit(src *Rel, stmt *SelectStmt, outputs []BoundOutput, columns 
 		keys = bound
 	}
 	if src.Op == RelScan {
-		narrowScanColumns(src, scanProjectionColumnIDs(outputs, keys, src.Where))
+		all, predOnly := scanProjectionColumnIDs(outputs, keys, src.Where)
+		narrowScanColumns(src, all)
+		src.PredicateOnly = predOnly
 	}
 	if len(keys) != 0 {
 		k, off := int64(0), int64(0)
@@ -1688,37 +1690,47 @@ func boundExprEqual(left BoundExpr, right BoundExpr) bool {
 // scanProjectionColumnIDs collects ColumnIDs referenced by the SELECT outputs,
 // ORDER BY keys, and WHERE predicate of a single-table scan tail. Used to
 // narrow a RelScan to only the columns the rest of the plan actually reads.
-func scanProjectionColumnIDs(outputs []BoundOutput, keys []SortKey, where *BoundExpr) []ColumnID {
+// predicateOnly lists IDs that come from WHERE alone so the executor can drop
+// them from the scan's emit set when the predicate pushes into storage.
+func scanProjectionColumnIDs(outputs []BoundOutput, keys []SortKey, where *BoundExpr) (all, predicateOnly []ColumnID) {
 	seen := make(map[ColumnID]struct{})
-	ids := []ColumnID{}
-	var walk func(expr BoundExpr)
-	walk = func(expr BoundExpr) {
+	outputSeen := make(map[ColumnID]struct{})
+	var walk func(expr BoundExpr, dst *[]ColumnID, track map[ColumnID]struct{})
+	walk = func(expr BoundExpr, dst *[]ColumnID, track map[ColumnID]struct{}) {
 		if expr.Op == ExprColumn {
 			id := expr.ColumnID
 			if id == 0 {
 				return
 			}
-			if _, ok := seen[id]; ok {
+			if _, ok := track[id]; ok {
 				return
 			}
-			seen[id] = struct{}{}
-			ids = append(ids, id)
+			track[id] = struct{}{}
+			*dst = append(*dst, id)
 			return
 		}
 		for _, arg := range expr.Args {
-			walk(arg)
+			walk(arg, dst, track)
 		}
 	}
 	for _, o := range outputs {
-		walk(o.Expr)
+		walk(o.Expr, &all, seen)
 	}
 	for _, k := range keys {
-		walk(k.Expr)
+		walk(k.Expr, &all, seen)
+	}
+	for id := range seen {
+		outputSeen[id] = struct{}{}
 	}
 	if where != nil {
-		walk(*where)
+		walk(*where, &all, seen)
 	}
-	return ids
+	for _, id := range all {
+		if _, ok := outputSeen[id]; !ok {
+			predicateOnly = append(predicateOnly, id)
+		}
+	}
+	return all, predicateOnly
 }
 
 // narrowScanColumns trims a RelScan's Columns and Outputs to the given set

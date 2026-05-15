@@ -248,9 +248,35 @@ func buildScan(rel *sql.Rel, segments SegmentsFn) (Operator, error) {
 		}
 	}
 	opts := storage.ScanOpts{Segments: segs, Columns: names}
-	var op Operator = &ScanOp{Opts: opts, ColumnAlias: rel.Alias}
+	var residual *sql.BoundExpr
 	if rel.Where != nil {
-		op = &FilterOp{Source: op, Predicate: *rel.Where}
+		if pred, ok := loweredPredicate(*rel.Where); ok {
+			opts.Predicate = pred
+			if len(rel.PredicateOnly) > 0 {
+				opts.Columns = filterPredicateOnly(names, rel)
+			}
+		} else {
+			residual = rel.Where
+		}
+	}
+	var op Operator = &ScanOp{Opts: opts, ColumnAlias: rel.Alias}
+	if residual != nil {
+		op = &FilterOp{Source: op, Predicate: *residual}
 	}
 	return op, nil
+}
+
+func filterPredicateOnly(names []string, rel *sql.Rel) []string {
+	drop := make(map[sql.ColumnID]struct{}, len(rel.PredicateOnly))
+	for _, id := range rel.PredicateOnly {
+		drop[id] = struct{}{}
+	}
+	keep := make([]string, 0, len(names))
+	for i, id := range rel.Columns {
+		if _, ok := drop[id]; ok {
+			continue
+		}
+		keep = append(keep, names[i])
+	}
+	return keep
 }

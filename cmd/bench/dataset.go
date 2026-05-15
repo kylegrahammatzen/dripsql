@@ -32,6 +32,8 @@ var queries = map[string]query{
 	"id_lookup":        {name: "id_lookup", dataset: "users", sql: func(rows int) string { return fmt.Sprintf("SELECT id, name FROM users WHERE id = %d", rows/2) }},
 	"category_groupby": {name: "category_groupby", dataset: "users", sql: func(int) string { return "SELECT category, count(id), sum(age) FROM users GROUP BY category" }},
 	"top_age":          {name: "top_age", dataset: "users", sql: func(int) string { return "SELECT id, age FROM users ORDER BY age DESC LIMIT 10" }},
+	"cat_eq":           {name: "cat_eq", dataset: "users", sql: func(int) string { return "SELECT id FROM users WHERE category = 'alpha'" }},
+	"age_eq":           {name: "age_eq", dataset: "users", sql: func(int) string { return "SELECT id FROM users WHERE age = 50" }},
 }
 
 func setupUsers(ctx context.Context, db *engine.DB, rows int, segmentRows int) error {

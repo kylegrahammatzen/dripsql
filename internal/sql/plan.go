@@ -76,7 +76,12 @@ type Rel struct {
 	Table   BoundTableDef
 	Alias   string
 	Columns []ColumnID
-	Where   *BoundExpr
+	// PredicateOnly lists Column IDs that are referenced only by Where, not by any
+	// downstream output. When the executor pushes Where into storage.Predicate, those
+	// columns do not need to be emitted; storage decodes them only as far as the
+	// predicate needs and can skip materialization entirely via EvalEncoded.
+	PredicateOnly []ColumnID
+	Where         *BoundExpr
 
 	Predicate BoundExpr
 

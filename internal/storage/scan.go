@@ -231,6 +231,8 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp Bou
 	projected := make([]types.Column, len(projIdx))
 	var sel types.SelectionMask
 	var scratch []byte
+	predOnly := predicateOnlyMask(decodeIdx, projIdx)
+	encEval, _ := bp.(EncodedEvaluator)
 	for i, ci := range decodeIdx {
 		decoded[i].Name = seg.Cols[ci].Name
 		decoded[i].EnumLabels = seg.Cols[ci].EnumLabels
@@ -251,7 +253,24 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp Bou
 		}
 		var pageRows int
 		var pageRowStart uint32
+		encodedDone := false
+		if encEval != nil && hasAny(predOnly) {
+			handled, newScratch, err := encEval.EvalEncoded(seg, pi, &sel, scratch)
+			scratch = newScratch
+			if err != nil {
+				return fmt.Errorf("scan: EvalEncoded page %d: %w", pi, err)
+			}
+			if handled {
+				ci0 := decodeIdx[0]
+				pageRows = int(seg.Cols[ci0].Pages[pi].Rows)
+				pageRowStart = seg.Cols[ci0].Pages[pi].RowStart
+				encodedDone = true
+			}
+		}
 		for i, ci := range decodeIdx {
+			if encodedDone && predOnly[i] {
+				continue
+			}
 			var (
 				v   types.Vec
 				err error
@@ -260,7 +279,7 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp Bou
 			if err != nil {
 				return fmt.Errorf("scan: col %q page %d: %w", decode[i], pi, err)
 			}
-			if i == 0 {
+			if !encodedDone && i == 0 {
 				pageRows = int(v.Len)
 				pageRowStart = seg.Cols[ci].Pages[pi].RowStart
 			} else if int(v.Len) != pageRows {
@@ -268,16 +287,18 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp Bou
 			}
 			decoded[i].V = v
 		}
-		batch := types.Batch{Len: pageRows, Columns: decoded}
-		if sel.Rows() != pageRows {
-			sel.Resize(pageRows)
-		} else {
-			sel.Clear()
-		}
-		if bp == nil {
-			sel.FillAll()
-		} else {
-			bp.Eval(batch, &sel)
+		if !encodedDone {
+			batch := types.Batch{Len: pageRows, Columns: decoded}
+			if sel.Rows() != pageRows {
+				sel.Resize(pageRows)
+			} else {
+				sel.Clear()
+			}
+			if bp == nil {
+				sel.FillAll()
+			} else {
+				bp.Eval(batch, &sel)
+			}
 		}
 		if seg.DV != nil {
 			for r := range pageRows {
@@ -298,4 +319,27 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp Bou
 		}
 	}
 	return nil
+}
+
+func predicateOnlyMask(decodeIdx, projIdx []int) []bool {
+	mask := make([]bool, len(decodeIdx))
+	inProj := make(map[int]struct{}, len(projIdx))
+	for _, p := range projIdx {
+		inProj[p] = struct{}{}
+	}
+	for i := range decodeIdx {
+		if _, ok := inProj[i]; !ok {
+			mask[i] = true
+		}
+	}
+	return mask
+}
+
+func hasAny(mask []bool) bool {
+	for _, b := range mask {
+		if b {
+			return true
+		}
+	}
+	return false
 }

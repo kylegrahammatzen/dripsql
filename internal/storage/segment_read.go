@@ -216,6 +216,50 @@ func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (types.Vec, 
 	return v, scratch, nil
 }
 
+// ReadPagePayload reads a page's raw payload bytes and parses the validity prefix without
+// invoking the codec decoder. Predicate-on-encoded evaluation hooks in here to inspect the
+// encoded bytes directly so a column that exists only for filtering does not have to pay
+// the full decode + materialize cost.
+func (s *Segment) ReadPagePayload(colIdx, pageIdx int, scratch []byte) (innerPayload []byte, validity types.Validity, allNull bool, scratchOut []byte, err error) {
+	if colIdx < 0 || colIdx >= len(s.Cols) {
+		return nil, nil, false, scratch, fmt.Errorf("ReadPagePayload: col %d out of range [0, %d)", colIdx, len(s.Cols))
+	}
+	col := &s.Cols[colIdx]
+	if pageIdx < 0 || pageIdx >= len(col.Pages) {
+		return nil, nil, false, scratch, fmt.Errorf("ReadPagePayload: page %d out of range [0, %d)", pageIdx, len(col.Pages))
+	}
+	page := col.Pages[pageIdx]
+	rows := int(page.Rows)
+	if page.Flags&PageFlagAllNull != 0 {
+		return nil, nil, true, scratch, nil
+	}
+	if cap(scratch) < int(page.PayloadLength) {
+		scratch = make([]byte, page.PayloadLength)
+	} else {
+		scratch = scratch[:page.PayloadLength]
+	}
+	ioStart := nowNanos()
+	if _, err := s.f.ReadAt(scratch, int64(page.PayloadOffset)); err != nil {
+		return nil, nil, false, scratch, fmt.Errorf("ReadPagePayload: read payload: %w", err)
+	}
+	addIORead(nowNanos() - ioStart)
+	innerPayload = scratch
+	if page.NullCount > 0 {
+		words := types.ValidityWords(rows)
+		need := words * 8
+		if len(scratch) < need {
+			return nil, nil, false, scratch, fmt.Errorf("ReadPagePayload: validity prefix truncated: have %d need %d", len(scratch), need)
+		}
+		v, _, verr := types.UnmarshalValidity(scratch[:need], rows, int(page.NullCount), nil)
+		if verr != nil {
+			return nil, nil, false, scratch, fmt.Errorf("ReadPagePayload: validity: %w", verr)
+		}
+		validity = v
+		innerPayload = scratch[need:]
+	}
+	return innerPayload, validity, false, scratch, nil
+}
+
 func allocVecForKind(k types.VecKind, rows int) types.Vec {
 	if k.IsVarBytes() {
 		return types.NewVarVec(k, rows, 0)
