@@ -44,7 +44,7 @@ func (f *FilterOp) Next() (types.Batch, bool, error) {
 			return batch, ok, err
 		}
 		in := selectionForBatch(batch)
-		res, err := filterPredicate(batch, in, f.Predicate)
+		res, err := filterPredicate(batch, in, f.Predicate, nil)
 		if err != nil {
 			return types.Batch{}, false, err
 		}
@@ -59,52 +59,53 @@ func (f *FilterOp) Next() (types.Batch, bool, error) {
 // filterPredicate is the single recursive entry point. AND narrows the right child with the
 // left's output mask (instead of the original input) so a selective left predicate skips
 // rows on the right; OR keeps both children on the same input and unions the results.
-func filterPredicate(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr) (filterResult, error) {
+// A non-nil scratch mask is reused in place by leaves so a chain of ANDs needs only one alloc.
+func filterPredicate(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (filterResult, error) {
 	switch pred.Op {
 	case sql.ExprAnd:
-		return filterAnd(batch, sel, pred)
+		return filterAnd(batch, sel, pred, scratch)
 	case sql.ExprOr:
-		return filterOr(batch, sel, pred)
+		return filterOr(batch, sel, pred, scratch)
 	case sql.ExprNot:
-		return filterNotPred(batch, sel, pred)
+		return filterNotPred(batch, sel, pred, scratch)
 	}
-	out, count, ok, err := tryFilterLeaf(batch, sel, pred)
+	out, count, ok, err := tryFilterLeaf(batch, sel, pred, scratch)
 	if err != nil {
 		return filterResult{}, err
 	}
 	if ok {
 		return filterResult{sel: out, count: count}, nil
 	}
-	out, count, err = filterRowByRow(batch, sel, pred)
+	out, count, err = filterRowByRow(batch, sel, pred, scratch)
 	if err != nil {
 		return filterResult{}, err
 	}
 	return filterResult{sel: out, count: count}, nil
 }
 
-func filterAnd(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr) (filterResult, error) {
+func filterAnd(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (filterResult, error) {
 	if len(pred.Args) != 2 {
 		return filterResult{}, fmt.Errorf("filter: AND expects 2 args, got %d", len(pred.Args))
 	}
-	left, err := filterPredicate(batch, sel, pred.Args[0])
+	left, err := filterPredicate(batch, sel, pred.Args[0], scratch)
 	if err != nil {
 		return filterResult{}, err
 	}
 	if left.count == 0 {
 		return left, nil
 	}
-	return filterPredicate(batch, left.sel, pred.Args[1])
+	return filterPredicate(batch, left.sel, pred.Args[1], &left.sel)
 }
 
-func filterOr(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr) (filterResult, error) {
+func filterOr(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (filterResult, error) {
 	if len(pred.Args) != 2 {
 		return filterResult{}, fmt.Errorf("filter: OR expects 2 args, got %d", len(pred.Args))
 	}
-	left, err := filterPredicate(batch, sel, pred.Args[0])
+	left, err := filterPredicate(batch, sel, pred.Args[0], scratch)
 	if err != nil {
 		return filterResult{}, err
 	}
-	right, err := filterPredicate(batch, sel, pred.Args[1])
+	right, err := filterPredicate(batch, sel, pred.Args[1], nil)
 	if err != nil {
 		return filterResult{}, err
 	}
@@ -112,11 +113,11 @@ func filterOr(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr) (f
 	return filterResult{sel: left.sel, count: count}, nil
 }
 
-func filterNotPred(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr) (filterResult, error) {
+func filterNotPred(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (filterResult, error) {
 	if len(pred.Args) != 1 {
 		return filterResult{}, fmt.Errorf("filter: NOT expects 1 arg, got %d", len(pred.Args))
 	}
-	child, err := filterPredicate(batch, sel, pred.Args[0])
+	child, err := filterPredicate(batch, sel, pred.Args[0], scratch)
 	if err != nil {
 		return filterResult{}, err
 	}
@@ -125,19 +126,29 @@ func filterNotPred(batch types.Batch, sel types.SelectionMask, pred sql.BoundExp
 	return filterResult{sel: child.sel, count: count}, nil
 }
 
-func tryFilterLeaf(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr) (types.SelectionMask, int, bool, error) {
+func tryFilterLeaf(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (types.SelectionMask, int, bool, error) {
 	switch pred.Op {
 	case sql.ExprEqual, sql.ExprNotEqual, sql.ExprLess, sql.ExprLessEqual, sql.ExprGreater, sql.ExprGreaterEqual:
-		return filterColOpLit(batch, sel, pred)
+		return filterColOpLit(batch, sel, pred, scratch)
 	case sql.ExprBetween:
-		return filterBetween(batch, sel, pred)
+		return filterBetween(batch, sel, pred, scratch)
 	}
 	return types.SelectionMask{}, 0, false, nil
 }
 
-func filterRowByRow(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr) (types.SelectionMask, int, error) {
+// ensureOutMask returns scratch if it already holds rows bits, otherwise a fresh mask.
+// Reusing the caller's mask is what makes a chain of ANDs single-alloc.
+func ensureOutMask(scratch *types.SelectionMask, rows int) types.SelectionMask {
+	if scratch != nil && scratch.Rows() == rows {
+		return *scratch
+	}
+	return types.NewSelectionMask(rows)
+}
+
+func filterRowByRow(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (types.SelectionMask, int, error) {
 	ctx := newEvalCtx(batch)
-	out := types.NewSelectionMask(batch.Len)
+	out := ensureOutMask(scratch, batch.Len)
+	out.Clear()
 	var count int
 	var evalErr error
 	sel.IterSet(func(row int) {
@@ -157,7 +168,7 @@ func filterRowByRow(batch types.Batch, sel types.SelectionMask, pred sql.BoundEx
 	return out, count, evalErr
 }
 
-func filterColOpLit(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr) (types.SelectionMask, int, bool, error) {
+func filterColOpLit(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (types.SelectionMask, int, bool, error) {
 	if len(pred.Args) != 2 {
 		return types.SelectionMask{}, 0, false, nil
 	}
@@ -176,7 +187,7 @@ func filterColOpLit(batch types.Batch, sel types.SelectionMask, pred sql.BoundEx
 	if !ok || litExpr.Literal == nil {
 		return types.SelectionMask{}, 0, false, nil
 	}
-	out := types.NewSelectionMask(batch.Len)
+	out := ensureOutMask(scratch, batch.Len)
 	switch col.V.Kind {
 	case types.VecInt16:
 		lit, ok := litExpr.Literal.(int64)
@@ -227,7 +238,7 @@ func filterColOpLit(batch types.Batch, sel types.SelectionMask, pred sql.BoundEx
 	return types.SelectionMask{}, 0, false, nil
 }
 
-func filterBetween(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr) (types.SelectionMask, int, bool, error) {
+func filterBetween(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (types.SelectionMask, int, bool, error) {
 	if len(pred.Args) != 3 {
 		return types.SelectionMask{}, 0, false, nil
 	}
@@ -243,7 +254,7 @@ func filterBetween(batch types.Batch, sel types.SelectionMask, pred sql.BoundExp
 	if !ok {
 		return types.SelectionMask{}, 0, false, nil
 	}
-	out := types.NewSelectionMask(batch.Len)
+	out := ensureOutMask(scratch, batch.Len)
 	switch col.V.Kind {
 	case types.VecInt16:
 		lo, lok := lowExpr.Literal.(int64)
@@ -343,7 +354,7 @@ func EvalPredicate(batch types.Batch, where sql.BoundExpr) (types.SelectionMask,
 		return types.SelectionMask{}, err
 	}
 	in := selectionForBatch(batch)
-	res, err := filterPredicate(batch, in, where)
+	res, err := filterPredicate(batch, in, where, nil)
 	if err != nil {
 		return types.SelectionMask{}, err
 	}
