@@ -5,6 +5,7 @@
 package exec
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
@@ -34,6 +35,9 @@ type SortOp struct {
 
 	keys  []int64
 	nulls []uint64
+
+	textVars []*types.VarBytes
+	textRows []uint32
 
 	slowRows []sortRow
 	slowKeys []any
@@ -92,6 +96,8 @@ func (s *SortOp) Open(ctx context.Context) error {
 	s.nulls = nil
 	s.slowRows = nil
 	s.slowKeys = nil
+	s.textVars = nil
+	s.textRows = nil
 	return nil
 }
 
@@ -136,6 +142,9 @@ func (s *SortOp) build() error {
 	}
 	if s.canFastInt64() {
 		return s.buildFastInt64()
+	}
+	if s.canFastText() {
+		return s.buildFastText()
 	}
 	return s.buildSlow()
 }
@@ -277,6 +286,104 @@ func (s *SortOp) fullSortFastInt64(total int, desc bool) {
 	slices.SortFunc(s.order, func(a, b uint32) int {
 		return cmpInt64Sort(s.keys[a], bitIsSet(s.nulls, a), a, s.keys[b], bitIsSet(s.nulls, b), b, desc)
 	})
+}
+
+func (s *SortOp) canFastText() bool {
+	if len(s.Keys) != 1 {
+		return false
+	}
+	k := s.Keys[0].Expr
+	if k.Op != sql.ExprColumn {
+		return false
+	}
+	switch k.Type.Kind {
+	case types.KindText, types.KindBytes, types.KindJSON:
+		return true
+	}
+	return false
+}
+
+// buildFastText sorts a single varbytes key with bytes.Compare. Keys are not copied: the
+// comparator reads StringViews live out of each batch's VarBytes. Source buffers are
+// retained by s.bufs so the backing storage outlives the sort.
+func (s *SortOp) buildFastText() error {
+	total := s.countSelectedRows()
+	if total == 0 {
+		s.order = []uint32{}
+		return nil
+	}
+
+	useWide := s.refsMustBeWide()
+	s.useWide = useWide
+	if useWide {
+		s.wideRefs = make([]rowRef32, 0, total)
+	} else {
+		s.refs = make([]rowRef16, 0, total)
+	}
+	s.nulls = make([]uint64, (total+63)/64)
+	s.textVars = make([]*types.VarBytes, len(s.bufs))
+
+	keyCol := s.Keys[0].Expr.Column
+	idx := uint32(0)
+	for bi, bb := range s.bufs {
+		col, ok := bb.batch.ColumnByName(keyCol)
+		if !ok {
+			return fmt.Errorf("sort: column %q not in batch", keyCol)
+		}
+		s.textVars[bi] = col.V.Var()
+		valid := col.V.Valid
+		bb.sel.IterSet(func(row int) {
+			if useWide {
+				s.wideRefs = append(s.wideRefs, rowRef32{bufIdx: uint32(bi), row: uint32(row)})
+			} else {
+				s.refs = append(s.refs, rowRef16{bufIdx: uint16(bi), row: uint16(row)})
+			}
+			if valid != nil && !valid.IsValid(row) {
+				bitSet(s.nulls, idx)
+			}
+			idx++
+		})
+	}
+
+	desc := s.Keys[0].Desc
+	s.order = make([]uint32, total)
+	for i := range s.order {
+		s.order[i] = uint32(i)
+	}
+	slices.SortFunc(s.order, func(a, b uint32) int {
+		anull := bitIsSet(s.nulls, a)
+		bnull := bitIsSet(s.nulls, b)
+		if anull != bnull {
+			c := 1
+			if anull {
+				c = -1
+			}
+			if desc {
+				c = -c
+			}
+			return c
+		}
+		if !anull {
+			abi, arow := s.resolveRef(a)
+			bbi, brow := s.resolveRef(b)
+			c := bytes.Compare(s.textVars[abi].Bytes(arow), s.textVars[bbi].Bytes(brow))
+			if c != 0 {
+				if desc {
+					return -c
+				}
+				return c
+			}
+		}
+		if a < b {
+			return -1
+		}
+		if a > b {
+			return 1
+		}
+		return 0
+	})
+	s.applyLimitOffset()
+	return nil
 }
 
 func (s *SortOp) heapCapUnknown() int {
