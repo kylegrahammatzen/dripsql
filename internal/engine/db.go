@@ -341,11 +341,12 @@ func (db *DB) planForQuery(sqlText string) (*sql.Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	selectStmt, ok := stmt.(*sql.SelectStmt)
-	if !ok {
-		return nil, fmt.Errorf("engine: Query supports SELECT only")
+	switch stmt.(type) {
+	case *sql.SelectStmt, *sql.ExplainStmt:
+	default:
+		return nil, fmt.Errorf("engine: Query supports SELECT or EXPLAIN only")
 	}
-	plan, err := db.planner().Plan(selectStmt)
+	plan, err := db.planner().Plan(stmt)
 	if err != nil {
 		return nil, err
 	}

@@ -13,6 +13,9 @@ import (
 )
 
 func (db *DB) runQuery(ctx context.Context, plan *sql.Plan) (*Rows, error) {
+	if plan != nil && plan.Kind == sql.PlanExplain {
+		return db.runExplain(ctx, plan)
+	}
 	openSegs := make(map[string][]*storage.Segment)
 	resolve := func(d sql.BoundTableDef) ([]*storage.Segment, error) {
 		key := types.NormalizeName(d.Name)
