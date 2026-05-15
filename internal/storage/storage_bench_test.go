@@ -1,18 +1,35 @@
-// Storage benches: segment cold open / footer parse, and wire buffer round-trip.
-// Run with: go test ./internal/storage -bench=. -benchmem -run=^$
+// End-to-end storage benches: write, cold-open, scan, predicate scan, and lazy sidecar
+// load. Page shape mirrors the cmd/bench users dataset (id int64, name text, age int64,
+// category text) so the numbers stack against the workload bench in drip_bench.md.
 package storage
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-func BenchmarkSegmentOpen_Cold(b *testing.B) {
+const benchPageRows = 2048
+
+func BenchmarkStorage_WriteSegment(b *testing.B) {
+	page := makeBenchSegmentBatch(benchPageRows)
+	pages := []types.Batch{page, page, page, page}
+	b.ReportAllocs()
+	for b.Loop() {
+		tmp := b.TempDir()
+		path := filepath.Join(tmp, "seg.dsv4")
+		if err := WriteSegment(path, pages); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkStorage_OpenCold(b *testing.B) {
 	tmp := b.TempDir()
 	path := filepath.Join(tmp, "seg.dsv4")
-	page := makeBenchSegmentBatch(2048)
+	page := makeBenchSegmentBatch(benchPageRows)
 	if err := WriteSegment(path, []types.Batch{page, page, page, page}); err != nil {
 		b.Fatal(err)
 	}
@@ -24,6 +41,102 @@ func BenchmarkSegmentOpen_Cold(b *testing.B) {
 			b.Fatal(err)
 		}
 		seg.Close()
+	}
+}
+
+func BenchmarkStorage_ScanFull(b *testing.B) {
+	seg := openBenchSegment(b, 4)
+	defer seg.Close()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		opts := ScanOpts{Segments: []*Segment{seg}}
+		err := Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error { return nil })
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkStorage_ScanEqInt64Hit(b *testing.B) {
+	seg := openBenchSegment(b, 4)
+	defer seg.Close()
+	pred := EqInt64{Column: "age", Value: 42}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		opts := ScanOpts{Segments: []*Segment{seg}, Predicate: pred}
+		err := Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error { return nil })
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkStorage_ScanEqInt64Miss(b *testing.B) {
+	seg := openBenchSegment(b, 4)
+	defer seg.Close()
+	// age is i % 100 so 999 falls inside [0, 99] only as a Bloom-rescuable miss.
+	pred := EqInt64{Column: "age", Value: 999}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		opts := ScanOpts{Segments: []*Segment{seg}, Predicate: pred}
+		err := Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error { return nil })
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkStorage_ScanEqBytesHit(b *testing.B) {
+	seg := openBenchSegment(b, 4)
+	defer seg.Close()
+	pred := EqBytes{Column: "category", Value: []byte("alpha")}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		opts := ScanOpts{Segments: []*Segment{seg}, Predicate: pred}
+		err := Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error { return nil })
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkStorage_LoadDictHist(b *testing.B) {
+	seg := openBenchSegment(b, 4)
+	defer seg.Close()
+	b.ReportAllocs()
+	for b.Loop() {
+		seg.dictHistsOnce = sync.Once{}
+		if _, err := seg.DictHistograms(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkStorage_LoadIntFilter(b *testing.B) {
+	seg := openBenchSegment(b, 4)
+	defer seg.Close()
+	b.ReportAllocs()
+	for b.Loop() {
+		seg.intFiltersOnce = sync.Once{}
+		if _, err := seg.IntFilterSet(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkStorage_LoadNumericSums(b *testing.B) {
+	seg := openBenchSegment(b, 4)
+	defer seg.Close()
+	b.ReportAllocs()
+	for b.Loop() {
+		seg.numSumsOnce = sync.Once{}
+		if _, err := seg.NumericSums(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -47,6 +160,25 @@ func BenchmarkWireBuffer_RoundTrip(b *testing.B) {
 		_ = r.LenPrefixedString()
 		_ = r.Raw(8)
 	}
+}
+
+func openBenchSegment(b *testing.B, pages int) *Segment {
+	b.Helper()
+	tmp := b.TempDir()
+	path := filepath.Join(tmp, "seg.dsv4")
+	batch := makeBenchSegmentBatch(benchPageRows)
+	all := make([]types.Batch, pages)
+	for i := range pages {
+		all[i] = batch
+	}
+	if err := WriteSegment(path, all); err != nil {
+		b.Fatal(err)
+	}
+	seg, err := OpenSegment(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return seg
 }
 
 func makeBenchSegmentBatch(rows int) types.Batch {
