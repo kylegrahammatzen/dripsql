@@ -939,155 +939,67 @@ func (p *parser) parseSelectList() ([]SelectExpr, error) {
 	}
 }
 
+// parseScalarExpr drives one precedence-climbing loop instead of a function per level.
+// Precedence: 1 = add/sub/concat, 2 = mul/div/mod, 3 = JSON path ops. Higher binds tighter.
 func (p *parser) parseScalarExpr() (Expr, string, error) {
-	expr, name, err := p.parseScalarTerm()
+	return p.parseScalarPrecedence(1)
+}
+
+func (p *parser) parseScalarPrecedence(minPrec int) (Expr, string, error) {
+	left, name, err := p.parseScalarPrimary()
 	if err != nil {
 		return nil, "", err
 	}
 	for {
-		if ok, err := p.maybe(tokConcat); err != nil || ok {
-			if err != nil {
-				return nil, "", err
-			}
-			right, _, err := p.parseScalarTerm()
-			if err != nil {
-				return nil, "", err
-			}
-			expr = &BinaryExpr{Left: expr, Op: BinaryConcat, Right: right}
-			name = ""
-			continue
+		op, prec, ok, err := p.peekScalarOp()
+		if err != nil || !ok || prec < minPrec {
+			return left, name, err
 		}
-		if ok, err := p.maybe(tokPlus); err != nil || ok {
-			if err != nil {
-				return nil, "", err
-			}
-			right, _, err := p.parseScalarTerm()
-			if err != nil {
-				return nil, "", err
-			}
-			expr = &BinaryExpr{Left: expr, Op: BinaryAdd, Right: right}
-			name = ""
-			continue
+		if _, err := p.next(); err != nil {
+			return nil, "", err
 		}
-		if ok, err := p.maybe(tokMinus); err != nil || ok {
-			if err != nil {
-				return nil, "", err
-			}
-			right, _, err := p.parseScalarTerm()
-			if err != nil {
-				return nil, "", err
-			}
-			expr = &BinaryExpr{Left: expr, Op: BinarySubtract, Right: right}
-			name = ""
-			continue
+		right, _, err := p.parseScalarPrecedence(prec + 1)
+		if err != nil {
+			return nil, "", err
 		}
-		return expr, name, nil
+		left = &BinaryExpr{Left: left, Op: op, Right: right}
+		name = ""
 	}
 }
 
-func (p *parser) parseScalarTerm() (Expr, string, error) {
-	expr, name, err := p.parseScalarPathOp()
+func (p *parser) peekScalarOp() (BinaryOp, int, bool, error) {
+	tok, err := p.peek()
 	if err != nil {
-		return nil, "", err
+		return 0, 0, false, err
 	}
-	for {
-		if ok, err := p.maybe(tokStar); err != nil || ok {
-			if err != nil {
-				return nil, "", err
+	switch tok.typ {
+	case tokJSONGetText:
+		return BinaryJSONGetText, 3, true, nil
+	case tokJSONGet:
+		return BinaryJSONGet, 3, true, nil
+	case tokStar:
+		return BinaryMultiply, 2, true, nil
+	case tokSlash:
+		return BinaryDivide, 2, true, nil
+	case tokPercent:
+		return BinaryModulo, 2, true, nil
+	case tokConcat:
+		return BinaryConcat, 1, true, nil
+	case tokPlus:
+		return BinaryAdd, 1, true, nil
+	case tokMinus:
+		return BinarySubtract, 1, true, nil
+	case tokIdent:
+		if !tok.quoted {
+			switch tok.lit {
+			case "mod":
+				return BinaryModulo, 2, true, nil
+			case "div":
+				return BinaryIntDivide, 2, true, nil
 			}
-			right, _, err := p.parseScalarPathOp()
-			if err != nil {
-				return nil, "", err
-			}
-			expr = &BinaryExpr{Left: expr, Op: BinaryMultiply, Right: right}
-			name = ""
-			continue
 		}
-		if ok, err := p.maybe(tokSlash); err != nil || ok {
-			if err != nil {
-				return nil, "", err
-			}
-			right, _, err := p.parseScalarPathOp()
-			if err != nil {
-				return nil, "", err
-			}
-			expr = &BinaryExpr{Left: expr, Op: BinaryDivide, Right: right}
-			name = ""
-			continue
-		}
-		if ok, err := p.maybe(tokPercent); err != nil || ok {
-			if err != nil {
-				return nil, "", err
-			}
-			right, _, err := p.parseScalarPathOp()
-			if err != nil {
-				return nil, "", err
-			}
-			expr = &BinaryExpr{Left: expr, Op: BinaryModulo, Right: right}
-			name = ""
-			continue
-		}
-		if ok, err := p.maybeWord("mod"); err != nil || ok {
-			if err != nil {
-				return nil, "", err
-			}
-			right, _, err := p.parseScalarPathOp()
-			if err != nil {
-				return nil, "", err
-			}
-			expr = &BinaryExpr{Left: expr, Op: BinaryModulo, Right: right}
-			name = ""
-			continue
-		}
-		if ok, err := p.maybeWord("div"); err != nil || ok {
-			if err != nil {
-				return nil, "", err
-			}
-			right, _, err := p.parseScalarPathOp()
-			if err != nil {
-				return nil, "", err
-			}
-			expr = &BinaryExpr{Left: expr, Op: BinaryIntDivide, Right: right}
-			name = ""
-			continue
-		}
-		return expr, name, nil
 	}
-}
-
-// JSON path ops bind tighter than arithmetic so payload->'k'->>'inner' left-associates correctly.
-func (p *parser) parseScalarPathOp() (Expr, string, error) {
-	expr, name, err := p.parseScalarPrimary()
-	if err != nil {
-		return nil, "", err
-	}
-	for {
-		if ok, err := p.maybe(tokJSONGetText); err != nil || ok {
-			if err != nil {
-				return nil, "", err
-			}
-			right, _, err := p.parseScalarPrimary()
-			if err != nil {
-				return nil, "", err
-			}
-			expr = &BinaryExpr{Left: expr, Op: BinaryJSONGetText, Right: right}
-			name = ""
-			continue
-		}
-		if ok, err := p.maybe(tokJSONGet); err != nil || ok {
-			if err != nil {
-				return nil, "", err
-			}
-			right, _, err := p.parseScalarPrimary()
-			if err != nil {
-				return nil, "", err
-			}
-			expr = &BinaryExpr{Left: expr, Op: BinaryJSONGet, Right: right}
-			name = ""
-			continue
-		}
-		return expr, name, nil
-	}
+	return 0, 0, false, nil
 }
 
 func (p *parser) parseScalarPrimary() (Expr, string, error) {
@@ -1293,53 +1205,35 @@ func (p *parser) parsePredicateAfterLeft(left Expr) (Expr, error) {
 		return nil, p.errorAt(tok, "expected IN after NOT")
 	}
 
-	if ok, err := p.maybe(tokNotEqual); err != nil || ok {
-		if err != nil {
-			return nil, err
-		}
-		right, _, err := p.parseScalarExpr()
-		if err != nil {
-			return nil, err
-		}
-		return &BinaryExpr{Left: left, Op: BinaryNotEqual, Right: right}, nil
+	tok, err := p.peek()
+	if err != nil {
+		return nil, err
 	}
-
-	if op, ok, err := p.parseComparisonOp(); err != nil || ok {
-		if err != nil {
-			return nil, err
-		}
-		right, _, err := p.parseScalarExpr()
-		if err != nil {
-			return nil, err
-		}
-		return &BinaryExpr{Left: left, Op: op, Right: right}, nil
+	var op BinaryOp
+	switch tok.typ {
+	case tokEqual:
+		op = BinaryEqual
+	case tokNotEqual:
+		op = BinaryNotEqual
+	case tokLess:
+		op = BinaryLess
+	case tokLessEqual:
+		op = BinaryLessEqual
+	case tokGreater:
+		op = BinaryGreater
+	case tokGreaterEqual:
+		op = BinaryGreaterEqual
+	default:
+		return nil, p.errorAt(tok, "expected predicate operator")
 	}
-
-	if _, err := p.expect(tokEqual); err != nil {
+	if _, err := p.next(); err != nil {
 		return nil, err
 	}
 	right, _, err := p.parseScalarExpr()
 	if err != nil {
 		return nil, err
 	}
-
-	return &BinaryExpr{Left: left, Op: BinaryEqual, Right: right}, nil
-}
-
-func (p *parser) parseComparisonOp() (BinaryOp, bool, error) {
-	if ok, err := p.maybe(tokLess); err != nil || ok {
-		return BinaryLess, ok, err
-	}
-	if ok, err := p.maybe(tokLessEqual); err != nil || ok {
-		return BinaryLessEqual, ok, err
-	}
-	if ok, err := p.maybe(tokGreater); err != nil || ok {
-		return BinaryGreater, ok, err
-	}
-	if ok, err := p.maybe(tokGreaterEqual); err != nil || ok {
-		return BinaryGreaterEqual, ok, err
-	}
-	return BinaryEqual, false, nil
+	return &BinaryExpr{Left: left, Op: op, Right: right}, nil
 }
 
 func (p *parser) parseOptionalGroupBy() ([]Expr, error) {
