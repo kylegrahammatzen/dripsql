@@ -4,7 +4,6 @@ package sql
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -199,52 +198,97 @@ func (l *lexer) skipSpaceAndComments() {
 	}
 }
 
+// scanIdent reads an identifier and lowercases only when needed. Pure-lowercase ASCII
+// identifiers (the common case for column names and most SQL after parsing) return their
+// source slice directly. Mixed-case ASCII goes through a byte-level lowercase that skips
+// the Unicode tables. Non-ASCII identifiers still route through strings.ToLower.
 func (l *lexer) scanIdent() (token, error) {
 	start := l.pos
+	ascii, upper := true, false
 	for l.pos < len(l.sql) {
 		b := l.sql[l.pos]
 		if b < 0x80 {
-			if b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') {
+			if b == '_' || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') {
+				l.pos++
+				continue
+			}
+			if b >= 'A' && b <= 'Z' {
+				upper = true
 				l.pos++
 				continue
 			}
 			break
 		}
+		ascii = false
 		r, size := utf8.DecodeRuneInString(l.sql[l.pos:])
 		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
 			break
 		}
 		l.pos += size
 	}
-	return token{typ: tokIdent, lit: strings.ToLower(l.sql[start:l.pos]), pos: start}, nil
+	lit := l.sql[start:l.pos]
+	switch {
+	case !ascii:
+		lit = strings.ToLower(lit)
+	case upper:
+		buf := []byte(lit)
+		for i, c := range buf {
+			if c >= 'A' && c <= 'Z' {
+				buf[i] = c + ('a' - 'A')
+			}
+		}
+		lit = string(buf)
+	}
+	return token{typ: tokIdent, lit: lit, pos: start}, nil
 }
 
 // scanDelimited reads a delimited literal where the same delimiter doubled is an escape.
-// Returns a token of `typ`. If `quoted` is true the token is marked as a quoted identifier.
+// Returns a token of `typ`. The common case (no doubled delimiter, ASCII bytes) slices the
+// source string directly; only escaped or non-ASCII inputs allocate a string builder.
 func (l *lexer) scanDelimited(delim byte, typ tokenType, quoted bool, label string) (token, error) {
 	start := l.pos
 	l.pos++
+	partStart := l.pos
 	var b strings.Builder
+	escaped := false
 	for l.pos < len(l.sql) {
+		c := l.sql[l.pos]
+		if c < utf8.RuneSelf {
+			if c != delim {
+				l.pos++
+				continue
+			}
+			if l.pos+1 < len(l.sql) && l.sql[l.pos+1] == delim {
+				if !escaped {
+					b.Grow(len(l.sql) - partStart)
+					escaped = true
+				}
+				b.WriteString(l.sql[partStart:l.pos])
+				b.WriteByte(delim)
+				l.pos += 2
+				partStart = l.pos
+				continue
+			}
+			end := l.pos
+			l.pos++
+			if !escaped {
+				return token{typ: typ, lit: l.sql[partStart:end], pos: start, quoted: quoted}, nil
+			}
+			b.WriteString(l.sql[partStart:end])
+			return token{typ: typ, lit: b.String(), pos: start, quoted: quoted}, nil
+		}
 		r, size := utf8.DecodeRuneInString(l.sql[l.pos:])
 		if r == utf8.RuneError && size == 1 {
 			return token{}, fmt.Errorf("invalid utf-8 in %s at byte %d", label, l.pos)
 		}
-		if size == 1 && byte(r) == delim {
-			if l.peekByte(1) == delim {
-				b.WriteByte(delim)
-				l.pos += 2
-				continue
-			}
-			l.pos++
-			return token{typ: typ, lit: b.String(), pos: start, quoted: quoted}, nil
-		}
-		b.WriteRune(r)
 		l.pos += size
 	}
 	return token{}, fmt.Errorf("unterminated %s at byte %d", label, start)
 }
 
+// scanNumber validates the shape of an integer or float literal and slices the source.
+// Numeric conversion is deferred to parseValue / parseOptionalIntClause so the lexer pays
+// strconv only once per literal instead of twice.
 func (l *lexer) scanNumber() (token, error) {
 	start := l.pos
 	l.scanDigits()
@@ -270,17 +314,7 @@ func (l *lexer) scanNumber() (token, error) {
 			return token{}, fmt.Errorf("invalid float literal %q at byte %d", l.sql[start:l.pos], start)
 		}
 	}
-	lit := l.sql[start:l.pos]
-	if typ == tokFloat {
-		if _, err := strconv.ParseFloat(lit, 64); err != nil {
-			return token{}, fmt.Errorf("invalid float literal %q at byte %d", lit, start)
-		}
-		return token{typ: tokFloat, lit: lit, pos: start}, nil
-	}
-	if _, err := strconv.ParseInt(lit, 10, 64); err != nil {
-		return token{}, fmt.Errorf("invalid integer literal %q at byte %d", lit, start)
-	}
-	return token{typ: tokInt, lit: lit, pos: start}, nil
+	return token{typ: typ, lit: l.sql[start:l.pos], pos: start}, nil
 }
 
 func (l *lexer) scanDigits() {
