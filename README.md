@@ -49,9 +49,9 @@ Snapshot:
 | `Sort_TopK_Int64_100k_K100_NullsEvery10` | 1.02 ms | 29.6 K | 64 |
 | `Sort_FullAsc_Text_10k` | 6.72 ms | 2.48 MB | 30 059 |
 
-Streaming top-K stays bounded at `K+Offset` regardless of N. The text full-sort
-is the known slow path. It goes through a boxed `any` comparator. No production
-workload exercises it today.
+Streaming top-K stays bounded at `K+Offset` entries regardless of input size.
+The text full-sort is the known slow path because it goes through a boxed
+`any` comparator, and no production workload exercises it today.
 
 ### Workload benchmark
 
@@ -59,10 +59,10 @@ workload exercises it today.
 go run ./cmd/bench -query <name> -rows <N> -runs <R> -mode hot -json
 ```
 
-Flags: `-query` picks one of the cataloged queries (`go run ./cmd/bench list`),
+`-query` picks one of the cataloged queries from `go run ./cmd/bench list`,
 `-rows` sizes the synthetic `users` dataset, `-runs` is the timed-run count,
-`-mode` is one of `hot`, `cold-soft` (close+reopen DB between runs), or
-`cold-hard` (also drops the OS page cache, needs root/admin).
+and `-mode` is one of `hot`, `cold-soft` (closes and reopens the DB between
+runs), or `cold-hard` (also drops the OS page cache and needs root or admin).
 
 Snapshot (hot mode, median ms across timed runs):
 
@@ -76,8 +76,8 @@ Snapshot (hot mode, median ms across timed runs):
 | `top_age` | 1M | 50 | 50.07 | 9.76 | 29.48 | 10.84 |
 | `top_age` | 10M | 10 | 514.60 | 97.58 | 285.38 | 131.64 |
 
-The harness also prints min / p95 / max / mean / stddev. These are reference
-points, not regression gates.
+The harness also prints min, p95, max, mean, and stddev, and these are
+reference points rather than regression gates.
 
 ## CLI
 
@@ -87,8 +87,8 @@ go run ./cmd/cli -db <path> -exec "INSERT INTO events (id) VALUES (1),(2),(42)"
 go run ./cmd/cli -db <path> -exec "SELECT count(*) FROM events"
 ```
 
-One SQL string per invocation. `-db` is required. The directory is created
-if missing.
+Each invocation runs a single SQL string against the required `-db`
+directory, which is created automatically if it does not exist.
 
 ## Feature coverage
 
