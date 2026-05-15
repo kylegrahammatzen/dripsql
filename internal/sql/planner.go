@@ -425,29 +425,6 @@ func planScanTail(stmt *SelectStmt, src *Rel, sc *scope) (*Rel, error) {
 // Option vocab (storage/profile/compression/segment_rows/sort_by/time_column) is enforced here, not at parse time.
 
 
-var (
-	storageValues = map[string]types.StorageKind{
-		"default":  types.StorageDefault,
-		"columnar": types.StorageColumnar,
-		"row":      types.StorageRow,
-		"hybrid":   types.StorageHybrid,
-	}
-	profileValues = map[string]types.TableProfile{
-		"default":         types.ProfileDefault,
-		"event_analytics": types.ProfileEventAnalytics,
-		"time_series":     types.ProfileTimeSeries,
-		"dimension_table": types.ProfileDimensionTable,
-		"log_analytics":   types.ProfileLogAnalytics,
-	}
-	compressionValues = map[string]types.CompressionPolicy{
-		"default": types.CompressionDefault,
-		"auto":    types.CompressionAuto,
-		"none":    types.CompressionNone,
-		"fast":    types.CompressionFast,
-		"best":    types.CompressionBest,
-	}
-)
-
 func BindCreateType(stmt *CreateTypeStmt) (*Plan, error) {
 	spec, err := BindCreateTypeSpec(stmt)
 	if err != nil {
@@ -528,31 +505,56 @@ func bindTableOptions(options []TableOption) (types.TableOptions, error) {
 			if err != nil {
 				return out, err
 			}
-			v, ok := storageValues[text]
-			if !ok {
+			switch text {
+			case "default":
+				out.Storage = types.StorageDefault
+			case "columnar":
+				out.Storage = types.StorageColumnar
+			case "row":
+				out.Storage = types.StorageRow
+			case "hybrid":
+				out.Storage = types.StorageHybrid
+			default:
 				return out, fmt.Errorf("unsupported storage option %q", text)
 			}
-			out.Storage = v
 		case "profile":
 			text, err := optionText(opt)
 			if err != nil {
 				return out, err
 			}
-			v, ok := profileValues[text]
-			if !ok {
+			switch text {
+			case "default":
+				out.Profile = types.ProfileDefault
+			case "event_analytics":
+				out.Profile = types.ProfileEventAnalytics
+			case "time_series":
+				out.Profile = types.ProfileTimeSeries
+			case "dimension_table":
+				out.Profile = types.ProfileDimensionTable
+			case "log_analytics":
+				out.Profile = types.ProfileLogAnalytics
+			default:
 				return out, fmt.Errorf("unsupported profile option %q", text)
 			}
-			out.Profile = v
 		case "compression":
 			text, err := optionText(opt)
 			if err != nil {
 				return out, err
 			}
-			v, ok := compressionValues[text]
-			if !ok {
+			switch text {
+			case "default":
+				out.Compression = types.CompressionDefault
+			case "auto":
+				out.Compression = types.CompressionAuto
+			case "none":
+				out.Compression = types.CompressionNone
+			case "fast":
+				out.Compression = types.CompressionFast
+			case "best":
+				out.Compression = types.CompressionBest
+			default:
 				return out, fmt.Errorf("unsupported compression option %q", text)
 			}
-			out.Compression = v
 		case "segment_rows":
 			switch opt.Value.Kind {
 			case ValueIdent, ValueString:
@@ -726,155 +728,96 @@ func validateLiteralForColumn(col BoundColumnDef, lit Value) (Value, error) {
 	if col.Type.Kind != types.KindNamed {
 		return lit, validateLiteralForType(col.Name, lit, col.Type)
 	}
-	label, err := bindStringLiteral(col.Name, lit)
-	if err != nil {
-		return lit, err
+	if lit.Kind != ValueString {
+		return lit, fmt.Errorf("column %q expects string literal", col.Name)
 	}
-	code, ok := enumCodeForLabel(label, col.Labels)
-	if !ok {
-		return lit, fmt.Errorf("column %q invalid enum label %q", col.Name, label)
+	for i, label := range col.Labels {
+		if lit.String == label {
+			return Value{Kind: ValueEnum, Enum: uint32(i + 1), String: label}, nil
+		}
 	}
-	return Value{Kind: ValueEnum, Enum: code, String: label}, nil
+	return lit, fmt.Errorf("column %q invalid enum label %q", col.Name, lit.String)
 }
 
 func validateLiteralForType(column string, lit Value, typ types.Type) error {
+	stringLit := func(label string) (string, error) {
+		if lit.Kind != ValueString {
+			return "", fmt.Errorf("column %q expects %s literal", column, label)
+		}
+		return lit.String, nil
+	}
 	switch typ.Kind {
 	case types.KindBool:
-		_, err := bindBoolLiteral(column, lit)
-		return err
-	case types.KindInt16:
-		value, err := bindInt64Literal(column, lit)
-		if err != nil {
-			return err
+		if lit.Kind != ValueBool {
+			return fmt.Errorf("column %q expects bool literal", column)
 		}
-		if value < math.MinInt16 || value > math.MaxInt16 {
-			return fmt.Errorf("column %q int16 literal out of range", column)
+	case types.KindInt16, types.KindInt32, types.KindInt64:
+		if lit.Kind != ValueInt {
+			return fmt.Errorf("column %q expects int64 literal", column)
 		}
-		return nil
-	case types.KindInt32:
-		_, err := bindInt32Literal(column, lit)
-		return err
-	case types.KindInt64:
-		_, err := bindInt64Literal(column, lit)
-		return err
+		min, max := int64(math.MinInt64), int64(math.MaxInt64)
+		switch typ.Kind {
+		case types.KindInt16:
+			min, max = math.MinInt16, math.MaxInt16
+		case types.KindInt32:
+			min, max = math.MinInt32, math.MaxInt32
+		}
+		if lit.Int < min || lit.Int > max {
+			return fmt.Errorf("column %q %s literal out of range", column, typ.Kind)
+		}
 	case types.KindFloat32, types.KindFloat64:
-		value, err := bindFloat64Literal(column, lit)
-		if err != nil {
-			return err
+		var v float64
+		switch lit.Kind {
+		case ValueInt:
+			v = float64(lit.Int)
+		case ValueFloat:
+			v = lit.Float
+		default:
+			return fmt.Errorf("column %q expects float literal", column)
 		}
-		if typ.Kind == types.KindFloat32 && (value < -math.MaxFloat32 || value > math.MaxFloat32) {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("column %q float literal out of range", column)
+		}
+		if typ.Kind == types.KindFloat32 && (v < -math.MaxFloat32 || v > math.MaxFloat32) {
 			return fmt.Errorf("column %q float32 literal out of range", column)
 		}
-		return nil
 	case types.KindDecimal:
 		if lit.Kind != ValueInt && lit.Kind != ValueString {
 			return fmt.Errorf("column %q expects decimal literal", column)
 		}
-		return nil
-	case types.KindText, types.KindJSON, types.KindNamed:
-		_, err := bindStringLiteral(column, lit)
-		return err
-	case types.KindBytes:
+	case types.KindText, types.KindJSON, types.KindNamed, types.KindBytes:
 		if lit.Kind != ValueString {
 			return fmt.Errorf("column %q expects string literal", column)
 		}
-		return nil
 	case types.KindUUID:
-		s, err := bindStringLiteral(column, lit)
+		s, err := stringLit("uuid")
 		if err != nil {
 			return err
 		}
 		if _, err := types.ParseUUID(s); err != nil {
 			return fmt.Errorf("column %q invalid uuid literal %q", column, s)
 		}
-		return nil
-	case types.KindTimestamp:
-		s, err := bindStringLiteral(column, lit)
+	case types.KindTimestamp, types.KindDate, types.KindTime:
+		layout := time.RFC3339Nano
+		label := "timestamp"
+		if typ.Kind == types.KindDate {
+			layout = "2006-01-02"
+			label = "date"
+		} else if typ.Kind == types.KindTime {
+			layout = "15:04:05.999999999"
+			label = "time"
+		}
+		s, err := stringLit(label)
 		if err != nil {
 			return err
 		}
-		if _, err := time.Parse(time.RFC3339Nano, s); err != nil {
-			return fmt.Errorf("column %q invalid timestamp literal %q", column, s)
+		if _, err := time.Parse(layout, s); err != nil {
+			return fmt.Errorf("column %q invalid %s literal %q", column, label, s)
 		}
-		return nil
-	case types.KindDate:
-		s, err := bindStringLiteral(column, lit)
-		if err != nil {
-			return err
-		}
-		if _, err := time.Parse("2006-01-02", s); err != nil {
-			return fmt.Errorf("column %q invalid date literal %q", column, s)
-		}
-		return nil
-	case types.KindTime:
-		s, err := bindStringLiteral(column, lit)
-		if err != nil {
-			return err
-		}
-		if _, err := time.Parse("15:04:05.999999999", s); err != nil {
-			return fmt.Errorf("column %q invalid time literal %q", column, s)
-		}
-		return nil
 	default:
 		return fmt.Errorf("column %q has unsupported INSERT type %s", column, typ)
 	}
-}
-
-func enumCodeForLabel(value string, labels []string) (uint32, bool) {
-	for i, label := range labels {
-		if value == label {
-			return uint32(i + 1), true
-		}
-	}
-	return 0, false
-}
-
-func bindInt64Literal(column string, lit Value) (int64, error) {
-	if lit.Kind != ValueInt {
-		return 0, fmt.Errorf("column %q expects int64 literal", column)
-	}
-	return lit.Int, nil
-}
-
-func bindInt32Literal(column string, lit Value) (int32, error) {
-	value, err := bindInt64Literal(column, lit)
-	if err != nil {
-		return 0, err
-	}
-	if value < math.MinInt32 || value > math.MaxInt32 {
-		return 0, fmt.Errorf("column %q int32 literal out of range", column)
-	}
-	return int32(value), nil
-}
-
-func bindFloat64Literal(column string, lit Value) (float64, error) {
-	var value float64
-	switch lit.Kind {
-	case ValueInt:
-		value = float64(lit.Int)
-	case ValueFloat:
-		value = lit.Float
-	default:
-		return 0, fmt.Errorf("column %q expects float literal", column)
-	}
-	if math.IsNaN(value) || math.IsInf(value, 0) {
-		return 0, fmt.Errorf("column %q float literal out of range", column)
-	}
-	return value, nil
-}
-
-func bindBoolLiteral(column string, lit Value) (bool, error) {
-	if lit.Kind != ValueBool {
-		return false, fmt.Errorf("column %q expects bool literal", column)
-	}
-	return lit.Bool, nil
-}
-
-func bindStringLiteral(column string, lit Value) (string, error) {
-	if lit.Kind != ValueString {
-		return "", fmt.Errorf("column %q expects string literal", column)
-	}
-	return lit.String, nil
+	return nil
 }
 
 // BindDelete validates DELETE against a BoundTableDef and binds the optional WHERE expression.
@@ -966,60 +909,48 @@ type TableResolver func(name string) (BoundTableDef, error)
 // splitJoinKeys requires ON to be one or more column = column equalities (AND-joined) with
 // each side from a different source. Returns (leftKeys, rightKeys) tagged so left references
 // the build-side alias set.
+// splitJoinKeys flattens AND conjuncts in ON and validates each is `col = col` with one
+// column from the build side and one from the new right side.
 func splitJoinKeys(on BoundExpr, leftAliases map[string]bool, rightAlias string) ([]BoundExpr, []BoundExpr, error) {
-	var conjuncts []BoundExpr
-	if err := collectAndConjuncts(on, &conjuncts); err != nil {
+	var leftKeys, rightKeys []BoundExpr
+	var walk func(BoundExpr) error
+	walk = func(e BoundExpr) error {
+		if e.Op == ExprAnd {
+			if len(e.Args) != 2 {
+				return fmt.Errorf("ON: malformed AND")
+			}
+			if err := walk(e.Args[0]); err != nil {
+				return err
+			}
+			return walk(e.Args[1])
+		}
+		if e.Op != ExprEqual || len(e.Args) != 2 {
+			return fmt.Errorf("ON conjuncts must be column equalities")
+		}
+		l, r := e.Args[0], e.Args[1]
+		if l.Op != ExprColumn || r.Op != ExprColumn {
+			return fmt.Errorf("ON must reference one column from each side")
+		}
+		la, ra := columnAlias(l.Column), columnAlias(r.Column)
+		switch {
+		case leftAliases[la] && ra == rightAlias:
+			leftKeys = append(leftKeys, l)
+			rightKeys = append(rightKeys, r)
+		case leftAliases[ra] && la == rightAlias:
+			leftKeys = append(leftKeys, r)
+			rightKeys = append(rightKeys, l)
+		default:
+			return fmt.Errorf("ON columns must reference both join sides; got %q and %q", la, ra)
+		}
+		return nil
+	}
+	if err := walk(on); err != nil {
 		return nil, nil, err
 	}
-	if len(conjuncts) == 0 {
+	if len(leftKeys) == 0 {
 		return nil, nil, fmt.Errorf("ON must contain at least one column equality")
 	}
-	var leftKeys, rightKeys []BoundExpr
-	for _, c := range conjuncts {
-		l, r, err := splitJoinEquality(c, leftAliases, rightAlias)
-		if err != nil {
-			return nil, nil, err
-		}
-		leftKeys = append(leftKeys, l)
-		rightKeys = append(rightKeys, r)
-	}
 	return leftKeys, rightKeys, nil
-}
-
-func collectAndConjuncts(expr BoundExpr, out *[]BoundExpr) error {
-	if expr.Op == ExprAnd {
-		if len(expr.Args) != 2 {
-			return fmt.Errorf("ON: malformed AND")
-		}
-		if err := collectAndConjuncts(expr.Args[0], out); err != nil {
-			return err
-		}
-		return collectAndConjuncts(expr.Args[1], out)
-	}
-	*out = append(*out, expr)
-	return nil
-}
-
-func splitJoinEquality(on BoundExpr, leftAliases map[string]bool, rightAlias string) (BoundExpr, BoundExpr, error) {
-	if on.Op != ExprEqual {
-		return BoundExpr{}, BoundExpr{}, fmt.Errorf("ON conjuncts must be column equalities")
-	}
-	if len(on.Args) != 2 {
-		return BoundExpr{}, BoundExpr{}, fmt.Errorf("ON malformed")
-	}
-	left, right := on.Args[0], on.Args[1]
-	if left.Op != ExprColumn || right.Op != ExprColumn {
-		return BoundExpr{}, BoundExpr{}, fmt.Errorf("ON must reference one column from each side")
-	}
-	leftSide := columnAlias(left.Column)
-	rightSide := columnAlias(right.Column)
-	if leftAliases[leftSide] && rightSide == rightAlias {
-		return left, right, nil
-	}
-	if leftAliases[rightSide] && leftSide == rightAlias {
-		return right, left, nil
-	}
-	return BoundExpr{}, BoundExpr{}, fmt.Errorf("ON columns must reference both join sides; got %q and %q", leftSide, rightSide)
 }
 
 func bindJoinedSortKeys(orderBy []OrderExpr, columns map[string]BoundColumnDef) ([]SortKey, error) {
@@ -1110,49 +1041,56 @@ func BindSelect(stmt *SelectStmt, def BoundTableDef) (*Plan, error) {
 }
 
 func aggregateScanColumnIDs(group []BoundExpr, aggregates, hidden []AggSpec, where *BoundExpr) []ColumnID {
-	seen := make(map[ColumnID]struct{})
-	ids := []ColumnID{}
-	var walk func(expr BoundExpr)
-	walk = func(expr BoundExpr) {
-		if expr.Op == ExprColumn {
-			id := expr.ColumnID
-			if id == 0 {
-				return
-			}
-			if _, ok := seen[id]; ok {
-				return
-			}
-			seen[id] = struct{}{}
-			ids = append(ids, id)
-			return
-		}
-		for _, arg := range expr.Args {
-			walk(arg)
-		}
-	}
+	var s idSet
 	for _, g := range group {
-		walk(g)
-	}
-	addAgg := func(spec AggSpec) {
-		if spec.Star || spec.ArgColumn == 0 {
-			return
-		}
-		if _, ok := seen[spec.ArgColumn]; ok {
-			return
-		}
-		seen[spec.ArgColumn] = struct{}{}
-		ids = append(ids, spec.ArgColumn)
+		s.walk(g)
 	}
 	for _, spec := range aggregates {
-		addAgg(spec)
+		if !spec.Star {
+			s.add(spec.ArgColumn)
+		}
 	}
 	for _, spec := range hidden {
-		addAgg(spec)
+		if !spec.Star {
+			s.add(spec.ArgColumn)
+		}
 	}
 	if where != nil {
-		walk(*where)
+		s.walk(*where)
 	}
-	return ids
+	return s.ids
+}
+
+// idSet collects deduped ColumnIDs from BoundExpr trees. Both scan-tail and aggregate-tail
+// column pruning use the same shape: walk one or more exprs, optionally tack on aggregate
+// arg IDs directly, and emit an ordered ID slice.
+type idSet struct {
+	seen map[ColumnID]struct{}
+	ids  []ColumnID
+}
+
+func (s *idSet) add(id ColumnID) {
+	if id == 0 {
+		return
+	}
+	if _, ok := s.seen[id]; ok {
+		return
+	}
+	if s.seen == nil {
+		s.seen = make(map[ColumnID]struct{})
+	}
+	s.seen[id] = struct{}{}
+	s.ids = append(s.ids, id)
+}
+
+func (s *idSet) walk(expr BoundExpr) {
+	if expr.Op == ExprColumn {
+		s.add(expr.ColumnID)
+		return
+	}
+	for _, a := range expr.Args {
+		s.walk(a)
+	}
 }
 
 func BindExplain(stmt *ExplainStmt, def BoundTableDef) (*Plan, error) {
@@ -1821,44 +1759,21 @@ func boundExprEqual(left BoundExpr, right BoundExpr) bool {
 // predicateOnly lists IDs that come from WHERE alone so the executor can drop
 // them from the scan's emit set when the predicate pushes into storage.
 func scanProjectionColumnIDs(outputs []BoundOutput, keys []SortKey, where *BoundExpr) (all, predicateOnly []ColumnID) {
-	seen := make(map[ColumnID]struct{})
-	outputSeen := make(map[ColumnID]struct{})
-	var walk func(expr BoundExpr, dst *[]ColumnID, track map[ColumnID]struct{})
-	walk = func(expr BoundExpr, dst *[]ColumnID, track map[ColumnID]struct{}) {
-		if expr.Op == ExprColumn {
-			id := expr.ColumnID
-			if id == 0 {
-				return
-			}
-			if _, ok := track[id]; ok {
-				return
-			}
-			track[id] = struct{}{}
-			*dst = append(*dst, id)
-			return
-		}
-		for _, arg := range expr.Args {
-			walk(arg, dst, track)
-		}
-	}
+	var s idSet
 	for _, o := range outputs {
-		walk(o.Expr, &all, seen)
+		s.walk(o.Expr)
 	}
 	for _, k := range keys {
-		walk(k.Expr, &all, seen)
+		s.walk(k.Expr)
 	}
-	for id := range seen {
-		outputSeen[id] = struct{}{}
-	}
+	outputCount := len(s.ids)
 	if where != nil {
-		walk(*where, &all, seen)
+		s.walk(*where)
 	}
-	for _, id := range all {
-		if _, ok := outputSeen[id]; !ok {
-			predicateOnly = append(predicateOnly, id)
-		}
+	if len(s.ids) > outputCount {
+		predicateOnly = append(predicateOnly, s.ids[outputCount:]...)
 	}
-	return all, predicateOnly
+	return s.ids, predicateOnly
 }
 
 // narrowScanColumns trims a RelScan's Columns and Outputs to the given set

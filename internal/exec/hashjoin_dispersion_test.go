@@ -1,4 +1,4 @@
-// Verifies the maphash.Bytes + appendJoinKey path actually disperses keys across buckets.
+// Verifies the maphash.Bytes + encodeRow path actually disperses keys across buckets.
 // A regression here (constant seed swap, broken encoding) would funnel rows to one bucket.
 package exec
 
@@ -6,23 +6,35 @@ import (
 	"hash/maphash"
 	"math/rand"
 	"testing"
+
+	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 func TestHashJoinKey_DispersionAcrossBuckets(t *testing.T) {
-	const n = 100_000
-	seed := maphash.MakeSeed()
+	const batchRows = 2048
+	const batches = 50
+	const n = batchRows * batches
+	cols := []joinKeyCol{{idx: 0, kind: types.VecInt64}}
+	enc := keyEncoder{seed: maphash.MakeSeed()}
 	build := hashJoinBuild{index: make(map[uint64][]hashBucket, n)}
-
 	r := rand.New(rand.NewSource(1))
-	var buf []byte
-	for i := range n {
-		buf = buf[:0]
-		var err error
-		buf, err = appendJoinKey(buf, r.Int63())
-		if err != nil {
-			t.Fatalf("appendJoinKey: %v", err)
+	for bi := range batches {
+		v := types.NewVec(types.VecInt64, batchRows)
+		vals := v.I64()
+		for i := range batchRows {
+			vals[i] = r.Int63()
 		}
-		build.add(buf, maphash.Bytes(seed, buf), rightRowRef{batch: 0, row: i})
+		batch, err := types.NewBatch([]types.Column{{Name: "k", Type: types.Int64, V: v}})
+		if err != nil {
+			t.Fatalf("NewBatch: %v", err)
+		}
+		for i := range batchRows {
+			key, sum, ok, err := enc.encodeRow(batch, cols, i)
+			if err != nil || !ok {
+				t.Fatalf("encodeRow batch %d row %d: ok=%v err=%v", bi, i, ok, err)
+			}
+			build.add(key, sum, rightRowRef{batch: bi, row: i})
+		}
 	}
 
 	distinctHashes := len(build.index)

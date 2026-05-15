@@ -32,9 +32,18 @@ type hashJoinRuntime struct {
 	leftDrained bool
 
 	build hashJoinBuild
-	probe hashJoinProbe
-	drain hashJoinDrain
 	key   keyEncoder
+
+	leftKeys  []joinKeyCol
+	rightKeys []joinKeyCol
+	leftTpls  []columnTemplate
+	rightTpls []columnTemplate
+
+	probeBatch types.Batch
+	pending    []joinRow
+
+	drainBatch int
+	drainRow   int
 }
 
 type hashJoinBuild struct {
@@ -48,17 +57,6 @@ type hashBucket struct {
 	rows []rightRowRef
 }
 
-type hashJoinProbe struct {
-	leftSchema []columnTemplate
-	batch      types.Batch
-	pairs      []joinPair
-}
-
-type hashJoinDrain struct {
-	batch int
-	row   int
-}
-
 type keyEncoder struct {
 	buf  []byte
 	seed maphash.Seed
@@ -70,39 +68,6 @@ type joinKeyCol struct {
 	enumLabels []string
 }
 
-// resolveJoinKeyCols pre-resolves the column index for each join key. splitJoinEquality
-// already requires keys to be column references, so the type switch in encodeRow can
-// dispatch on VecKind without going through evalCtx or ColumnByName per row.
-func resolveJoinKeyCols(batch types.Batch, keys []sql.BoundExpr) ([]joinKeyCol, error) {
-	cols := make([]joinKeyCol, len(keys))
-	for i, k := range keys {
-		if k.Op != sql.ExprColumn {
-			return nil, fmt.Errorf("hashjoin: join key must be a column reference, got op %v", k.Op)
-		}
-		col, ok := batch.ColumnByName(k.Column)
-		if !ok {
-			return nil, fmt.Errorf("hashjoin: column %q not in batch", k.Column)
-		}
-		idx := -1
-		for j := range batch.Columns {
-			if &batch.Columns[j] == col {
-				idx = j
-				break
-			}
-		}
-		if idx < 0 {
-			for j := range batch.Columns {
-				if batch.Columns[j].Name == col.Name {
-					idx = j
-					break
-				}
-			}
-		}
-		cols[i] = joinKeyCol{idx: idx, kind: col.V.Kind, enumLabels: col.EnumLabels}
-	}
-	return cols, nil
-}
-
 type columnTemplate struct {
 	Name       string
 	Type       types.Type
@@ -110,10 +75,13 @@ type columnTemplate struct {
 	Kind       types.VecKind
 }
 
-type joinPair struct {
+// joinRow flags whether each side contributes real data or a null fill. Probe-matched rows
+// set both, left-outer misses set only hasLeft, right-outer drain rows set only hasRight.
+type joinRow struct {
 	leftRow  int
-	ref      rightRowRef
-	nullFill bool
+	right    rightRowRef
+	hasLeft  bool
+	hasRight bool
 }
 
 type rightRowRef struct {
@@ -135,27 +103,8 @@ func (h *HashJoinOp) Open(ctx context.Context) error {
 		h.state = prev
 		return err
 	}
-	h.rt.reset()
+	h.rt = hashJoinRuntime{key: keyEncoder{seed: maphash.MakeSeed()}}
 	return nil
-}
-
-func (rt *hashJoinRuntime) reset() {
-	rt.built = false
-	rt.leftDrained = false
-
-	rt.build.batches = nil
-	rt.build.index = nil
-	rt.build.matched = nil
-
-	rt.probe.leftSchema = nil
-	rt.probe.batch = types.Batch{}
-	rt.probe.pairs = nil
-
-	rt.drain.batch = 0
-	rt.drain.row = 0
-
-	rt.key.buf = rt.key.buf[:0]
-	rt.key.seed = maphash.MakeSeed()
 }
 
 func (h *HashJoinOp) Next() (types.Batch, bool, error) {
@@ -170,8 +119,8 @@ func (h *HashJoinOp) Next() (types.Batch, bool, error) {
 	}
 	if !h.rt.leftDrained {
 		for {
-			if len(h.rt.probe.pairs) > 0 {
-				return h.flushPending()
+			if len(h.rt.pending) > 0 {
+				return h.emitChunk()
 			}
 			leftBatch, ok, err := h.Left.Next()
 			if err != nil {
@@ -181,23 +130,23 @@ func (h *HashJoinOp) Next() (types.Batch, bool, error) {
 				h.rt.leftDrained = true
 				break
 			}
-			if h.rt.probe.leftSchema == nil {
-				h.rt.probe.leftSchema = templatesFromColumns(leftBatch.Columns)
-			}
-			h.rt.probe.batch = leftBatch
-			if err := h.collectPairs(leftBatch, leftBatch.Sel); err != nil {
+			if err := h.resolveLeft(leftBatch); err != nil {
 				return types.Batch{}, false, err
 			}
-			if len(h.rt.probe.pairs) == 0 {
+			h.rt.probeBatch = leftBatch
+			if err := h.collectRows(leftBatch); err != nil {
+				return types.Batch{}, false, err
+			}
+			if len(h.rt.pending) == 0 {
 				continue
 			}
-			return h.flushPending()
+			return h.emitChunk()
 		}
 	}
 	if h.Kind != sql.JoinRight && h.Kind != sql.JoinFull {
 		return types.Batch{}, false, nil
 	}
-	return h.emitUnmatchedRight()
+	return h.drainUnmatchedRight()
 }
 
 func (h *HashJoinOp) buildIndex() error {
@@ -210,6 +159,9 @@ func (h *HashJoinOp) buildIndex() error {
 		if !ok {
 			break
 		}
+		if err := h.resolveRight(batch); err != nil {
+			return err
+		}
 		build.batches = append(build.batches, bufferedBatch{batch: batch, sel: selectionForBatch(batch)})
 	}
 	build.index = make(map[uint64][]hashBucket, len(build.batches)*types.StandardBatchRows)
@@ -220,16 +172,12 @@ func (h *HashJoinOp) buildIndex() error {
 		}
 	}
 	for bi, bb := range build.batches {
-		cols, err := resolveJoinKeyCols(bb.batch, h.RightKeys)
-		if err != nil {
-			return err
-		}
 		var loopErr error
 		bb.sel.IterSet(func(row int) {
 			if loopErr != nil {
 				return
 			}
-			key, sum, ok, err := h.rt.key.encodeRow(bb.batch, cols, row)
+			key, sum, ok, err := h.rt.key.encodeRow(bb.batch, h.rt.rightKeys, row)
 			if err != nil {
 				loopErr = err
 				return
@@ -246,6 +194,32 @@ func (h *HashJoinOp) buildIndex() error {
 	return nil
 }
 
+func (h *HashJoinOp) resolveLeft(batch types.Batch) error {
+	if h.rt.leftKeys != nil {
+		return nil
+	}
+	cols, err := resolveJoinKeyCols(batch, h.LeftKeys)
+	if err != nil {
+		return err
+	}
+	h.rt.leftKeys = cols
+	h.rt.leftTpls = templatesFromColumns(batch.Columns)
+	return nil
+}
+
+func (h *HashJoinOp) resolveRight(batch types.Batch) error {
+	if h.rt.rightKeys != nil {
+		return nil
+	}
+	cols, err := resolveJoinKeyCols(batch, h.RightKeys)
+	if err != nil {
+		return err
+	}
+	h.rt.rightKeys = cols
+	h.rt.rightTpls = templatesFromColumns(batch.Columns)
+	return nil
+}
+
 func (b *hashJoinBuild) add(key []byte, sum uint64, ref rightRowRef) {
 	buckets := b.index[sum]
 	for i := range buckets {
@@ -255,10 +229,7 @@ func (b *hashJoinBuild) add(key []byte, sum uint64, ref rightRowRef) {
 		}
 	}
 	owned := append([]byte(nil), key...)
-	b.index[sum] = append(buckets, hashBucket{
-		key:  owned,
-		rows: []rightRowRef{ref},
-	})
+	b.index[sum] = append(buckets, hashBucket{key: owned, rows: []rightRowRef{ref}})
 }
 
 func (b *hashJoinBuild) lookup(key []byte, sum uint64) []rightRowRef {
@@ -271,35 +242,31 @@ func (b *hashJoinBuild) lookup(key []byte, sum uint64) []rightRowRef {
 	return nil
 }
 
-func (h *HashJoinOp) collectPairs(leftBatch types.Batch, leftSel *types.SelectionMask) error {
-	probe := &h.rt.probe
-	build := &h.rt.build
-	probe.pairs = probe.pairs[:0]
-	cols, err := resolveJoinKeyCols(leftBatch, h.LeftKeys)
-	if err != nil {
-		return err
-	}
+func (h *HashJoinOp) collectRows(left types.Batch) error {
+	rt := &h.rt
+	build := &rt.build
+	rt.pending = rt.pending[:0]
 	leftOuter := h.Kind == sql.JoinLeft || h.Kind == sql.JoinFull
 	var loopErr error
-	leftSel.IterSet(func(row int) {
+	left.Sel.IterSet(func(row int) {
 		if loopErr != nil {
 			return
 		}
-		key, sum, ok, err := h.rt.key.encodeRow(leftBatch, cols, row)
+		key, sum, ok, err := rt.key.encodeRow(left, rt.leftKeys, row)
 		if err != nil {
 			loopErr = err
 			return
 		}
 		if !ok {
 			if leftOuter {
-				probe.pairs = append(probe.pairs, joinPair{leftRow: row, nullFill: true})
+				rt.pending = append(rt.pending, joinRow{leftRow: row, hasLeft: true})
 			}
 			return
 		}
 		matches := build.lookup(key, sum)
 		if len(matches) == 0 {
 			if leftOuter {
-				probe.pairs = append(probe.pairs, joinPair{leftRow: row, nullFill: true})
+				rt.pending = append(rt.pending, joinRow{leftRow: row, hasLeft: true})
 			}
 			return
 		}
@@ -307,12 +274,40 @@ func (h *HashJoinOp) collectPairs(leftBatch types.Batch, leftSel *types.Selectio
 			if build.matched != nil {
 				build.matched[ref.batch].Set(ref.row)
 			}
-			probe.pairs = append(probe.pairs, joinPair{leftRow: row, ref: ref})
+			rt.pending = append(rt.pending, joinRow{leftRow: row, right: ref, hasLeft: true, hasRight: true})
 		}
 	})
 	return loopErr
 }
 
+// resolveJoinKeyCols pre-resolves the column index for each join key. splitJoinEquality
+// already requires keys to be column references, so the type switch in encodeRow can
+// dispatch on VecKind without going through evalCtx or ColumnByName per row.
+func resolveJoinKeyCols(batch types.Batch, keys []sql.BoundExpr) ([]joinKeyCol, error) {
+	cols := make([]joinKeyCol, len(keys))
+	for i, k := range keys {
+		if k.Op != sql.ExprColumn {
+			return nil, fmt.Errorf("hashjoin: join key must be a column reference, got op %v", k.Op)
+		}
+		idx := -1
+		for j := range batch.Columns {
+			if batch.Columns[j].Name == k.Column {
+				idx = j
+				break
+			}
+		}
+		if idx < 0 {
+			return nil, fmt.Errorf("hashjoin: column %q not in batch", k.Column)
+		}
+		c := &batch.Columns[idx]
+		cols[i] = joinKeyCol{idx: idx, kind: c.V.Kind, enumLabels: c.EnumLabels}
+	}
+	return cols, nil
+}
+
+// encodeRow writes a type-tagged deterministic byte form of the row's join key. Tags
+// guard against type drift between sides. -0.0 is canonicalised to +0.0 so float keys
+// compare equal across rows that wrote the negative sign bit.
 func (e *keyEncoder) encodeRow(batch types.Batch, cols []joinKeyCol, row int) ([]byte, uint64, bool, error) {
 	e.buf = e.buf[:0]
 	for _, kc := range cols {
@@ -377,201 +372,138 @@ func (e *keyEncoder) encodeRow(batch types.Batch, cols []joinKeyCol, row int) ([
 	return e.buf, maphash.Bytes(e.seed, e.buf), true, nil
 }
 
-// appendJoinKey writes a type-tagged deterministic byte form. Tags guard against future
-// type drift even though the binder already rejects mismatched key types across sides.
-func appendJoinKey(dst []byte, v any) ([]byte, error) {
-	switch x := v.(type) {
-	case int64:
-		dst = append(dst, 'i')
-		return binary.BigEndian.AppendUint64(dst, uint64(x)), nil
-	case float64:
-		if x == 0 {
-			x = 0
-		}
-		dst = append(dst, 'f')
-		return binary.BigEndian.AppendUint64(dst, math.Float64bits(x)), nil
-	case bool:
-		if x {
-			return append(dst, 'b', 1), nil
-		}
-		return append(dst, 'b', 0), nil
-	case string:
-		dst = append(dst, 's')
-		dst = binary.BigEndian.AppendUint32(dst, uint32(len(x)))
-		return append(dst, x...), nil
-	case []byte:
-		dst = append(dst, 'x')
-		dst = binary.BigEndian.AppendUint32(dst, uint32(len(x)))
-		return append(dst, x...), nil
-	}
-	return nil, fmt.Errorf("hashjoin: unsupported key type %T", v)
-}
-
-func (h *HashJoinOp) flushPending() (types.Batch, bool, error) {
-	probe := &h.rt.probe
-	build := &h.rt.build
-	chunk := probe.pairs
+func (h *HashJoinOp) emitChunk() (types.Batch, bool, error) {
+	chunk := h.rt.pending
 	if len(chunk) > types.StandardBatchRows {
 		chunk = chunk[:types.StandardBatchRows]
-		probe.pairs = probe.pairs[types.StandardBatchRows:]
+		h.rt.pending = h.rt.pending[types.StandardBatchRows:]
 	} else {
-		probe.pairs = nil
+		h.rt.pending = nil
 	}
-	leftBatch := probe.batch
-	if len(probe.pairs) == 0 {
-		probe.batch = types.Batch{}
+	left := h.rt.probeBatch
+	if len(h.rt.pending) == 0 {
+		h.rt.probeBatch = types.Batch{}
 	}
-
-	rows := len(chunk)
-	totalCols := len(leftBatch.Columns)
-	if len(build.batches) > 0 {
-		totalCols += len(build.batches[0].batch.Columns)
-	}
-	cols := make([]types.Column, 0, totalCols)
-	for _, c := range leftBatch.Columns {
-		v, err := types.NewVecForKind(c.V.Kind, rows)
-		if err != nil {
-			return types.Batch{}, false, err
-		}
-		cols = append(cols, types.Column{Name: c.Name, Type: c.Type, EnumLabels: c.EnumLabels, V: v})
-	}
-	if len(build.batches) > 0 {
-		for _, c := range build.batches[0].batch.Columns {
-			v, err := types.NewVecForKind(c.V.Kind, rows)
-			if err != nil {
-				return types.Batch{}, false, err
-			}
-			cols = append(cols, types.Column{Name: c.Name, Type: c.Type, EnumLabels: c.EnumLabels, V: v})
-		}
-	}
-	leftWidth := len(leftBatch.Columns)
-	for dst, p := range chunk {
-		for ci, sc := range leftBatch.Columns {
-			if err := types.CopyVecRow(sc.V, p.leftRow, &cols[ci].V, dst); err != nil {
-				return types.Batch{}, false, err
-			}
-		}
-		if p.nullFill {
-			for ci := leftWidth; ci < len(cols); ci++ {
-				if cols[ci].V.Valid == nil {
-					cols[ci].V.Valid = types.NewAllValid(int(cols[ci].V.Len))
-				}
-				cols[ci].V.Valid.SetInvalid(dst)
-			}
-			continue
-		}
-		rb := build.batches[p.ref.batch].batch
-		for ci, sc := range rb.Columns {
-			if err := types.CopyVecRow(sc.V, p.ref.row, &cols[leftWidth+ci].V, dst); err != nil {
-				return types.Batch{}, false, err
-			}
-		}
-	}
-	out, err := types.NewBatch(cols)
-	if err != nil {
-		return types.Batch{}, false, fmt.Errorf("hashjoin: NewBatch: %w", err)
-	}
-	sel := types.NewSelectionMask(rows)
-	sel.FillAll()
-	out.Sel = &sel
-	return out, true, nil
+	return h.emitRows(&left, chunk)
 }
 
-func (h *HashJoinOp) emitUnmatchedRight() (types.Batch, bool, error) {
+func (h *HashJoinOp) drainUnmatchedRight() (types.Batch, bool, error) {
 	build := &h.rt.build
 	if len(build.batches) == 0 {
 		return types.Batch{}, false, nil
 	}
-	leftTpls, err := h.leftSchemaTemplates()
-	if err != nil {
-		return types.Batch{}, false, err
-	}
-	var refs []rightRowRef
-	for h.rt.drain.batch < len(build.batches) {
-		bb := build.batches[h.rt.drain.batch]
-		for h.rt.drain.row < bb.batch.Len {
-			r := h.rt.drain.row
-			h.rt.drain.row++
+	rows := h.rt.pending[:0]
+	for h.rt.drainBatch < len(build.batches) {
+		bb := build.batches[h.rt.drainBatch]
+		for h.rt.drainRow < bb.batch.Len {
+			r := h.rt.drainRow
+			h.rt.drainRow++
 			if !bb.sel.IsSet(r) {
 				continue
 			}
-			if build.matched[h.rt.drain.batch].IsSet(r) {
+			if build.matched[h.rt.drainBatch].IsSet(r) {
 				continue
 			}
-			refs = append(refs, rightRowRef{batch: h.rt.drain.batch, row: r})
-			if len(refs) >= types.StandardBatchRows {
+			rows = append(rows, joinRow{right: rightRowRef{batch: h.rt.drainBatch, row: r}, hasRight: true})
+			if len(rows) >= types.StandardBatchRows {
 				break
 			}
 		}
-		if len(refs) >= types.StandardBatchRows {
+		if len(rows) >= types.StandardBatchRows {
 			break
 		}
-		h.rt.drain.batch++
-		h.rt.drain.row = 0
+		h.rt.drainBatch++
+		h.rt.drainRow = 0
 	}
-	if len(refs) == 0 {
+	h.rt.pending = rows[:0]
+	if len(rows) == 0 {
 		return types.Batch{}, false, nil
 	}
+	return h.emitRows(nil, rows)
+}
 
-	rows := len(refs)
-	leftCols, err := allocColumns(leftTpls, rows)
+func (h *HashJoinOp) emitRows(left *types.Batch, rows []joinRow) (types.Batch, bool, error) {
+	if len(rows) == 0 {
+		return types.Batch{}, false, nil
+	}
+	build := &h.rt.build
+	n := len(rows)
+
+	leftTpls, err := h.leftTemplates(left)
 	if err != nil {
 		return types.Batch{}, false, err
 	}
-	rightCols := make([]types.Column, len(build.batches[0].batch.Columns))
-	for i, c := range build.batches[0].batch.Columns {
-		v, err := types.NewVecForKind(c.V.Kind, rows)
-		if err != nil {
-			return types.Batch{}, false, err
-		}
-		rightCols[i] = types.Column{Name: c.Name, Type: c.Type, EnumLabels: c.EnumLabels, V: v}
+	rightTpls, err := h.rightTemplates()
+	if err != nil {
+		return types.Batch{}, false, err
+	}
+	leftCols, err := allocColumns(leftTpls, n)
+	if err != nil {
+		return types.Batch{}, false, err
+	}
+	rightCols, err := allocColumns(rightTpls, n)
+	if err != nil {
+		return types.Batch{}, false, err
 	}
 	cols := append(leftCols, rightCols...)
 	leftWidth := len(leftCols)
-	for dst, r := range refs {
-		for ci := 0; ci < leftWidth; ci++ {
-			if cols[ci].V.Valid == nil {
-				cols[ci].V.Valid = types.NewAllValid(int(cols[ci].V.Len))
+
+	for dst, r := range rows {
+		if r.hasLeft && left != nil {
+			for ci, sc := range left.Columns {
+				if err := types.CopyVecRow(sc.V, r.leftRow, &cols[ci].V, dst); err != nil {
+					return types.Batch{}, false, err
+				}
 			}
-			cols[ci].V.Valid.SetInvalid(dst)
+		} else {
+			nullFillRow(cols[:leftWidth], dst)
 		}
-		rb := build.batches[r.batch].batch
-		for ci, sc := range rb.Columns {
-			if err := types.CopyVecRow(sc.V, r.row, &cols[leftWidth+ci].V, dst); err != nil {
-				return types.Batch{}, false, err
+		if r.hasRight {
+			rb := build.batches[r.right.batch].batch
+			for ci, sc := range rb.Columns {
+				if err := types.CopyVecRow(sc.V, r.right.row, &cols[leftWidth+ci].V, dst); err != nil {
+					return types.Batch{}, false, err
+				}
 			}
+		} else {
+			nullFillRow(cols[leftWidth:], dst)
 		}
 	}
+
 	out, err := types.NewBatch(cols)
 	if err != nil {
 		return types.Batch{}, false, fmt.Errorf("hashjoin: NewBatch: %w", err)
 	}
-	sel := types.NewSelectionMask(rows)
+	sel := types.NewSelectionMask(n)
 	sel.FillAll()
 	out.Sel = &sel
 	return out, true, nil
 }
 
-func (h *HashJoinOp) leftSchemaTemplates() ([]columnTemplate, error) {
-	if h.rt.probe.leftSchema != nil {
-		return h.rt.probe.leftSchema, nil
-	}
-	if len(h.LeftOutputs) == 0 {
-		return nil, fmt.Errorf("hashjoin: %v with empty left side requires a left-schema template", h.Kind)
-	}
-	tpls := make([]columnTemplate, len(h.LeftOutputs))
-	for i, o := range h.LeftOutputs {
-		vk, err := types.VecKindOf(o.Expr.Type)
-		if err != nil {
-			return nil, fmt.Errorf("hashjoin: left output %q: %w", o.Expr.Column, err)
+func nullFillRow(cols []types.Column, row int) {
+	for i := range cols {
+		if cols[i].V.Valid == nil {
+			cols[i].V.Valid = types.NewAllValid(int(cols[i].V.Len))
 		}
-		name := o.Alias
-		if name == "" {
-			name = o.Expr.Column
-		}
-		tpls[i] = columnTemplate{Name: name, Type: o.Expr.Type, Kind: vk}
+		cols[i].V.Valid.SetInvalid(row)
 	}
-	return tpls, nil
+}
+
+func (h *HashJoinOp) leftTemplates(left *types.Batch) ([]columnTemplate, error) {
+	if left != nil && len(left.Columns) > 0 {
+		return templatesFromColumns(left.Columns), nil
+	}
+	if h.rt.leftTpls != nil {
+		return h.rt.leftTpls, nil
+	}
+	return templatesFromOutputs(h.LeftOutputs)
+}
+
+func (h *HashJoinOp) rightTemplates() ([]columnTemplate, error) {
+	if h.rt.rightTpls != nil {
+		return h.rt.rightTpls, nil
+	}
+	return templatesFromOutputs(h.RightOutputs)
 }
 
 func templatesFromColumns(cols []types.Column) []columnTemplate {
@@ -580,6 +512,25 @@ func templatesFromColumns(cols []types.Column) []columnTemplate {
 		out[i] = columnTemplate{Name: c.Name, Type: c.Type, EnumLabels: c.EnumLabels, Kind: c.V.Kind}
 	}
 	return out
+}
+
+func templatesFromOutputs(outputs []sql.BoundOutput) ([]columnTemplate, error) {
+	if len(outputs) == 0 {
+		return nil, fmt.Errorf("hashjoin: no output schema available")
+	}
+	tpls := make([]columnTemplate, len(outputs))
+	for i, o := range outputs {
+		kind, err := types.VecKindOf(o.Expr.Type)
+		if err != nil {
+			return nil, err
+		}
+		name := o.Alias
+		if name == "" {
+			name = o.Expr.Column
+		}
+		tpls[i] = columnTemplate{Name: name, Type: o.Expr.Type, Kind: kind}
+	}
+	return tpls, nil
 }
 
 func allocColumns(tpls []columnTemplate, rows int) ([]types.Column, error) {
