@@ -26,5 +26,10 @@ func TestEngine_ExplainSmoke(t *testing.T) {
 		var b strings.Builder
 		for _, r := range rows.Values { b.WriteString(r[0].(string)); b.WriteString("\n") }
 		t.Logf("\n== %s\n%s", q, b.String())
+		if strings.HasPrefix(q, "EXPLAIN ANALYZE") {
+			if !strings.Contains(b.String(), "wall=") {
+				t.Errorf("ANALYZE output missing per-operator timings: %s", b.String())
+			}
+		}
 	}
 }
