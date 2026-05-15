@@ -72,9 +72,9 @@ func planOutputNames(plan *sql.Plan) []string {
 	return out
 }
 
+// openSegmentsForQuery resolves the table's segments using the DB-level cache. Callers must
+// already hold db.mu so the cache + manifest mutation stays serialised with Close.
 func (db *DB) openSegmentsForQuery(table string) ([]*storage.Segment, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
 	m, err := db.manifestFor(table)
 	if err != nil {
 		return nil, err

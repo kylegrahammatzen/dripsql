@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
@@ -45,9 +47,6 @@ type Rows struct {
 func Open(path string) (*DB, error) {
 	if path == "" {
 		return nil, fmt.Errorf("engine: database path is required")
-	}
-	if err := os.MkdirAll(path, 0o755); err != nil {
-		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Join(path, "segments"), 0o755); err != nil {
 		return nil, err
@@ -98,16 +97,6 @@ func (db *DB) Close() error {
 	return firstErr
 }
 
-func (db *DB) checkOpen() error {
-	if db == nil {
-		return fmt.Errorf("engine: nil DB")
-	}
-	if db.closed {
-		return fmt.Errorf("engine: database is closed")
-	}
-	return nil
-}
-
 func (db *DB) tableDir(name string) string {
 	return filepath.Join(db.root, "segments", types.NormalizeName(name))
 }
@@ -137,15 +126,12 @@ func (db *DB) manifestFor(name string) (*storage.Manifest, error) {
 }
 
 func parseSegmentID(filename string) (uint64, bool) {
-	ext := filepath.Ext(filename)
-	if ext != ".dsv4" {
+	base, ok := strings.CutSuffix(filename, ".dsv4")
+	if !ok {
 		return 0, false
 	}
-	var id uint64
-	if _, err := fmt.Sscanf(filename, "%d.dsv4", &id); err != nil {
-		return 0, false
-	}
-	return id, true
+	id, err := strconv.ParseUint(base, 10, 64)
+	return id, err == nil
 }
 
 func (db *DB) nextSegmentPath(name string) string {
@@ -234,6 +220,9 @@ func (db *DB) registerTable(spec types.TableSpec) error {
 		return err
 	}
 	if _, err := db.manifestFor(spec.Name); err != nil {
+		delete(db.tables, key)
+		db.version--
+		_ = saveCatalog(db.root, db.types, db.tables, db.version)
 		return err
 	}
 	return nil
@@ -256,8 +245,8 @@ func (db *DB) resolveTableTypes(spec *types.TableSpec) error {
 }
 
 func (db *DB) Exec(ctx context.Context, sqlText string) (Result, error) {
-	if err := db.checkOpen(); err != nil {
-		return Result{}, err
+	if db == nil {
+		return Result{}, fmt.Errorf("engine: nil DB")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -266,9 +255,12 @@ func (db *DB) Exec(ctx context.Context, sqlText string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	var result Result
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	if db.closed {
+		return Result{}, fmt.Errorf("engine: database is closed")
+	}
+	var result Result
 	for _, stmt := range stmts {
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -320,15 +312,18 @@ func (db *DB) planner() *sql.Planner {
 }
 
 func (db *DB) Query(ctx context.Context, sqlText string) (*Rows, error) {
-	if err := db.checkOpen(); err != nil {
-		return nil, err
+	if db == nil {
+		return nil, fmt.Errorf("engine: nil DB")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.closed {
+		return nil, fmt.Errorf("engine: database is closed")
+	}
 	plan, err := db.planForQuery(sqlText)
-	db.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}

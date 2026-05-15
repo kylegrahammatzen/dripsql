@@ -37,6 +37,44 @@ func mustQuery(t *testing.T, db *DB, sql string) *Rows {
 	return r
 }
 
+func mustValues(t *testing.T, db *DB, sql string) [][]any {
+	t.Helper()
+	return mustQuery(t, db, sql).Values
+}
+
+func wantRows(t *testing.T, got [][]any, want [][]any) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("got %d rows, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if len(got[i]) != len(want[i]) {
+			t.Fatalf("row %d has %d cols, want %d: %v", i, len(got[i]), len(want[i]), got[i])
+		}
+		for j := range want[i] {
+			if got[i][j] != want[i][j] {
+				t.Fatalf("row %d col %d = %v (%T), want %v (%T)", i, j, got[i][j], got[i][j], want[i][j], want[i][j])
+			}
+		}
+	}
+}
+
+func wantBag[T comparable](t *testing.T, got []T, want map[T]int) {
+	t.Helper()
+	seen := make(map[T]int, len(want))
+	for _, v := range got {
+		seen[v]++
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("got %v, want %v", seen, want)
+	}
+	for k, n := range want {
+		if seen[k] != n {
+			t.Fatalf("got %v = %d, want %d; all=%v", k, seen[k], n, seen)
+		}
+	}
+}
+
 func TestEngine_CreateInsertSelect(t *testing.T) {
 	db := openTestDB(t)
 	mustExec(t, db, "CREATE TABLE users (id int64 NOT NULL, name text NOT NULL)")
@@ -44,41 +82,33 @@ func TestEngine_CreateInsertSelect(t *testing.T) {
 	if r.RowsAffected != 3 {
 		t.Fatalf("inserted %d rows, want 3", r.RowsAffected)
 	}
-	rows := mustQuery(t, db, "SELECT id, name FROM users")
-	if len(rows.Values) != 3 {
-		t.Fatalf("SELECT got %d rows, want 3", len(rows.Values))
-	}
-	if rows.Values[0][0].(int64) != 1 || rows.Values[0][1].(string) != "alice" {
-		t.Fatalf("row[0] = %v, want [1 alice]", rows.Values[0])
-	}
+	wantRows(t, mustValues(t, db, "SELECT id, name FROM users"), [][]any{
+		{int64(1), "alice"},
+		{int64(2), "bob"},
+		{int64(3), "carol"},
+	})
 }
 
 func TestEngine_WhereAndOrder(t *testing.T) {
 	db := openTestDB(t)
 	mustExec(t, db, "CREATE TABLE items (id int64 NOT NULL, price int64 NOT NULL)")
 	mustExec(t, db, "INSERT INTO items (id, price) VALUES (1, 30), (2, 10), (3, 20)")
-	rows := mustQuery(t, db, "SELECT id FROM items WHERE price >= 20 ORDER BY price DESC")
-	if len(rows.Values) != 2 {
-		t.Fatalf("got %d rows, want 2", len(rows.Values))
-	}
-	if rows.Values[0][0].(int64) != 1 || rows.Values[1][0].(int64) != 3 {
-		t.Fatalf("rows = %v, want [[1] [3]]", rows.Values)
-	}
+	wantRows(t, mustValues(t, db, "SELECT id FROM items WHERE price >= 20 ORDER BY price DESC"), [][]any{
+		{int64(1)},
+		{int64(3)},
+	})
 }
 
 func TestEngine_GroupBy(t *testing.T) {
 	db := openTestDB(t)
 	mustExec(t, db, "CREATE TABLE sales (id int64 NOT NULL, category text NOT NULL, price int64 NOT NULL)")
 	mustExec(t, db, "INSERT INTO sales (id, category, price) VALUES (1, 'a', 10), (2, 'b', 20), (3, 'a', 30)")
-	rows := mustQuery(t, db, "SELECT category, sum(price) FROM sales GROUP BY category")
-	if len(rows.Values) != 2 {
-		t.Fatalf("got %d rows, want 2: %v", len(rows.Values), rows.Values)
-	}
-	totals := map[string]int64{}
-	for _, r := range rows.Values {
+	rows := mustValues(t, db, "SELECT category, sum(price) FROM sales GROUP BY category")
+	totals := make(map[string]int64, len(rows))
+	for _, r := range rows {
 		totals[r[0].(string)] = r[1].(int64)
 	}
-	if totals["a"] != 40 || totals["b"] != 20 {
+	if totals["a"] != 40 || totals["b"] != 20 || len(totals) != 2 {
 		t.Fatalf("totals = %v, want a=40 b=20", totals)
 	}
 }
@@ -228,17 +258,12 @@ func TestEngine_DeleteWhere(t *testing.T) {
 	if r.RowsAffected != 2 {
 		t.Fatalf("DELETE affected = %d, want 2", r.RowsAffected)
 	}
-	rows := mustQuery(t, db, "SELECT id FROM t")
-	if len(rows.Values) != 2 {
-		t.Fatalf("SELECT after DELETE got %d rows, want 2: %v", len(rows.Values), rows.Values)
+	values := mustValues(t, db, "SELECT id FROM t")
+	ids := make([]int64, len(values))
+	for i, row := range values {
+		ids[i] = row[0].(int64)
 	}
-	seen := map[int64]bool{}
-	for _, row := range rows.Values {
-		seen[row[0].(int64)] = true
-	}
-	if !seen[2] || !seen[4] {
-		t.Fatalf("expected id=2 and id=4 to survive, got %v", seen)
-	}
+	wantBag(t, ids, map[int64]int{2: 1, 4: 1})
 }
 
 func TestEngine_DeleteAllRows(t *testing.T) {
