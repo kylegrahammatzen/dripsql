@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sync"
 
 	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
@@ -24,14 +25,38 @@ type SegmentColumn struct {
 }
 
 type Segment struct {
-	f         *os.File
-	path      string
-	bodyEnd   int64
-	Cols      []SegmentColumn
-	DV        types.Validity
-	DictHists DictHistograms
-	IntBlooms IntBlooms
-	NumSums   NumericSums
+	f       *os.File
+	path    string
+	bodyEnd int64
+	Cols    []SegmentColumn
+	DV      types.Validity
+
+	dictHistsOnce sync.Once
+	dictHists     DictHistograms
+	dictHistsErr  error
+
+	intBloomsOnce sync.Once
+	intBlooms     IntBlooms
+	intBloomsErr  error
+
+	numSumsOnce sync.Once
+	numSums     NumericSums
+	numSumsErr  error
+}
+
+func (s *Segment) DictHistograms() (DictHistograms, error) {
+	s.dictHistsOnce.Do(func() { s.dictHists, s.dictHistsErr = LoadDictHistograms(s.path) })
+	return s.dictHists, s.dictHistsErr
+}
+
+func (s *Segment) IntBloomFilters() (IntBlooms, error) {
+	s.intBloomsOnce.Do(func() { s.intBlooms, s.intBloomsErr = LoadIntBlooms(s.path) })
+	return s.intBlooms, s.intBloomsErr
+}
+
+func (s *Segment) NumericSums() (NumericSums, error) {
+	s.numSumsOnce.Do(func() { s.numSums, s.numSumsErr = LoadNumericSums(s.path) })
+	return s.numSums, s.numSumsErr
 }
 
 func (s *Segment) Path() string { return s.path }
@@ -77,22 +102,8 @@ func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
 		f.Close()
 		return nil, fmt.Errorf("OpenSegment: load DV: %w", err)
 	}
-	hist, err := LoadDictHistograms(path)
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("OpenSegment: load dict histograms: %w", err)
-	}
-	blooms, err := LoadIntBlooms(path)
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("OpenSegment: load bloom: %w", err)
-	}
-	sums, err := LoadNumericSums(path)
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("OpenSegment: load numeric sums: %w", err)
-	}
-	return &Segment{f: f, path: path, bodyEnd: bodyEnd, Cols: cols, DV: dv, DictHists: hist, IntBlooms: blooms, NumSums: sums}, nil
+	// Sidecars (.dh, .bf, .sm) load lazily on first call to the accessor methods.
+	return &Segment{f: f, path: path, bodyEnd: bodyEnd, Cols: cols, DV: dv}, nil
 }
 
 const knownPageFlags = PageFlagAllValid | PageFlagAllNull | PageFlagInMembership | PageFlagEncodedEvalOK

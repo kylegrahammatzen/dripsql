@@ -102,7 +102,11 @@ func (db *DB) tryGroupByDictHistogram(plan *sql.Plan, rel, agg, scan *sql.Rel, s
 	}
 	merged := storage.DictHistogram{}
 	for _, seg := range segs {
-		h, ok := seg.DictHists[keyName]
+		hists, err := seg.DictHistograms()
+		if err != nil {
+			return nil, false, err
+		}
+		h, ok := hists[keyName]
 		if !ok {
 			return nil, false, nil
 		}
@@ -246,7 +250,11 @@ func mergeSum(segs []*storage.Segment, col sql.BoundColumnDef) (any, bool, error
 	name := types.NormalizeName(col.Name)
 	var total int64
 	for _, seg := range segs {
-		s, ok := seg.NumSums[name]
+		sums, err := seg.NumericSums()
+		if err != nil {
+			return nil, false, err
+		}
+		s, ok := sums[name]
 		if !ok {
 			return nil, false, nil
 		}

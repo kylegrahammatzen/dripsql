@@ -43,7 +43,11 @@ func TestBoundEqInt64_PruneSegment_UsesBloomWhenInRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer seg.Close()
-	if seg.IntBlooms == nil {
+	blooms, err := seg.IntBloomFilters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blooms == nil {
 		t.Fatal("expected bloom sidecar to be loaded")
 	}
 
