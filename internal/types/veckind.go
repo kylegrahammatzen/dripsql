@@ -1,11 +1,11 @@
+// VecKind tags every Vec with the physical kind of data it holds.
+// One metadata table drives name, fixed-width discriminator, and FOR-packable bit.
 package types
 
 import "fmt"
 
-// StandardBatchRows is the canonical batch size for vectorized execution.
 const StandardBatchRows = 2048
 
-// VecKind tags a Vec with how its data buffer should be interpreted.
 type VecKind uint8
 
 const (
@@ -27,53 +27,6 @@ const (
 	VecEnum32
 )
 
-var vecKindNames = [...]string{
-	VecInvalid:   "invalid",
-	VecBool:      "bool",
-	VecInt16:     "int16",
-	VecInt32:     "int32",
-	VecInt64:     "int64",
-	VecFloat32:   "float32",
-	VecFloat64:   "float64",
-	VecDecimal64: "decimal64",
-	VecText:      "text",
-	VecBytes:     "bytes",
-	VecUUID:      "uuid",
-	VecTimestamp: "timestamp",
-	VecTime:      "time",
-	VecDate:      "date",
-	VecJSON:      "json",
-	VecEnum32:    "enum32",
-}
-
-func (k VecKind) String() string {
-	if int(k) < len(vecKindNames) {
-		if name := vecKindNames[k]; name != "" {
-			return name
-		}
-	}
-	return fmt.Sprintf("vec_kind(%d)", k)
-}
-
-// IsVarBytes reports whether k stores variable-length payloads via VarBytes.
-func (k VecKind) IsVarBytes() bool {
-	switch k {
-	case VecText, VecBytes, VecJSON:
-		return true
-	}
-	return false
-}
-
-// IsFORPackable reports whether k is acceptable input to the FOR+BitPack codec.
-func (k VecKind) IsFORPackable() bool {
-	switch k {
-	case VecInt16, VecInt32, VecDate, VecInt64, VecTimestamp, VecTime, VecEnum32:
-		return true
-	}
-	return false
-}
-
-// Width is the per-row physical byte width discriminator.
 type Width int
 
 const (
@@ -81,21 +34,51 @@ const (
 	WidthBool     Width = -2
 )
 
-// FixedWidth returns the per-row byte width for fixed kinds, or a sentinel for bool and varbytes.
+type vecKindInfo struct {
+	name        string
+	width       Width
+	forPackable bool
+}
+
+var vecKindTable = [...]vecKindInfo{
+	VecInvalid:   {name: "invalid"},
+	VecBool:      {name: "bool", width: WidthBool},
+	VecInt16:     {name: "int16", width: 2, forPackable: true},
+	VecInt32:     {name: "int32", width: 4, forPackable: true},
+	VecInt64:     {name: "int64", width: 8, forPackable: true},
+	VecFloat32:   {name: "float32", width: 4},
+	VecFloat64:   {name: "float64", width: 8},
+	VecDecimal64: {name: "decimal64", width: 8, forPackable: true},
+	VecText:      {name: "text", width: WidthVarBytes},
+	VecBytes:     {name: "bytes", width: WidthVarBytes},
+	VecUUID:      {name: "uuid", width: 16},
+	VecTimestamp: {name: "timestamp", width: 8, forPackable: true},
+	VecTime:      {name: "time", width: 8, forPackable: true},
+	VecDate:      {name: "date", width: 4, forPackable: true},
+	VecJSON:      {name: "json", width: WidthVarBytes},
+	VecEnum32:    {name: "enum32", width: 4, forPackable: true},
+}
+
+func (k VecKind) String() string {
+	if int(k) < len(vecKindTable) {
+		if name := vecKindTable[k].name; name != "" {
+			return name
+		}
+	}
+	return fmt.Sprintf("vec_kind(%d)", k)
+}
+
 func (k VecKind) FixedWidth() Width {
-	switch k {
-	case VecInt16:
-		return 2
-	case VecInt32, VecDate, VecFloat32, VecEnum32:
-		return 4
-	case VecInt64, VecDecimal64, VecTimestamp, VecTime, VecFloat64:
-		return 8
-	case VecUUID:
-		return 16
-	case VecBool:
-		return WidthBool
-	case VecText, VecBytes, VecJSON:
-		return WidthVarBytes
+	if int(k) < len(vecKindTable) {
+		return vecKindTable[k].width
 	}
 	return 0
+}
+
+func (k VecKind) IsVarBytes() bool {
+	return k.FixedWidth() == WidthVarBytes
+}
+
+func (k VecKind) IsFORPackable() bool {
+	return int(k) < len(vecKindTable) && vecKindTable[k].forPackable
 }

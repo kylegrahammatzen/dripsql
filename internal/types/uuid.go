@@ -1,15 +1,14 @@
+// UUID16 is the 16-byte UUID value used everywhere DripSQL handles a UUID.
+// Parse accepts canonical 36-char hyphenated form and bare 32-char hex.
 package types
 
 import (
 	"encoding/hex"
 	"fmt"
-	"strings"
 )
 
-// UUID16 is the 16-byte UUID representation used everywhere a UUID value lives.
 type UUID16 [16]byte
 
-// ParseUUID accepts the canonical 36-character hyphenated form and a lenient 32-character bare hex form.
 func ParseUUID(s string) (UUID16, error) {
 	switch len(s) {
 	case 36:
@@ -27,13 +26,14 @@ func ParseUUID(s string) (UUID16, error) {
 
 func parseUUIDHex(bare string) (UUID16, error) {
 	var u UUID16
-	if _, err := hex.Decode(u[:], []byte(strings.ToLower(bare))); err != nil {
+	if _, err := hex.Decode(u[:], []byte(bare)); err != nil {
 		return UUID16{}, fmt.Errorf("uuid %q: %w", bare, err)
 	}
 	return u, nil
 }
 
-// FormatUUID returns the canonical 36-character hyphenated form.
+func (u UUID16) String() string { return FormatUUID(u) }
+
 func FormatUUID(u UUID16) string {
 	var buf [36]byte
 	hex.Encode(buf[0:8], u[0:4])

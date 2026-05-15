@@ -1,0 +1,351 @@
+// OpenSegment cold-opens a segment via targeted ReadAt: only the footer suffix and body are read up front.
+// Page payloads stream on demand through ReadPage. The file handle stays open until Close.
+package storage
+
+import (
+	"fmt"
+	"math"
+	"os"
+
+	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
+	"github.com/kylegrahammatzen/dripsql/internal/types"
+)
+
+type SegmentColumn struct {
+	Name       string
+	Kind       types.VecKind
+	EnumLabels []string
+	Rows       uint32
+	NullCount  uint32
+	Marker     uint8
+	Stats      [StatsWireSize]byte
+	Pages      []Page
+	PageStats  [][StatsWireSize]byte
+}
+
+type Segment struct {
+	f       *os.File
+	path    string
+	bodyEnd int64
+	Cols    []SegmentColumn
+	DV      types.Validity
+}
+
+func (s *Segment) Path() string { return s.path }
+func (s *Segment) Rows() uint32 {
+	if len(s.Cols) == 0 {
+		return 0
+	}
+	return s.Cols[0].Rows
+}
+
+func OpenSegment(path string) (*Segment, error) {
+	return OpenSegmentWithDV(path, "")
+}
+
+// OpenSegmentWithDV opens a segment with an explicit DV file path. An empty dvPath falls
+// back to the default convention (<path>.dv); a manifest-driven path lets transaction
+// commits switch the visible DV atomically with the manifest record.
+func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
+	f, err := OpenRandomAccess(path)
+	if err != nil {
+		return nil, err
+	}
+	cols, bodyEnd, err := readFooter(f)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	for i := range cols {
+		if err := validateColumnDirectory(&cols[i], bodyEnd); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("OpenSegment: col %q: %w", cols[i].Name, err)
+		}
+	}
+	rows := uint32(0)
+	if len(cols) > 0 {
+		rows = cols[0].Rows
+	}
+	if dvPath == "" {
+		dvPath = DVPath(path)
+	}
+	dv, err := loadDVAtPath(dvPath, int(rows))
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("OpenSegment: load DV: %w", err)
+	}
+	return &Segment{f: f, path: path, bodyEnd: bodyEnd, Cols: cols, DV: dv}, nil
+}
+
+const knownPageFlags = PageFlagAllValid | PageFlagAllNull | PageFlagInMembership | PageFlagEncodedEvalOK
+
+func validateColumnDirectory(c *SegmentColumn, bodyEnd int64) error {
+	switch c.Marker {
+	case columnMarkerMixed, columnMarkerAllValid, columnMarkerAllNull:
+	default:
+		return fmt.Errorf("column marker %d not in {Mixed, AllValid, AllNull}", c.Marker)
+	}
+	if c.NullCount > c.Rows {
+		return fmt.Errorf("column NullCount %d > rows %d", c.NullCount, c.Rows)
+	}
+	bodyEndU := uint64(bodyEnd)
+	var rowSum, nullSum uint64
+	var nextRowStart uint32
+	for i := range c.Pages {
+		p := c.Pages[i]
+		allValid := p.Flags&PageFlagAllValid != 0
+		allNull := p.Flags&PageFlagAllNull != 0
+		if allValid && allNull {
+			return fmt.Errorf("page %d has both AllValid and AllNull flags", i)
+		}
+		if p.Flags & ^knownPageFlags != 0 {
+			return fmt.Errorf("page %d flags %08b contain reserved bits", i, p.Flags)
+		}
+		if p.Reserved != 0 {
+			return fmt.Errorf("page %d reserved byte %d != 0", i, p.Reserved)
+		}
+		if allValid && p.NullCount != 0 {
+			return fmt.Errorf("page %d AllValid but NullCount %d != 0", i, p.NullCount)
+		}
+		if allNull && p.NullCount != p.Rows {
+			return fmt.Errorf("page %d AllNull but NullCount %d != Rows %d", i, p.NullCount, p.Rows)
+		}
+		if !allValid && !allNull && (p.NullCount == 0 || p.NullCount == p.Rows) {
+			return fmt.Errorf("page %d mixed flag set but NullCount %d collapses to AllValid/AllNull", i, p.NullCount)
+		}
+		if p.NullCount > p.Rows {
+			return fmt.Errorf("page %d NullCount %d > Rows %d", i, p.NullCount, p.Rows)
+		}
+		if types.VecKind(p.Kind) != c.Kind {
+			return fmt.Errorf("page %d kind %v != column kind %v", i, types.VecKind(p.Kind), c.Kind)
+		}
+		if p.RowStart != nextRowStart {
+			return fmt.Errorf("page %d RowStart %d != expected %d (non-contiguous)", i, p.RowStart, nextRowStart)
+		}
+		if p.PayloadOffset < uint64(MagicLen) && p.PayloadLength > 0 {
+			return fmt.Errorf("page %d PayloadOffset %d inside head magic", i, p.PayloadOffset)
+		}
+		if p.PayloadOffset > bodyEndU || p.PayloadLength > bodyEndU-p.PayloadOffset {
+			return fmt.Errorf("page %d payload [%d, %d) escapes body end %d", i, p.PayloadOffset, p.PayloadOffset+p.PayloadLength, bodyEnd)
+		}
+		rowSum += uint64(p.Rows)
+		nullSum += uint64(p.NullCount)
+		nextRow := uint64(p.RowStart) + uint64(p.Rows)
+		if nextRow > maxSegmentRows {
+			return fmt.Errorf("page %d row range overflows uint32", i)
+		}
+		nextRowStart = uint32(nextRow)
+	}
+	if rowSum != uint64(c.Rows) {
+		return fmt.Errorf("sum(page.Rows) %d != column.Rows %d", rowSum, c.Rows)
+	}
+	if nullSum != uint64(c.NullCount) {
+		return fmt.Errorf("sum(page.NullCount) %d != column.NullCount %d", nullSum, c.NullCount)
+	}
+	return nil
+}
+
+func (s *Segment) Close() error { return s.f.Close() }
+
+func (s *Segment) ReadPage(colIdx, pageIdx int) (types.Vec, error) {
+	v, _, err := s.ReadPageInto(colIdx, pageIdx, nil)
+	return v, err
+}
+
+// Caller-supplied scratch is grown if too small and returned for reuse on the next call.
+func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (types.Vec, []byte, error) {
+	if colIdx < 0 || colIdx >= len(s.Cols) {
+		return types.Vec{}, scratch, fmt.Errorf("ReadPage: col %d out of range [0, %d)", colIdx, len(s.Cols))
+	}
+	col := &s.Cols[colIdx]
+	if pageIdx < 0 || pageIdx >= len(col.Pages) {
+		return types.Vec{}, scratch, fmt.Errorf("ReadPage: page %d out of range [0, %d)", pageIdx, len(col.Pages))
+	}
+	page := col.Pages[pageIdx]
+	rows := int(page.Rows)
+	kind := types.VecKind(page.Kind)
+
+	if page.Flags&PageFlagAllNull != 0 {
+		v := allocVecForKind(kind, rows)
+		v.Valid = allInvalidValidity(rows)
+		return v, scratch, nil
+	}
+
+	if cap(scratch) < int(page.PayloadLength) {
+		scratch = make([]byte, page.PayloadLength)
+	} else {
+		scratch = scratch[:page.PayloadLength]
+	}
+	ioStart := nowNanos()
+	if _, err := s.f.ReadAt(scratch, int64(page.PayloadOffset)); err != nil {
+		return types.Vec{}, scratch, fmt.Errorf("ReadPage: read payload: %w", err)
+	}
+	addIORead(nowNanos() - ioStart)
+
+	innerPayload := scratch
+	var validity types.Validity
+	if page.NullCount > 0 {
+		words := types.ValidityWords(rows)
+		need := words * 8
+		if len(scratch) < need {
+			return types.Vec{}, scratch, fmt.Errorf("ReadPage: validity prefix truncated: have %d need %d", len(scratch), need)
+		}
+		v, _, err := types.UnmarshalValidity(scratch[:need], rows, int(page.NullCount), nil)
+		if err != nil {
+			return types.Vec{}, scratch, fmt.Errorf("ReadPage: validity: %w", err)
+		}
+		validity = v
+		innerPayload = scratch[need:]
+	}
+
+	enc, ok := types.EncodingFromWire(page.Encoding)
+	if !ok {
+		return types.Vec{}, scratch, fmt.Errorf("ReadPage: unknown encoding wire byte %d", page.Encoding)
+	}
+	c, err := codec.Lookup(enc)
+	if err != nil {
+		return types.Vec{}, scratch, err
+	}
+	var v types.Vec
+	decStart := nowNanos()
+	if err := c.Decode(innerPayload, kind, rows, int(page.NullCount), &v); err != nil {
+		return types.Vec{}, scratch, fmt.Errorf("ReadPage: decode: %w", err)
+	}
+	addDecode(nowNanos() - decStart)
+	v.Valid = validity
+	return v, scratch, nil
+}
+
+func allocVecForKind(k types.VecKind, rows int) types.Vec {
+	if k.IsVarBytes() {
+		return types.NewVarVec(k, rows, 0)
+	}
+	return types.NewVec(k, rows)
+}
+
+func allInvalidValidity(rows int) types.Validity {
+	if rows == 0 {
+		return nil
+	}
+	return make(types.Validity, types.ValidityWords(rows))
+}
+
+func readFooter(f *os.File) ([]SegmentColumn, int64, error) {
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	size := fi.Size()
+	if size < int64(MagicLen+FooterSuffixSize) {
+		return nil, 0, fmt.Errorf("readFooter: file too small (%d bytes)", size)
+	}
+	suffix, err := readExactAt(f, size-int64(FooterSuffixSize), FooterSuffixSize, "suffix")
+	if err != nil {
+		return nil, 0, err
+	}
+	footerLen, ok := ReadFooterSuffix(suffix)
+	if !ok {
+		return nil, 0, fmt.Errorf("readFooter: tail magic mismatch")
+	}
+	if footerLen > uint64(math.MaxInt32) {
+		return nil, 0, fmt.Errorf("readFooter: footer length %d exceeds int32 range", footerLen)
+	}
+	footerStart := size - int64(FooterSuffixSize) - int64(footerLen)
+	if footerStart < int64(MagicLen) {
+		return nil, 0, fmt.Errorf("readFooter: footer length %d implies negative offset", footerLen)
+	}
+	head, err := readExactAt(f, 0, MagicLen, "head magic")
+	if err != nil {
+		return nil, 0, err
+	}
+	if string(head) != Magic {
+		return nil, 0, fmt.Errorf("readFooter: head magic mismatch")
+	}
+	body, err := readExactAt(f, footerStart, int(footerLen), "body")
+	if err != nil {
+		return nil, 0, err
+	}
+	cols, err := parseFooter(body)
+	if err != nil {
+		return nil, 0, err
+	}
+	return cols, footerStart, nil
+}
+
+func readExactAt(f *os.File, off int64, n int, label string) ([]byte, error) {
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, off); err != nil {
+		return nil, fmt.Errorf("readFooter: read %s: %w", label, err)
+	}
+	return buf, nil
+}
+
+// 53 = name_len(2) + kind(1) + enc_flags(1) + label_count(4) + rows(4) + null_count(4) + marker(1) + stats(16) + heavy_blob(16) + page_count(4).
+const minColumnEntrySize = 53
+
+func parseFooter(body []byte) ([]SegmentColumn, error) {
+	r := newWireReader(body)
+	colCount := int(r.U32())
+	if r.Err() != nil {
+		return nil, r.Err()
+	}
+	if colCount < 0 || colCount > (len(body)-4)/minColumnEntrySize {
+		return nil, fmt.Errorf("parseFooter: column count %d exceeds body bound for %d-byte footer", colCount, len(body))
+	}
+	cols := make([]SegmentColumn, colCount)
+	for i := range cols {
+		c := &cols[i]
+		c.Name = r.LenPrefixedString()
+		c.Kind = types.VecKind(r.U8())
+		encodingFlags := r.U8()
+		if encodingFlags != 0 {
+			return nil, fmt.Errorf("parseFooter: col %d encoding_flags %d != 0", i, encodingFlags)
+		}
+		labelCount := int(r.U32())
+		if labelCount < 0 || labelCount > r.Remaining()/2 {
+			return nil, fmt.Errorf("parseFooter: col %d label count %d exceeds remaining footer", i, labelCount)
+		}
+		if labelCount > 0 {
+			c.EnumLabels = make([]string, labelCount)
+			for j := range labelCount {
+				c.EnumLabels[j] = r.LenPrefixedString()
+			}
+		}
+		c.Rows = r.U32()
+		c.NullCount = r.U32()
+		c.Marker = r.U8()
+		copy(c.Stats[:], r.Raw(StatsWireSize))
+		heavyBlobOffset := r.U64()
+		heavyBlobLength := r.U64()
+		if heavyBlobOffset != 0 || heavyBlobLength != 0 {
+			return nil, fmt.Errorf("parseFooter: col %d heavy blob reserved fields %d/%d != 0", i, heavyBlobOffset, heavyBlobLength)
+		}
+		pageCount := int(r.U32())
+		if pageCount < 0 || pageCount > r.Remaining()/PageEntrySize {
+			return nil, fmt.Errorf("parseFooter: col %d page count %d exceeds remaining footer", i, pageCount)
+		}
+		c.Pages = make([]Page, pageCount)
+	}
+	for i := range cols {
+		for j := range cols[i].Pages {
+			cols[i].Pages[j] = DecodePageEntry(r.Raw(PageEntrySize))
+		}
+	}
+	for i := range cols {
+		n := len(cols[i].Pages)
+		if n == 0 {
+			continue
+		}
+		cols[i].PageStats = make([][StatsWireSize]byte, n)
+		for j := range n {
+			copy(cols[i].PageStats[j][:], r.Raw(StatsWireSize))
+		}
+	}
+	if err := r.Err(); err != nil {
+		return nil, err
+	}
+	if !r.AtEnd() {
+		return nil, fmt.Errorf("parseFooter: %d trailing bytes after page directory", r.Remaining())
+	}
+	return cols, nil
+}

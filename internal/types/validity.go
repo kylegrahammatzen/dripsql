@@ -1,3 +1,5 @@
+// Validity is a packed bitmap where a set bit means the row is non-null.
+// nil Validity means every row is valid. Allocate only when nullCount > 0.
 package types
 
 import (
@@ -6,10 +8,8 @@ import (
 	"math/bits"
 )
 
-// Validity is a packed bitmap where a set bit means the row is non-null; nil means every row is valid.
 type Validity []uint64
 
-// ValidityWords returns how many uint64 words a packed bitmap for rows rows needs.
 func ValidityWords(rows int) int {
 	if rows <= 0 {
 		return 0
@@ -17,7 +17,6 @@ func ValidityWords(rows int) int {
 	return (rows + 63) / 64
 }
 
-// NewValidity allocates a bitmap with every row marked valid.
 func NewValidity(rows int) Validity {
 	words := ValidityWords(rows)
 	v := make(Validity, words)
@@ -30,33 +29,29 @@ func NewValidity(rows int) Validity {
 	return v
 }
 
-// IsValid reports whether row is valid, treating nil Validity as all-valid.
-func IsValid(v Validity, row int) bool {
+func (v Validity) IsValid(row int) bool {
 	if v == nil {
 		return true
 	}
 	return v[row>>6]&(uint64(1)<<uint(row&63)) != 0
 }
 
-// SetValid marks row as valid.
-func SetValid(v Validity, row int) {
+func (v Validity) SetValid(row int) {
 	v[row>>6] |= uint64(1) << uint(row&63)
 }
 
-// SetInvalid marks row as null.
-func SetInvalid(v Validity, row int) {
+func (v Validity) SetInvalid(row int) {
 	v[row>>6] &^= uint64(1) << uint(row&63)
 }
 
-// NullCount returns the number of null rows in v.
-func NullCount(v Validity, rows int) int {
+func (v Validity) NullCount(rows int) int {
 	if v == nil || rows == 0 {
 		return 0
 	}
 	words := ValidityWords(rows)
 	set := 0
-	for i := 0; i < words-1; i++ {
-		set += bits.OnesCount64(v[i])
+	for _, word := range v[:words-1] {
+		set += bits.OnesCount64(word)
 	}
 	tail := v[words-1]
 	if rem := rows & 63; rem != 0 {
@@ -66,7 +61,24 @@ func NullCount(v Validity, rows int) int {
 	return rows - set
 }
 
-// MarshalLE writes v's packed words to dst in little-endian and returns the byte count.
+func (v Validity) MaskTail(rows int) {
+	if len(v) == 0 {
+		return
+	}
+	if rem := rows & 63; rem != 0 {
+		v[len(v)-1] &= (uint64(1) << uint(rem)) - 1
+	}
+}
+
+func (v Validity) Clone() Validity {
+	if v == nil {
+		return nil
+	}
+	out := make(Validity, len(v))
+	copy(out, v)
+	return out
+}
+
 func (v Validity) MarshalLE(dst []byte) int {
 	pos := 0
 	for _, word := range v {
@@ -76,8 +88,10 @@ func (v Validity) MarshalLE(dst []byte) int {
 	return pos
 }
 
-// UnmarshalValidity reads a packed bitmap and returns nil when nullCount is zero.
 func UnmarshalValidity(src []byte, rows int, nullCount int, dst Validity) (Validity, int, error) {
+	if nullCount < 0 || nullCount > rows {
+		return nil, 0, fmt.Errorf("validity null count %d out of range [0, %d]", nullCount, rows)
+	}
 	if nullCount == 0 {
 		return nil, 0, nil
 	}
@@ -94,6 +108,10 @@ func UnmarshalValidity(src []byte, rows int, nullCount int, dst Validity) (Valid
 	}
 	for i := range out {
 		out[i] = binary.LittleEndian.Uint64(src[i*8 : i*8+8])
+	}
+	out.MaskTail(rows)
+	if got := out.NullCount(rows); got != nullCount {
+		return nil, 0, fmt.Errorf("validity null count mismatch: payload says %d, decoded %d", nullCount, got)
 	}
 	return out, want, nil
 }

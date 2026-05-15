@@ -1,86 +1,153 @@
+// SelectionMask is a packed row-selection bitmap.
+// Tail-bit invariant: bits beyond rows are always zero, maintained by FillAll/NotCount/Resize/Clear so the other ops can trust it.
 package types
 
 import "math/bits"
 
-// SelectionMask is a packed bitmap of selected rows with a cached allSet flag for the common all-rows path.
 type SelectionMask struct {
-	Words  []uint64
-	Rows   int
+	words  []uint64
+	rows   int
 	allSet bool
 }
 
-// NewSelectionMask returns an empty mask sized for rows rows.
 func NewSelectionMask(rows int) SelectionMask {
-	return SelectionMask{Words: make([]uint64, ValidityWords(rows)), Rows: rows}
+	return SelectionMask{
+		words:  make([]uint64, ValidityWords(rows)),
+		rows:   rows,
+		allSet: rows == 0,
+	}
 }
 
-// Resize prepares the mask for rows rows, reusing the backing slice when capacity allows.
 func (s *SelectionMask) Resize(rows int) {
 	words := ValidityWords(rows)
-	if cap(s.Words) < words {
-		s.Words = make([]uint64, words)
+	if cap(s.words) < words {
+		s.words = make([]uint64, words)
 	} else {
-		s.Words = s.Words[:words]
-		for i := range s.Words {
-			s.Words[i] = 0
-		}
+		s.words = s.words[:words]
+		clear(s.words)
 	}
-	s.Rows = rows
-	s.allSet = false
+	s.rows = rows
+	s.allSet = rows == 0
 }
 
-// FillAll marks every row selected and returns the count.
+func (s SelectionMask) Rows() int { return s.rows }
+
+func (s SelectionMask) Clone() SelectionMask {
+	out := SelectionMask{rows: s.rows, allSet: s.allSet, words: make([]uint64, len(s.words))}
+	copy(out.words, s.words)
+	return out
+}
+
+func (s SelectionMask) IsAllSet() bool { return s.allSet }
+
 func (s *SelectionMask) FillAll() int {
-	if s.Rows == 0 {
+	if s.rows == 0 {
 		s.allSet = true
 		return 0
 	}
-	for i := range s.Words {
-		s.Words[i] = ^uint64(0)
+	for i := range s.words {
+		s.words[i] = ^uint64(0)
 	}
-	if rem := s.Rows & 63; rem != 0 {
-		s.Words[len(s.Words)-1] = (uint64(1) << uint(rem)) - 1
+	if rem := s.rows & 63; rem != 0 {
+		s.words[len(s.words)-1] = (uint64(1) << uint(rem)) - 1
 	}
 	s.allSet = true
-	return s.Rows
+	return s.rows
 }
 
-// IsAllSet returns the cached all-rows-selected flag.
-func (s SelectionMask) IsAllSet() bool { return s.allSet }
+func (s *SelectionMask) Clear() {
+	clear(s.words)
+	s.allSet = s.rows == 0
+}
 
-// Set marks row as selected and clears the allSet cache.
 func (s *SelectionMask) Set(row int) {
-	s.Words[row>>6] |= uint64(1) << uint(row&63)
+	s.words[row>>6] |= uint64(1) << uint(row&63)
 	s.allSet = false
 }
 
-// SetUnsafe marks row as selected without touching the allSet cache; callers that maintain the invariant use this in tight loops.
-func (s *SelectionMask) SetUnsafe(row int) {
-	s.Words[row>>6] |= uint64(1) << uint(row&63)
+func (s *SelectionMask) Unset(row int) {
+	s.words[row>>6] &^= uint64(1) << uint(row&63)
+	s.allSet = false
 }
 
-// IsSet reports whether row is selected.
+// SetRange sets bits [start, end). Clamps to [0, rows). Middle words are filled at once
+// so contiguous range marking is cheap for large selections.
+func (s *SelectionMask) SetRange(start, end int) {
+	if start < 0 {
+		start = 0
+	}
+	if end > s.rows {
+		end = s.rows
+	}
+	if start >= end {
+		return
+	}
+	firstWord := start >> 6
+	lastWord := (end - 1) >> 6
+	firstBit := uint(start & 63)
+	lastBit := uint((end - 1) & 63)
+	if firstWord == lastWord {
+		mask := (^uint64(0) << firstBit) & (^uint64(0) >> (63 - lastBit))
+		s.words[firstWord] |= mask
+	} else {
+		s.words[firstWord] |= ^uint64(0) << firstBit
+		for wi := firstWord + 1; wi < lastWord; wi++ {
+			s.words[wi] = ^uint64(0)
+		}
+		s.words[lastWord] |= ^uint64(0) >> (63 - lastBit)
+	}
+	if !(start == 0 && end == s.rows) {
+		s.allSet = false
+	}
+}
+
+func NewSelectionRange(rows, start, end int) SelectionMask {
+	out := NewSelectionMask(rows)
+	out.SetRange(start, end)
+	return out
+}
+
+// Limit walks set rows once, skipping the first `skip` and emitting up to `take` into a
+// fresh mask. `take < 0` means unlimited. Returns the new mask plus visible-row counts
+// (seen, sent) so callers avoid a second PopCount pass.
+func (s SelectionMask) Limit(rows int, skip int64, take int64) (SelectionMask, int64, int64) {
+	out := NewSelectionMask(rows)
+	var seen, sent int64
+	s.IterSet(func(row int) {
+		if skip > 0 {
+			skip--
+			seen++
+			return
+		}
+		if take >= 0 && sent >= take {
+			return
+		}
+		out.Set(row)
+		seen++
+		sent++
+	})
+	return out, seen, sent
+}
+
 func (s SelectionMask) IsSet(row int) bool {
-	return s.Words[row>>6]&(uint64(1)<<uint(row&63)) != 0
+	return s.words[row>>6]&(uint64(1)<<uint(row&63)) != 0
 }
 
-// PopCount returns the number of selected rows.
 func (s SelectionMask) PopCount() int {
 	count := 0
-	for _, word := range s.Words {
+	for _, word := range s.words {
 		count += bits.OnesCount64(word)
 	}
 	return count
 }
 
-// IterSet calls fn for each selected row in ascending order.
 func (s SelectionMask) IterSet(fn func(row int)) {
-	for w, word := range s.Words {
+	for w, word := range s.words {
 		base := w << 6
 		for word != 0 {
 			bit := bits.TrailingZeros64(word)
 			row := base + bit
-			if row >= s.Rows {
+			if row >= s.rows {
 				return
 			}
 			fn(row)
@@ -89,53 +156,47 @@ func (s SelectionMask) IterSet(fn func(row int)) {
 	}
 }
 
-// AndCount intersects s with other in place and returns the new popcount.
+// AndCount does not re-mask the tail since AND cannot introduce 1-bits the inputs lacked.
 func (s *SelectionMask) AndCount(other SelectionMask) int {
+	assertSameShape(*s, other)
 	count := 0
-	for i := range s.Words {
-		s.Words[i] &= other.Words[i]
-		count += bits.OnesCount64(s.Words[i])
+	for i := range s.words {
+		s.words[i] &= other.words[i]
+		count += bits.OnesCount64(s.words[i])
 	}
-	s.allSet = false
+	s.allSet = count == s.rows
 	return count
 }
 
-// OrCount unions s with other in place and returns the new popcount.
 func (s *SelectionMask) OrCount(other SelectionMask) int {
+	assertSameShape(*s, other)
 	count := 0
-	for i := range s.Words {
-		s.Words[i] |= other.Words[i]
-		count += bits.OnesCount64(s.Words[i])
+	for i := range s.words {
+		s.words[i] |= other.words[i]
+		count += bits.OnesCount64(s.words[i])
 	}
-	if rem := s.Rows & 63; rem != 0 {
-		mask := (uint64(1) << uint(rem)) - 1
-		s.Words[len(s.Words)-1] &= mask
-	}
-	if count == s.Rows {
-		s.allSet = true
-	} else {
-		s.allSet = false
-	}
+	s.allSet = count == s.rows
 	return count
 }
 
-// NotCount inverts the mask in place and returns the new popcount.
 func (s *SelectionMask) NotCount() int {
 	count := 0
-	last := len(s.Words) - 1
-	for i := range s.Words {
-		s.Words[i] = ^s.Words[i]
+	last := len(s.words) - 1
+	for i := range s.words {
+		s.words[i] = ^s.words[i]
 		if i == last {
-			if rem := s.Rows & 63; rem != 0 {
-				s.Words[i] &= (uint64(1) << uint(rem)) - 1
+			if rem := s.rows & 63; rem != 0 {
+				s.words[i] &= (uint64(1) << uint(rem)) - 1
 			}
 		}
-		count += bits.OnesCount64(s.Words[i])
+		count += bits.OnesCount64(s.words[i])
 	}
-	if count == s.Rows {
-		s.allSet = true
-	} else {
-		s.allSet = false
-	}
+	s.allSet = count == s.rows
 	return count
+}
+
+func assertSameShape(a, b SelectionMask) {
+	if a.rows != b.rows {
+		panic("SelectionMask shape mismatch")
+	}
 }
