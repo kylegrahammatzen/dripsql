@@ -98,9 +98,19 @@ func (a *AggregateOp) build() error {
 	}
 
 	a.specs = append(append([]sql.AggSpec{}, a.Aggregates...), a.Hidden...)
-	groupIdx := make(map[any]int)
+	grouped := len(a.GroupBy) == 1
+
+	var groupIdx map[any]int
+	if grouped {
+		groupIdx = make(map[any]int)
+	} else {
+		a.groups = append(a.groups, aggGroup{aggs: make([]aggAccum, len(a.specs))})
+	}
 
 	getGroup := func(key any) *aggGroup {
+		if !grouped {
+			return &a.groups[0]
+		}
 		idx, ok := groupIdx[key]
 		if !ok {
 			idx = len(a.groups)
@@ -110,7 +120,6 @@ func (a *AggregateOp) build() error {
 		return &a.groups[idx]
 	}
 
-	grouped := len(a.GroupBy) == 1
 	specCols := make([]aggCol, len(a.specs))
 	for {
 		batch, ok, err := a.Source.Next()
@@ -169,9 +178,6 @@ func (a *AggregateOp) build() error {
 		}
 	}
 
-	if !grouped && len(a.groups) == 0 {
-		a.groups = append(a.groups, aggGroup{key: nil, aggs: make([]aggAccum, len(a.specs))})
-	}
 	return nil
 }
 

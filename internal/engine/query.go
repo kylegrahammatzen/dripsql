@@ -12,7 +12,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-func (db *DB) runQuery(ctx context.Context, plan *sql.Plan, def sql.BoundTableDef) (*Rows, error) {
+func (db *DB) runQuery(ctx context.Context, plan *sql.Plan) (*Rows, error) {
 	openSegs := make(map[string][]*storage.Segment)
 	resolve := func(d sql.BoundTableDef) ([]*storage.Segment, error) {
 		key := types.NormalizeName(d.Name)

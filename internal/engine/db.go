@@ -136,22 +136,6 @@ func (db *DB) manifestFor(name string) (*storage.Manifest, error) {
 	return m, nil
 }
 
-func primaryFromSelect(stmt *sql.SelectStmt) (name string, joined bool, err error) {
-	node := stmt.From
-	joined = false
-	for {
-		switch n := node.(type) {
-		case *sql.TableName:
-			return n.Name, joined, nil
-		case *sql.JoinExpr:
-			joined = true
-			node = n.Left
-		default:
-			return "", false, fmt.Errorf("engine: unsupported FROM node %T", node)
-		}
-	}
-}
-
 func parseSegmentID(filename string) (uint64, bool) {
 	ext := filepath.Ext(filename)
 	if ext != ".dsv4" {
@@ -343,38 +327,33 @@ func (db *DB) Query(ctx context.Context, sqlText string) (*Rows, error) {
 		ctx = context.Background()
 	}
 	db.mu.Lock()
-	plan, def, err := db.planAndDef(sqlText)
+	plan, err := db.planForQuery(sqlText)
 	db.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return db.runQuery(ctx, plan, def)
+	return db.runQuery(ctx, plan)
 }
 
-func (db *DB) planAndDef(sqlText string) (*sql.Plan, sql.BoundTableDef, error) {
+// planForQuery resolves a SELECT into a bound *Plan. Hits the plan cache before parsing so
+// repeated queries skip the AST + binder allocations entirely. db.version invalidates stale
+// plans when the catalog changes, so a cache hit is still safe.
+func (db *DB) planForQuery(sqlText string) (*sql.Plan, error) {
+	if cached, ok := db.plans.Get(sqlText, db.version); ok {
+		return cached, nil
+	}
 	stmt, err := sql.ParseOne(sqlText)
 	if err != nil {
-		return nil, sql.BoundTableDef{}, err
+		return nil, err
 	}
 	selectStmt, ok := stmt.(*sql.SelectStmt)
 	if !ok {
-		return nil, sql.BoundTableDef{}, fmt.Errorf("engine: Query supports SELECT only")
-	}
-	primaryName, _, err := primaryFromSelect(selectStmt)
-	if err != nil {
-		return nil, sql.BoundTableDef{}, err
-	}
-	def, err := db.boundTableByName(primaryName)
-	if err != nil {
-		return nil, sql.BoundTableDef{}, err
-	}
-	if cached, ok := db.plans.Get(sqlText, db.version); ok {
-		return cached, def, nil
+		return nil, fmt.Errorf("engine: Query supports SELECT only")
 	}
 	plan, err := db.planner().Plan(selectStmt)
 	if err != nil {
-		return nil, sql.BoundTableDef{}, err
+		return nil, err
 	}
 	db.plans.Put(sqlText, db.version, plan)
-	return plan, def, nil
+	return plan, nil
 }

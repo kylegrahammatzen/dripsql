@@ -45,7 +45,10 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 		}
 	}
 	predCols := PredicateColumns(opts.Predicate)
-	decode := unionNames(projection, predCols)
+	decode := projection
+	if len(predCols) != 0 {
+		decode = unionNames(projection, predCols)
+	}
 	var topKPages map[[2]int]bool
 	if opts.TopK != nil && opts.Predicate == nil {
 		topKPages = selectTopKPages(opts.Segments, opts.TopK)
@@ -323,13 +326,12 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp Bou
 
 func predicateOnlyMask(decodeIdx, projIdx []int) []bool {
 	mask := make([]bool, len(decodeIdx))
-	inProj := make(map[int]struct{}, len(projIdx))
-	for _, p := range projIdx {
-		inProj[p] = struct{}{}
+	for i := range mask {
+		mask[i] = true
 	}
-	for i := range decodeIdx {
-		if _, ok := inProj[i]; !ok {
-			mask[i] = true
+	for _, p := range projIdx {
+		if p >= 0 && p < len(mask) {
+			mask[p] = false
 		}
 	}
 	return mask

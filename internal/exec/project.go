@@ -66,23 +66,19 @@ func projectColumn(batch types.Batch, sel *types.SelectionMask, output sql.Bound
 	}
 	ctx := newEvalCtx(batch)
 	rows := batch.Len
-	v, nulls, err := materializeVec(ctx, output.Expr, sel, rows, vk)
+	v, valid, err := materializeVec(ctx, output.Expr, sel, rows, vk)
 	if err != nil {
 		return types.Column{}, err
 	}
-	if len(nulls) > 0 {
-		valid := make(types.Validity, types.ValidityWords(rows))
-		sel.IterSet(func(row int) { valid.SetValid(row) })
-		for _, row := range nulls {
-			valid.SetInvalid(row)
-		}
-		v.Valid = valid
-	}
+	v.Valid = valid
 	return types.Column{Name: output.Alias, Type: output.Expr.Type, V: v}, nil
 }
 
-func materializeVec(ctx *evalCtx, expr sql.BoundExpr, sel *types.SelectionMask, rows int, vk types.VecKind) (types.Vec, []int, error) {
-	var nulls []int
+// materializeVec evaluates expr row-by-row and writes into a fresh Vec. Validity is allocated
+// lazily on the first null and starts AllValid for rows already selected, so a nullless
+// computed projection skips the validity slice entirely.
+func materializeVec(ctx *evalCtx, expr sql.BoundExpr, sel *types.SelectionMask, rows int, vk types.VecKind) (types.Vec, types.Validity, error) {
+	var valid types.Validity
 	var loopErr error
 	v := newComputedVec(vk, rows)
 	sel.IterSet(func(row int) {
@@ -95,7 +91,10 @@ func materializeVec(ctx *evalCtx, expr sql.BoundExpr, sel *types.SelectionMask, 
 			return
 		}
 		if raw == nil {
-			nulls = append(nulls, row)
+			if valid == nil {
+				valid = types.NewAllValid(rows)
+			}
+			valid.SetInvalid(row)
 			return
 		}
 		if err := writeComputedRow(&v, vk, row, raw); err != nil {
@@ -105,7 +104,7 @@ func materializeVec(ctx *evalCtx, expr sql.BoundExpr, sel *types.SelectionMask, 
 	if loopErr != nil {
 		return types.Vec{}, nil, loopErr
 	}
-	return v, nulls, nil
+	return v, valid, nil
 }
 
 func newComputedVec(vk types.VecKind, rows int) types.Vec {

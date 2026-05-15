@@ -174,9 +174,13 @@ func (h *HashJoinOp) buildIndex() error {
 		build.batches = append(build.batches, bufferedBatch{batch: batch, sel: selectionForBatch(batch)})
 	}
 	build.index = make(map[uint64][]hashBucket, len(build.batches)*types.StandardBatchRows)
-	build.matched = make([]types.SelectionMask, len(build.batches))
+	if h.Kind == sql.JoinRight || h.Kind == sql.JoinFull {
+		build.matched = make([]types.SelectionMask, len(build.batches))
+		for bi, bb := range build.batches {
+			build.matched[bi] = types.NewSelectionMask(bb.batch.Len)
+		}
+	}
 	for bi, bb := range build.batches {
-		build.matched[bi] = types.NewSelectionMask(bb.batch.Len)
 		ctx := newEvalCtx(bb.batch)
 		var loopErr error
 		bb.sel.IterSet(func(row int) {
@@ -255,7 +259,9 @@ func (h *HashJoinOp) collectPairs(leftBatch types.Batch, leftSel *types.Selectio
 			return
 		}
 		for _, ref := range matches {
-			build.matched[ref.batch].Set(ref.row)
+			if build.matched != nil {
+				build.matched[ref.batch].Set(ref.row)
+			}
 			probe.pairs = append(probe.pairs, joinPair{leftRow: row, ref: ref})
 		}
 	})
