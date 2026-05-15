@@ -55,18 +55,19 @@ func loweredComparison(expr sql.BoundExpr) (storage.Predicate, bool) {
 	if len(expr.Args) != 2 {
 		return nil, false
 	}
-	col, lit, swapped := orientColLit(expr.Args[0], expr.Args[1])
-	if col.Op != sql.ExprColumn || lit.Op != sql.ExprLiteral || lit.Literal == nil {
-		return nil, false
-	}
+	col, lit := expr.Args[0], expr.Args[1]
 	op := expr.Op
-	if swapped {
+	if col.Op == sql.ExprLiteral && lit.Op == sql.ExprColumn {
+		col, lit = lit, col
 		switch op {
 		case sql.ExprLess:
 			op = sql.ExprGreater
 		case sql.ExprGreater:
 			op = sql.ExprLess
 		}
+	}
+	if col.Op != sql.ExprColumn || lit.Op != sql.ExprLiteral || lit.Literal == nil {
+		return nil, false
 	}
 	switch v := lit.Literal.(type) {
 	case int64:

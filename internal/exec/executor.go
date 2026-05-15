@@ -38,7 +38,7 @@ func buildRel(rel *sql.Rel, segments SegmentsFn) (Operator, error) {
 	}
 	switch rel.Op {
 	case sql.RelScan:
-		return buildScan(rel, segments)
+		return buildScan(rel, segments, nil)
 	case sql.RelProject:
 		if err := checkProjectionOps(rel.Projection); err != nil {
 			return nil, err
@@ -175,7 +175,7 @@ func buildSortInput(sortRel *sql.Rel, segments SegmentsFn) (Operator, error) {
 		if key.Expr.Op == sql.ExprColumn {
 			colName := scanColumnName(child, key.Expr.ColumnID)
 			if colName != "" && intLikeType(key.Expr.Type) {
-				return buildScanWithTopK(child, segments, &storage.TopKPushdown{
+				return buildScan(child, segments, &storage.TopKPushdown{
 					Column: colName,
 					Desc:   key.Desc,
 					K:      sortRel.K,
@@ -205,34 +205,7 @@ func intLikeType(t types.Type) bool {
 	return false
 }
 
-func buildScanWithTopK(rel *sql.Rel, segments SegmentsFn, tk *storage.TopKPushdown) (Operator, error) {
-	segs, err := segments(rel.Table)
-	if err != nil {
-		return nil, fmt.Errorf("BuildOperator: resolve segments: %w", err)
-	}
-	names := make([]string, 0, len(rel.Columns))
-	for _, id := range rel.Columns {
-		for _, c := range rel.Table.Columns {
-			if c.ID == id {
-				names = append(names, c.Name)
-				break
-			}
-		}
-	}
-	opts := storage.ScanOpts{Segments: segs, Columns: names, TopK: tk}
-	return &ScanOp{Opts: opts, ColumnAlias: rel.Alias}, nil
-}
-
-func buildScan(rel *sql.Rel, segments SegmentsFn) (Operator, error) {
-	if rel.Where != nil {
-		if err := checkExecExpr(*rel.Where); err != nil {
-			return nil, err
-		}
-	}
-	segs, err := segments(rel.Table)
-	if err != nil {
-		return nil, fmt.Errorf("BuildOperator: resolve segments: %w", err)
-	}
+func scanColumnNames(rel *sql.Rel) ([]string, error) {
 	names := make([]string, 0, len(rel.Columns))
 	for _, id := range rel.Columns {
 		found := false
@@ -247,13 +220,40 @@ func buildScan(rel *sql.Rel, segments SegmentsFn) (Operator, error) {
 			return nil, fmt.Errorf("BuildOperator: unknown ColumnID %d in scan for table %q", id, rel.Table.Name)
 		}
 	}
-	opts := storage.ScanOpts{Segments: segs, Columns: names}
+	return names, nil
+}
+
+func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown) (Operator, error) {
+	if rel.Where != nil {
+		if err := checkExecExpr(*rel.Where); err != nil {
+			return nil, err
+		}
+	}
+	segs, err := segments(rel.Table)
+	if err != nil {
+		return nil, fmt.Errorf("BuildOperator: resolve segments: %w", err)
+	}
+	names, err := scanColumnNames(rel)
+	if err != nil {
+		return nil, err
+	}
+	opts := storage.ScanOpts{Segments: segs, Columns: names, TopK: topK}
 	var residual *sql.BoundExpr
 	if rel.Where != nil {
 		if pred, ok := loweredPredicate(*rel.Where); ok {
 			opts.Predicate = pred
 			if len(rel.PredicateOnly) > 0 {
-				opts.Columns = filterPredicateOnly(names, rel)
+				drop := make(map[sql.ColumnID]struct{}, len(rel.PredicateOnly))
+				for _, id := range rel.PredicateOnly {
+					drop[id] = struct{}{}
+				}
+				kept := make([]string, 0, len(names))
+				for i, id := range rel.Columns {
+					if _, ok := drop[id]; !ok {
+						kept = append(kept, names[i])
+					}
+				}
+				opts.Columns = kept
 			}
 		} else {
 			residual = rel.Where
@@ -264,19 +264,4 @@ func buildScan(rel *sql.Rel, segments SegmentsFn) (Operator, error) {
 		op = &FilterOp{Source: op, Predicate: *residual}
 	}
 	return op, nil
-}
-
-func filterPredicateOnly(names []string, rel *sql.Rel) []string {
-	drop := make(map[sql.ColumnID]struct{}, len(rel.PredicateOnly))
-	for _, id := range rel.PredicateOnly {
-		drop[id] = struct{}{}
-	}
-	keep := make([]string, 0, len(names))
-	for i, id := range rel.Columns {
-		if _, ok := drop[id]; ok {
-			continue
-		}
-		keep = append(keep, names[i])
-	}
-	return keep
 }

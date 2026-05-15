@@ -126,12 +126,122 @@ func filterNotPred(batch types.Batch, sel types.SelectionMask, pred sql.BoundExp
 	return filterResult{sel: child.sel, count: count}, nil
 }
 
+// filterLeaf is a normalized col-op-lit / col BETWEEN lo AND hi shape produced from a
+// BoundExpr predicate. tryFilterLeaf dispatches on the column kind once and routes both
+// the comparison and BETWEEN forms through the same per-kind branch.
+type filterLeaf struct {
+	col     sql.BoundExpr
+	lo, hi  any
+	op      types.FilterOp
+	between bool
+}
+
+func makeFilterLeaf(pred sql.BoundExpr) (filterLeaf, bool) {
+	if pred.Op == sql.ExprBetween {
+		if len(pred.Args) != 3 || pred.Args[0].Op != sql.ExprColumn || pred.Args[1].Op != sql.ExprLiteral || pred.Args[2].Op != sql.ExprLiteral {
+			return filterLeaf{}, false
+		}
+		return filterLeaf{col: pred.Args[0], lo: pred.Args[1].Literal, hi: pred.Args[2].Literal, between: true}, true
+	}
+	op, ok := mapCompareOp(pred.Op)
+	if !ok || len(pred.Args) != 2 {
+		return filterLeaf{}, false
+	}
+	left, right := pred.Args[0], pred.Args[1]
+	if left.Op == sql.ExprColumn && right.Op == sql.ExprLiteral {
+		return filterLeaf{col: left, lo: right.Literal, op: op}, true
+	}
+	if right.Op == sql.ExprColumn && left.Op == sql.ExprLiteral {
+		return filterLeaf{col: right, lo: left.Literal, op: swapCompareOp(op)}, true
+	}
+	return filterLeaf{}, false
+}
+
 func tryFilterLeaf(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (types.SelectionMask, int, bool, error) {
-	switch pred.Op {
-	case sql.ExprEqual, sql.ExprNotEqual, sql.ExprLess, sql.ExprLessEqual, sql.ExprGreater, sql.ExprGreaterEqual:
-		return filterColOpLit(batch, sel, pred, scratch)
-	case sql.ExprBetween:
-		return filterBetween(batch, sel, pred, scratch)
+	leaf, ok := makeFilterLeaf(pred)
+	if !ok || leaf.lo == nil {
+		return types.SelectionMask{}, 0, false, nil
+	}
+	col, ok := batch.ColumnByName(leaf.col.Column)
+	if !ok {
+		return types.SelectionMask{}, 0, false, nil
+	}
+	out := ensureOutMask(scratch, batch.Len)
+	switch col.V.Kind {
+	case types.VecInt16:
+		lo, lok := leaf.lo.(int64)
+		if !lok {
+			return types.SelectionMask{}, 0, false, nil
+		}
+		if leaf.between {
+			hi, hok := leaf.hi.(int64)
+			if !hok {
+				return types.SelectionMask{}, 0, false, nil
+			}
+			return out, types.BetweenOrdered(col.V.I16(), col.V.Valid, int16(lo), int16(hi), sel, &out), true, nil
+		}
+		return out, types.FilterOrdered(col.V.I16(), col.V.Valid, int16(lo), leaf.op, sel, &out), true, nil
+	case types.VecInt32, types.VecDate:
+		lo, lok := leaf.lo.(int64)
+		if !lok {
+			return types.SelectionMask{}, 0, false, nil
+		}
+		if leaf.between {
+			hi, hok := leaf.hi.(int64)
+			if !hok {
+				return types.SelectionMask{}, 0, false, nil
+			}
+			return out, types.BetweenOrdered(col.V.I32(), col.V.Valid, int32(lo), int32(hi), sel, &out), true, nil
+		}
+		return out, types.FilterOrdered(col.V.I32(), col.V.Valid, int32(lo), leaf.op, sel, &out), true, nil
+	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+		lo, lok := leaf.lo.(int64)
+		if !lok {
+			return types.SelectionMask{}, 0, false, nil
+		}
+		if leaf.between {
+			hi, hok := leaf.hi.(int64)
+			if !hok {
+				return types.SelectionMask{}, 0, false, nil
+			}
+			return out, types.BetweenOrdered(col.V.I64(), col.V.Valid, lo, hi, sel, &out), true, nil
+		}
+		return out, types.FilterOrdered(col.V.I64(), col.V.Valid, lo, leaf.op, sel, &out), true, nil
+	case types.VecFloat32:
+		lo, lok := asFloat64(leaf.lo)
+		if !lok {
+			return types.SelectionMask{}, 0, false, nil
+		}
+		if leaf.between {
+			hi, hok := asFloat64(leaf.hi)
+			if !hok {
+				return types.SelectionMask{}, 0, false, nil
+			}
+			return out, types.BetweenOrdered(col.V.F32(), col.V.Valid, float32(lo), float32(hi), sel, &out), true, nil
+		}
+		return out, types.FilterOrdered(col.V.F32(), col.V.Valid, float32(lo), leaf.op, sel, &out), true, nil
+	case types.VecFloat64:
+		lo, lok := asFloat64(leaf.lo)
+		if !lok {
+			return types.SelectionMask{}, 0, false, nil
+		}
+		if leaf.between {
+			hi, hok := asFloat64(leaf.hi)
+			if !hok {
+				return types.SelectionMask{}, 0, false, nil
+			}
+			return out, types.BetweenOrdered(col.V.F64(), col.V.Valid, lo, hi, sel, &out), true, nil
+		}
+		return out, types.FilterOrdered(col.V.F64(), col.V.Valid, lo, leaf.op, sel, &out), true, nil
+	case types.VecText, types.VecBytes, types.VecJSON:
+		if leaf.between || (leaf.op != types.FilterEqual && leaf.op != types.FilterNotEqual) {
+			return types.SelectionMask{}, 0, false, nil
+		}
+		lit, ok := leaf.lo.(string)
+		if !ok {
+			return types.SelectionMask{}, 0, false, nil
+		}
+		return out, types.FilterBytes(col.V.Var(), col.V.Valid, []byte(lit), leaf.op, sel, &out), true, nil
 	}
 	return types.SelectionMask{}, 0, false, nil
 }
@@ -166,148 +276,6 @@ func filterRowByRow(batch types.Batch, sel types.SelectionMask, pred sql.BoundEx
 		}
 	})
 	return out, count, evalErr
-}
-
-func filterColOpLit(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (types.SelectionMask, int, bool, error) {
-	if len(pred.Args) != 2 {
-		return types.SelectionMask{}, 0, false, nil
-	}
-	kop, ok := mapCompareOp(pred.Op)
-	if !ok {
-		return types.SelectionMask{}, 0, false, nil
-	}
-	colExpr, litExpr, swapped := orientColLit(pred.Args[0], pred.Args[1])
-	if colExpr.Op != sql.ExprColumn || litExpr.Op != sql.ExprLiteral {
-		return types.SelectionMask{}, 0, false, nil
-	}
-	if swapped {
-		kop = swapCompareOp(kop)
-	}
-	col, ok := batch.ColumnByName(colExpr.Column)
-	if !ok || litExpr.Literal == nil {
-		return types.SelectionMask{}, 0, false, nil
-	}
-	out := ensureOutMask(scratch, batch.Len)
-	switch col.V.Kind {
-	case types.VecInt16:
-		lit, ok := litExpr.Literal.(int64)
-		if !ok {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		n := types.FilterOrdered(col.V.I16(), col.V.Valid, int16(lit), kop, sel, &out)
-		return out, n, true, nil
-	case types.VecInt32, types.VecDate:
-		lit, ok := litExpr.Literal.(int64)
-		if !ok {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		n := types.FilterOrdered(col.V.I32(), col.V.Valid, int32(lit), kop, sel, &out)
-		return out, n, true, nil
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
-		lit, ok := litExpr.Literal.(int64)
-		if !ok {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		n := types.FilterOrdered(col.V.I64(), col.V.Valid, lit, kop, sel, &out)
-		return out, n, true, nil
-	case types.VecFloat32:
-		lit, ok := asFloat64(litExpr.Literal)
-		if !ok {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		n := types.FilterOrdered(col.V.F32(), col.V.Valid, float32(lit), kop, sel, &out)
-		return out, n, true, nil
-	case types.VecFloat64:
-		lit, ok := asFloat64(litExpr.Literal)
-		if !ok {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		n := types.FilterOrdered(col.V.F64(), col.V.Valid, lit, kop, sel, &out)
-		return out, n, true, nil
-	case types.VecText, types.VecBytes, types.VecJSON:
-		if kop != types.FilterEqual && kop != types.FilterNotEqual {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		lit, ok := litExpr.Literal.(string)
-		if !ok {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		n := types.FilterBytes(col.V.Var(), col.V.Valid, []byte(lit), kop, sel, &out)
-		return out, n, true, nil
-	}
-	return types.SelectionMask{}, 0, false, nil
-}
-
-func filterBetween(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (types.SelectionMask, int, bool, error) {
-	if len(pred.Args) != 3 {
-		return types.SelectionMask{}, 0, false, nil
-	}
-	target := pred.Args[0]
-	if target.Op != sql.ExprColumn {
-		return types.SelectionMask{}, 0, false, nil
-	}
-	lowExpr, highExpr := pred.Args[1], pred.Args[2]
-	if lowExpr.Op != sql.ExprLiteral || highExpr.Op != sql.ExprLiteral {
-		return types.SelectionMask{}, 0, false, nil
-	}
-	col, ok := batch.ColumnByName(target.Column)
-	if !ok {
-		return types.SelectionMask{}, 0, false, nil
-	}
-	out := ensureOutMask(scratch, batch.Len)
-	switch col.V.Kind {
-	case types.VecInt16:
-		lo, lok := lowExpr.Literal.(int64)
-		hi, hok := highExpr.Literal.(int64)
-		if !lok || !hok {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		n := types.BetweenOrdered(col.V.I16(), col.V.Valid, int16(lo), int16(hi), sel, &out)
-		return out, n, true, nil
-	case types.VecInt32, types.VecDate:
-		lo, lok := lowExpr.Literal.(int64)
-		hi, hok := highExpr.Literal.(int64)
-		if !lok || !hok {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		n := types.BetweenOrdered(col.V.I32(), col.V.Valid, int32(lo), int32(hi), sel, &out)
-		return out, n, true, nil
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
-		lo, lok := lowExpr.Literal.(int64)
-		hi, hok := highExpr.Literal.(int64)
-		if !lok || !hok {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		n := types.BetweenOrdered(col.V.I64(), col.V.Valid, lo, hi, sel, &out)
-		return out, n, true, nil
-	case types.VecFloat32:
-		lo, lok := asFloat64(lowExpr.Literal)
-		hi, hok := asFloat64(highExpr.Literal)
-		if !lok || !hok {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		n := types.BetweenOrdered(col.V.F32(), col.V.Valid, float32(lo), float32(hi), sel, &out)
-		return out, n, true, nil
-	case types.VecFloat64:
-		lo, lok := asFloat64(lowExpr.Literal)
-		hi, hok := asFloat64(highExpr.Literal)
-		if !lok || !hok {
-			return types.SelectionMask{}, 0, false, nil
-		}
-		n := types.BetweenOrdered(col.V.F64(), col.V.Valid, lo, hi, sel, &out)
-		return out, n, true, nil
-	}
-	return types.SelectionMask{}, 0, false, nil
-}
-
-func orientColLit(left, right sql.BoundExpr) (col sql.BoundExpr, lit sql.BoundExpr, swapped bool) {
-	if left.Op == sql.ExprColumn && right.Op == sql.ExprLiteral {
-		return left, right, false
-	}
-	if right.Op == sql.ExprColumn && left.Op == sql.ExprLiteral {
-		return right, left, true
-	}
-	return left, right, false
 }
 
 func mapCompareOp(op sql.ExprOp) (types.FilterOp, bool) {

@@ -120,7 +120,9 @@ func (a *AggregateOp) build() error {
 		return &a.groups[idx]
 	}
 
-	specCols := make([]aggCol, len(a.specs))
+	var specCols []aggCol
+	groupCol := -1
+	var groupKind types.VecKind
 	for {
 		batch, ok, err := a.Source.Next()
 		if err != nil {
@@ -129,25 +131,26 @@ func (a *AggregateOp) build() error {
 		if !ok {
 			break
 		}
-		groupIdx := -1
-		var groupKind types.VecKind
-		if grouped {
-			groupIdx = batchColumnIndex(batch, a.GroupBy[0].Column)
-			if groupIdx == -1 {
-				return fmt.Errorf("aggregate: group column %q not in batch", a.GroupBy[0].Column)
+		if specCols == nil {
+			if grouped {
+				groupCol = batchColumnIndex(batch, a.GroupBy[0].Column)
+				if groupCol == -1 {
+					return fmt.Errorf("aggregate: group column %q not in batch", a.GroupBy[0].Column)
+				}
+				groupKind = batch.Columns[groupCol].V.Kind
 			}
-			groupKind = batch.Columns[groupIdx].V.Kind
-		}
-		for i, spec := range a.specs {
-			if spec.Star {
-				specCols[i] = aggCol{idx: -1}
-				continue
+			specCols = make([]aggCol, len(a.specs))
+			for i, spec := range a.specs {
+				if spec.Star {
+					specCols[i] = aggCol{idx: -1}
+					continue
+				}
+				ci := batchColumnIndex(batch, spec.ArgName)
+				if ci == -1 {
+					return fmt.Errorf("aggregate: column %q not in batch", spec.ArgName)
+				}
+				specCols[i] = aggCol{idx: ci, vk: batch.Columns[ci].V.Kind}
 			}
-			ci := batchColumnIndex(batch, spec.ArgName)
-			if ci == -1 {
-				return fmt.Errorf("aggregate: column %q not in batch", spec.ArgName)
-			}
-			specCols[i] = aggCol{idx: ci, vk: batch.Columns[ci].V.Kind}
 		}
 		var loopErr error
 		batch.Sel.IterSet(func(row int) {
@@ -156,7 +159,7 @@ func (a *AggregateOp) build() error {
 			}
 			var key any
 			if grouped {
-				col := &batch.Columns[groupIdx]
+				col := &batch.Columns[groupCol]
 				if col.V.Valid != nil && !col.V.Valid.IsValid(row) {
 					return
 				}
@@ -298,26 +301,12 @@ func (a *AggregateOp) materializeChunk(start, end int) (types.Batch, *types.Sele
 }
 
 func (a *AggregateOp) applyHaving(batch types.Batch, sel *types.SelectionMask) (*types.SelectionMask, error) {
-	ctx := newEvalCtx(batch)
-	filtered := types.NewSelectionMask(batch.Len)
-	var loopErr error
-	sel.IterSet(func(row int) {
-		if loopErr != nil {
-			return
-		}
-		pass, err := ctx.EvalBool(*a.Having, row)
-		if err != nil {
-			loopErr = err
-			return
-		}
-		if pass {
-			filtered.Set(row)
-		}
-	})
-	if loopErr != nil {
-		return nil, loopErr
+	batch.Sel = sel
+	res, err := filterPredicate(batch, *sel, *a.Having, nil)
+	if err != nil {
+		return nil, err
 	}
-	return &filtered, nil
+	return &res.sel, nil
 }
 
 func aggregateColumnName(spec sql.AggSpec) string {
