@@ -11,7 +11,7 @@ will change.
 - `internal/engine` — DB lifecycle, query/exec, EXPLAIN.
 - `internal/storage` — immutable columnar segments, predicate pushdown.
 - `internal/sql` — parser, binder, logical plan.
-- `internal/exec` — push-based vector operators (scan/filter/aggregate/project/sort/limit).
+- `internal/exec` — pull-based vector operators (scan/filter/aggregate/project/sort/limit/hashjoin).
 - `internal/types` — table specs, typed batches, and vectors.
 
 ## Tests

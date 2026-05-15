@@ -1,0 +1,335 @@
+// Bench harness MVP. Loads a synthetic dataset, runs a query N times, prints a benchstat-style line.
+// Subcommands: bench (default run), bench list, bench compare base.json head.json.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"math"
+	"os"
+	"runtime"
+	"runtime/pprof"
+	"sort"
+	"time"
+
+	"github.com/kylegrahammatzen/dripsql/internal/engine"
+	"github.com/kylegrahammatzen/dripsql/internal/storage"
+	"github.com/kylegrahammatzen/dripsql/internal/types"
+)
+
+const benchDir = "./bench-db"
+
+type runReport struct {
+	Query       string        `json:"query"`
+	Dataset     string        `json:"dataset"`
+	Rows        int           `json:"rows"`
+	SegmentRows int           `json:"segment_rows"`
+	Mode        string        `json:"mode"`
+	Cold        float64       `json:"cold_ms,omitempty"`
+	Runs        int           `json:"runs"`
+	Durations   []float64     `json:"durations_ms"`
+	Min         float64       `json:"min_ms"`
+	Median      float64       `json:"median_ms"`
+	P95         float64       `json:"p95_ms"`
+	Max         float64       `json:"max_ms"`
+	Mean        float64       `json:"mean_ms"`
+	StdDev      float64       `json:"stddev_ms"`
+	IOReadMs    float64       `json:"io_read_ms"`
+	DecodeMs    float64       `json:"decode_ms"`
+	ExecMs      float64       `json:"exec_ms"`
+	Env         envReport     `json:"env"`
+	Result      int           `json:"result_rows"`
+	WallSetup   time.Duration `json:"-"`
+}
+
+type envReport struct {
+	GoVersion  string `json:"go_version"`
+	GOOS       string `json:"goos"`
+	GOARCH     string `json:"goarch"`
+	GOMAXPROCS int    `json:"gomaxprocs"`
+	NumCPU     int    `json:"num_cpu"`
+}
+
+func main() {
+	args := os.Args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "list":
+			listCatalog(os.Stdout)
+			return
+		case "compare":
+			runCompare(args[1:])
+			return
+		}
+	}
+	runBench(args)
+}
+
+func runBench(args []string) {
+	fs := flag.NewFlagSet("bench", flag.ExitOnError)
+	queryName := fs.String("query", "count", "query name from the catalog (see `bench list`)")
+	rows := fs.Int("rows", 100_000, "rows to seed in the dataset")
+	runs := fs.Int("runs", 10, "number of timed query runs")
+	jsonOut := fs.Bool("json", false, "emit JSON summary on stdout instead of a benchstat-style line")
+	cpuProfile := fs.String("cpuprofile", "", "write a CPU profile to this path (captures the timed runs only)")
+	mode := fs.String("mode", "hot", "hot | cold-soft (close+reopen DB between runs) | cold-hard (also flushes OS page cache; needs root/admin)")
+	fs.Parse(args)
+
+	q, ok := queries[*queryName]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "bench: unknown query %q. Use `bench list` to see options.\n", *queryName)
+		os.Exit(2)
+	}
+	ds, ok := datasets[q.dataset]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "bench: query %q references unknown dataset %q.\n", q.name, q.dataset)
+		os.Exit(2)
+	}
+	if *runs < 1 {
+		fmt.Fprintln(os.Stderr, "bench: -runs must be at least 1")
+		os.Exit(2)
+	}
+	if *mode != "hot" && *mode != "cold-soft" && *mode != "cold-hard" {
+		fmt.Fprintf(os.Stderr, "bench: -mode must be 'hot', 'cold-soft', or 'cold-hard' (got %q)\n", *mode)
+		os.Exit(2)
+	}
+
+	segmentRows := *rows
+	if segmentRows > types.StandardBatchRows {
+		segmentRows = types.StandardBatchRows
+	}
+	if segmentRows < 1 {
+		segmentRows = 1
+	}
+
+	if err := os.RemoveAll(benchDir); err != nil {
+		fmt.Fprintln(os.Stderr, "bench: reset dir:", err)
+		os.Exit(1)
+	}
+
+	ctx := context.Background()
+	db, err := engine.Open(benchDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "bench: open:", err)
+		os.Exit(1)
+	}
+
+	setupStart := time.Now()
+	if err := ds.setup(ctx, db, *rows, segmentRows); err != nil {
+		db.Close()
+		fmt.Fprintln(os.Stderr, "bench: dataset setup:", err)
+		os.Exit(1)
+	}
+	setup := time.Since(setupStart)
+
+	sqlText := q.sql(*rows)
+	if *mode == "hot" {
+		if _, err := db.Query(ctx, sqlText); err != nil {
+			db.Close()
+			fmt.Fprintln(os.Stderr, "bench: warmup query failed:", err)
+			os.Exit(1)
+		}
+	}
+
+	durations := make([]time.Duration, 0, *runs)
+	var lastRows int
+	storage.ResetTimings()
+
+	if *cpuProfile != "" {
+		pf, err := os.Create(*cpuProfile)
+		if err != nil {
+			db.Close()
+			fmt.Fprintln(os.Stderr, "bench: create cpuprofile:", err)
+			os.Exit(1)
+		}
+		if err := pprof.StartCPUProfile(pf); err != nil {
+			pf.Close()
+			db.Close()
+			fmt.Fprintln(os.Stderr, "bench: start cpuprofile:", err)
+			os.Exit(1)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			pf.Close()
+		}()
+	}
+	for i := 0; i < *runs; i++ {
+		if *mode == "cold-soft" || *mode == "cold-hard" {
+			if err := db.Close(); err != nil {
+				fmt.Fprintln(os.Stderr, "bench: close between runs:", err)
+				os.Exit(1)
+			}
+			if *mode == "cold-hard" {
+				if err := flushOSPageCache(); err != nil {
+					fmt.Fprintln(os.Stderr, "bench: flush page cache:", err)
+					os.Exit(1)
+				}
+			}
+			db, err = engine.Open(benchDir)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "bench: reopen between runs:", err)
+				os.Exit(1)
+			}
+		}
+		start := time.Now()
+		result, err := db.Query(ctx, sqlText)
+		elapsed := time.Since(start)
+		if err != nil {
+			db.Close()
+			fmt.Fprintln(os.Stderr, "bench: run", i, "failed:", err)
+			os.Exit(1)
+		}
+		durations = append(durations, elapsed)
+		lastRows = len(result.Values)
+	}
+	db.Close()
+
+	statRuns := durations
+	var coldMs float64
+	if (*mode == "cold-soft" || *mode == "cold-hard") && len(durations) > 1 {
+		coldMs = float64(durations[0].Microseconds()) / 1000.0
+		statRuns = durations[1:]
+	}
+	ioNs, decodeNs := storage.ReadTimings()
+	rep := summarize(q.name, ds.name, *rows, segmentRows, durations, statRuns, lastRows)
+	rep.Mode = *mode
+	rep.WallSetup = setup
+	rep.Cold = coldMs
+	rep.IOReadMs = float64(ioNs) / 1e6 / float64(*runs)
+	rep.DecodeMs = float64(decodeNs) / 1e6 / float64(*runs)
+	rep.ExecMs = rep.Median - rep.IOReadMs - rep.DecodeMs
+	if rep.ExecMs < 0 {
+		rep.ExecMs = 0
+	}
+
+	if *jsonOut {
+		if err := json.NewEncoder(os.Stdout).Encode(rep); err != nil {
+			fmt.Fprintln(os.Stderr, "bench: encode json:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	printBenchstatLine(os.Stdout, rep)
+}
+
+func runCompare(args []string) {
+	fs := flag.NewFlagSet("compare", flag.ExitOnError)
+	alpha := fs.Float64("alpha", 0.05, "significance threshold for Mann-Whitney U")
+	fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: bench compare base.json head.json [-alpha 0.05]")
+		os.Exit(2)
+	}
+	if err := compareReports(rest[0], rest[1], *alpha, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "bench: compare:", err)
+		os.Exit(1)
+	}
+}
+
+func summarize(query, dataset string, rows, segmentRows int, allDurations, statRuns []time.Duration, resultRows int) runReport {
+	all := toMs(allDurations)
+	ms := toMs(statRuns)
+	sorted := append([]float64(nil), ms...)
+	sort.Float64s(sorted)
+
+	var sum float64
+	for _, v := range ms {
+		sum += v
+	}
+	mean := sum / float64(len(ms))
+	var variance float64
+	for _, v := range ms {
+		variance += (v - mean) * (v - mean)
+	}
+	stddev := 0.0
+	if len(ms) > 1 {
+		stddev = math.Sqrt(variance / float64(len(ms)-1))
+	}
+
+	return runReport{
+		Query:       query,
+		Dataset:     dataset,
+		Rows:        rows,
+		SegmentRows: segmentRows,
+		Runs:        len(all),
+		Durations:   all,
+		Min:         sorted[0],
+		Median:      percentile(sorted, 0.5),
+		P95:         percentile(sorted, 0.95),
+		Max:         sorted[len(sorted)-1],
+		Mean:        mean,
+		StdDev:      stddev,
+		Result:      resultRows,
+		Env:         collectEnv(),
+	}
+}
+
+func toMs(durations []time.Duration) []float64 {
+	out := make([]float64, len(durations))
+	for i, d := range durations {
+		out[i] = float64(d.Microseconds()) / 1000.0
+	}
+	return out
+}
+
+func percentile(sorted []float64, p float64) float64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	if len(sorted) == 1 {
+		return sorted[0]
+	}
+	rank := p * float64(len(sorted)-1)
+	lo := int(math.Floor(rank))
+	hi := int(math.Ceil(rank))
+	if lo == hi {
+		return sorted[lo]
+	}
+	frac := rank - float64(lo)
+	return sorted[lo]*(1-frac) + sorted[hi]*frac
+}
+
+func collectEnv() envReport {
+	return envReport{
+		GoVersion:  runtime.Version(),
+		GOOS:       runtime.GOOS,
+		GOARCH:     runtime.GOARCH,
+		GOMAXPROCS: runtime.GOMAXPROCS(0),
+		NumCPU:     runtime.NumCPU(),
+	}
+}
+
+func printBenchstatLine(w *os.File, r runReport) {
+	pct := 0.0
+	if r.Median > 0 {
+		pct = 100 * r.StdDev / r.Median
+	}
+	name := fmt.Sprintf("Benchmark_%s/rows=%d-%d", r.Query, r.Rows, r.Env.GOMAXPROCS)
+	fmt.Fprintf(w, "%s  runs=%d  wall=%s (+/- %.2f%%)  io=%s  dec=%s  exec=%s  result=%d rows\n",
+		name, r.Runs, formatMs(r.Median), pct, formatMs(r.IOReadMs), formatMs(r.DecodeMs), formatMs(r.ExecMs), r.Result)
+}
+
+func formatMs(ms float64) string {
+	switch {
+	case ms < 1:
+		return fmt.Sprintf("%.0f us", ms*1000)
+	case ms < 1000:
+		return fmt.Sprintf("%.2f ms", ms)
+	default:
+		return fmt.Sprintf("%.3f s", ms/1000)
+	}
+}
+
+func listCatalog(w *os.File) {
+	fmt.Fprintln(w, "Datasets:")
+	for name := range datasets {
+		fmt.Fprintf(w, "  %s\n", name)
+	}
+	fmt.Fprintln(w, "Queries:")
+	for name, q := range queries {
+		fmt.Fprintf(w, "  %-20s dataset=%s\n", name, q.dataset)
+	}
+}

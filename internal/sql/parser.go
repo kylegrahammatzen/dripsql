@@ -1,0 +1,1440 @@
+// Parser entry points, shared helpers, and full statement grammar (SELECT, INSERT, UPDATE,
+// DELETE, EXPLAIN, CREATE TYPE, CREATE TABLE). Expression grammar is in parse_expr.go.
+package sql
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
+
+type parser struct {
+	lex lexer
+	buf token
+	has bool
+}
+
+type parserState struct {
+	pos int
+	buf token
+	has bool
+}
+
+func Parse(sqlText string) ([]Stmt, error) {
+	p := &parser{lex: lexer{sql: sqlText}}
+	var stmts []Stmt
+	for {
+		if err := p.skipSemicolons(); err != nil {
+			return nil, err
+		}
+		tok, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if tok.typ == tokEOF {
+			return stmts, nil
+		}
+		stmt, err := p.parseStmt()
+		if err != nil {
+			return nil, err
+		}
+		stmts = append(stmts, stmt)
+		if err := p.consumeStatementEnd(); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func ParseOne(sqlText string) (Stmt, error) {
+	stmts, err := Parse(sqlText)
+	if err != nil {
+		return nil, err
+	}
+	if len(stmts) != 1 {
+		return nil, fmt.Errorf("expected one statement, got %d", len(stmts))
+	}
+	return stmts[0], nil
+}
+
+func (p *parser) parseStmt() (Stmt, error) {
+	tok, err := p.expect(tokIdent)
+	if err != nil {
+		return nil, err
+	}
+	switch tok.lit {
+	case "select":
+		return p.parseSelect()
+	case "create":
+		return p.parseCreate()
+	case "insert":
+		return p.parseInsert()
+	case "delete":
+		return p.parseDelete()
+	case "update":
+		return p.parseUpdate()
+	case "explain":
+		return p.parseExplain()
+	default:
+		return nil, p.errorAt(tok, "unsupported statement %q", tok.lit)
+	}
+}
+
+func (p *parser) parseCreate() (Stmt, error) {
+	tok, err := p.expect(tokIdent)
+	if err != nil {
+		return nil, err
+	}
+	switch tok.lit {
+	case "type":
+		return p.parseCreateType()
+	case "table":
+		return p.parseCreateTable()
+	default:
+		return nil, p.errorAt(tok, "unsupported CREATE target %q", tok.lit)
+	}
+}
+
+func (p *parser) parseIfNotExists() (bool, error) {
+	if ok, err := p.maybeWord("if"); err != nil || !ok {
+		return false, err
+	}
+	if err := p.expectWord("not"); err != nil {
+		return false, err
+	}
+	if err := p.expectWord("exists"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (p *parser) next() (token, error) {
+	if p.has {
+		p.has = false
+		return p.buf, nil
+	}
+	return p.lex.next()
+}
+
+func (p *parser) peek() (token, error) {
+	if p.has {
+		return p.buf, nil
+	}
+	tok, err := p.lex.next()
+	if err != nil {
+		return token{}, err
+	}
+	p.buf = tok
+	p.has = true
+	return tok, nil
+}
+
+func (p *parser) expect(typ tokenType) (token, error) {
+	tok, err := p.next()
+	if err != nil {
+		return token{}, err
+	}
+	if tok.typ != typ {
+		return token{}, p.errorAt(tok, "expected %s", tokenName(typ))
+	}
+	return tok, nil
+}
+
+func (p *parser) expectWord(word string) error {
+	tok, err := p.expect(tokIdent)
+	if err != nil {
+		return err
+	}
+	if tok.lit != word {
+		return p.errorAt(tok, "expected %s", word)
+	}
+	return nil
+}
+
+func (p *parser) maybeWord(word string) (bool, error) {
+	tok, err := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if tok.typ == tokIdent && tok.lit == word {
+		_, _ = p.next()
+		return true, nil
+	}
+	return false, nil
+}
+
+func (p *parser) maybe(typ tokenType) (bool, error) {
+	tok, err := p.peek()
+	if err != nil {
+		return false, err
+	}
+	if tok.typ == typ {
+		_, _ = p.next()
+		return true, nil
+	}
+	return false, nil
+}
+
+func (p *parser) mark() parserState {
+	return parserState{pos: p.lex.pos, buf: p.buf, has: p.has}
+}
+
+func (p *parser) restore(state parserState) {
+	p.lex.pos = state.pos
+	p.buf = state.buf
+	p.has = state.has
+}
+
+func (p *parser) skipSemicolons() error {
+	for {
+		tok, err := p.peek()
+		if err != nil {
+			return err
+		}
+		if tok.typ != tokSemicolon {
+			return nil
+		}
+		_, _ = p.next()
+	}
+}
+
+func (p *parser) consumeStatementEnd() error {
+	tok, err := p.peek()
+	if err != nil {
+		return err
+	}
+	if tok.typ == tokSemicolon {
+		_, _ = p.next()
+		return nil
+	}
+	if tok.typ == tokEOF {
+		return nil
+	}
+	return p.errorAt(tok, "expected statement end")
+}
+
+func (p *parser) errorAt(tok token, format string, args ...any) error {
+	return fmt.Errorf("at byte %d: %s", tok.pos, fmt.Sprintf(format, args...))
+}
+
+func (p *parser) parseName() (string, error) {
+	tok, err := p.expect(tokIdent)
+	if err != nil {
+		return "", err
+	}
+	return tok.lit, nil
+}
+
+func (p *parser) parseValue() (Value, error) {
+	tok, err := p.next()
+	if err != nil {
+		return Value{}, err
+	}
+	negate := false
+	if tok.typ == tokMinus {
+		negate = true
+		tok, err = p.next()
+		if err != nil {
+			return Value{}, err
+		}
+	}
+	switch tok.typ {
+	case tokString:
+		if negate {
+			return Value{}, p.errorAt(tok, "cannot negate string literal")
+		}
+		return Value{Kind: ValueString, String: tok.lit}, nil
+	case tokInt:
+		value, err := strconv.ParseInt(tok.lit, 10, 64)
+		if err != nil {
+			return Value{}, p.errorAt(tok, "invalid integer literal")
+		}
+		if negate {
+			value = -value
+		}
+		return Value{Kind: ValueInt, Int: value}, nil
+	case tokFloat:
+		value, err := strconv.ParseFloat(tok.lit, 64)
+		if err != nil {
+			return Value{}, p.errorAt(tok, "invalid float literal")
+		}
+		if negate {
+			value = -value
+		}
+		return Value{Kind: ValueFloat, Float: value}, nil
+	case tokIdent:
+		if !tok.quoted {
+			switch tok.lit {
+			case "true":
+				if negate {
+					return Value{}, p.errorAt(tok, "cannot negate bool literal")
+				}
+				return Value{Kind: ValueBool, Bool: true}, nil
+			case "false":
+				if negate {
+					return Value{}, p.errorAt(tok, "cannot negate bool literal")
+				}
+				return Value{Kind: ValueBool, Bool: false}, nil
+			case "null":
+				if negate {
+					return Value{}, p.errorAt(tok, "cannot negate null")
+				}
+				return Value{Kind: ValueNull}, nil
+			}
+		}
+	}
+	return Value{}, p.errorAt(tok, "expected literal")
+}
+
+func tokenName(typ tokenType) string {
+	switch typ {
+	case tokEOF:
+		return "end of input"
+	case tokIdent:
+		return "identifier"
+	case tokString:
+		return "string literal"
+	case tokInt:
+		return "integer literal"
+	case tokFloat:
+		return "float literal"
+	case tokComma:
+		return ","
+	case tokLParen:
+		return "("
+	case tokRParen:
+		return ")"
+	case tokSemicolon:
+		return ";"
+	case tokEqual:
+		return "="
+	case tokNotEqual:
+		return "!="
+	case tokLess:
+		return "<"
+	case tokLessEqual:
+		return "<="
+	case tokGreater:
+		return ">"
+	case tokGreaterEqual:
+		return ">="
+	case tokStar:
+		return "*"
+	case tokPlus:
+		return "+"
+	case tokMinus:
+		return "-"
+	case tokSlash:
+		return "/"
+	case tokPercent:
+		return "%"
+	case tokConcat:
+		return "||"
+	case tokJSONGet:
+		return "->"
+	case tokJSONGetText:
+		return "->>"
+	case tokDot:
+		return "."
+	default:
+		return "token"
+	}
+}
+
+// DDL recursive descent: CREATE TYPE AS ENUM (...) and CREATE TABLE name (cols...) WITH (opts...).
+// Only enum types and column-level NOT NULL are supported; other constraints raise a clear error.
+
+
+func (p *parser) parseCreateType() (*CreateTypeStmt, error) {
+	ifNotExists, err := p.parseIfNotExists()
+	if err != nil {
+		return nil, err
+	}
+	name, err := p.parseName()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("as"); err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("enum"); err != nil {
+		return nil, fmt.Errorf("unsupported CREATE TYPE: only ENUM types are supported")
+	}
+	if _, err := p.expect(tokLParen); err != nil {
+		return nil, err
+	}
+	var labels []string
+	for {
+		label, err := p.expect(tokString)
+		if err != nil {
+			return nil, err
+		}
+		labels = append(labels, label.lit)
+		tok, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		switch tok.typ {
+		case tokComma:
+			_, _ = p.next()
+		case tokRParen:
+			_, _ = p.next()
+			return &CreateTypeStmt{Name: name, IfNotExists: ifNotExists, EnumLabels: labels}, nil
+		default:
+			return nil, p.errorAt(tok, "expected , or )")
+		}
+	}
+}
+
+func (p *parser) parseCreateTable() (*CreateTableStmt, error) {
+	ifNotExists, err := p.parseIfNotExists()
+	if err != nil {
+		return nil, err
+	}
+	name, err := p.parseName()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tokLParen); err != nil {
+		return nil, err
+	}
+
+	var columns []ColumnDef
+	for {
+		tok, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if tok.typ == tokRParen {
+			if len(columns) == 0 {
+				return nil, p.errorAt(tok, "CREATE TABLE requires at least one column")
+			}
+			return nil, p.errorAt(tok, "trailing comma in column list")
+		}
+		if tok.typ == tokIdent && isUnsupportedTableConstraint(tok.lit) {
+			return nil, p.errorAt(tok, "unsupported CREATE TABLE constraint %q", tok.lit)
+		}
+		col, err := p.parseColumnDef()
+		if err != nil {
+			return nil, err
+		}
+		columns = append(columns, col)
+
+		tok, err = p.peek()
+		if err != nil {
+			return nil, err
+		}
+		switch tok.typ {
+		case tokComma:
+			_, _ = p.next()
+		case tokRParen:
+			_, _ = p.next()
+		default:
+			return nil, p.errorAt(tok, "expected , or )")
+		}
+		if tok.typ == tokRParen {
+			break
+		}
+	}
+
+	options, err := p.parseOptionalTableOptions()
+	if err != nil {
+		return nil, err
+	}
+	return &CreateTableStmt{Name: name, IfNotExists: ifNotExists, Columns: columns, Options: options}, nil
+}
+
+func (p *parser) parseColumnDef() (ColumnDef, error) {
+	name, err := p.parseName()
+	if err != nil {
+		return ColumnDef{}, err
+	}
+	typ, err := p.parseType()
+	if err != nil {
+		return ColumnDef{}, err
+	}
+	col := ColumnDef{Name: name, Type: typ}
+	for {
+		tok, err := p.peek()
+		if err != nil {
+			return ColumnDef{}, err
+		}
+		if tok.typ == tokComma || tok.typ == tokRParen {
+			return col, nil
+		}
+		if tok.typ != tokIdent {
+			return ColumnDef{}, p.errorAt(tok, "unexpected column constraint")
+		}
+		switch tok.lit {
+		case "not":
+			_, _ = p.next()
+			if err := p.expectWord("null"); err != nil {
+				return ColumnDef{}, err
+			}
+			col.NotNull = true
+		case "null":
+			_, _ = p.next()
+			col.NotNull = false
+		case "primary", "unique", "check", "default", "references", "constraint", "foreign":
+			return ColumnDef{}, p.errorAt(tok, "unsupported column constraint %q", tok.lit)
+		default:
+			return ColumnDef{}, p.errorAt(tok, "unexpected token %q in column definition", tok.lit)
+		}
+	}
+}
+
+func (p *parser) parseType() (string, error) {
+	var parts []string
+	for {
+		tok, err := p.peek()
+		if err != nil {
+			return "", err
+		}
+		if tok.typ != tokIdent || isColumnConstraintStart(tok.lit) {
+			break
+		}
+		_, _ = p.next()
+		parts = append(parts, tok.lit)
+	}
+	if len(parts) == 0 {
+		tok, err := p.peek()
+		if err != nil {
+			return "", err
+		}
+		return "", p.errorAt(tok, "expected column type")
+	}
+	return strings.Join(parts, " "), nil
+}
+
+func (p *parser) parseOptionalTableOptions() ([]TableOption, error) {
+	if ok, err := p.maybeWord("with"); err != nil || !ok {
+		return nil, err
+	}
+	if _, err := p.expect(tokLParen); err != nil {
+		return nil, err
+	}
+	var options []TableOption
+	for {
+		name, err := p.parseName()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tokEqual); err != nil {
+			return nil, err
+		}
+		value, err := p.parseOptionScalar()
+		if err != nil {
+			return nil, err
+		}
+		options = append(options, TableOption{Name: name, Value: value})
+
+		tok, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		switch tok.typ {
+		case tokComma:
+			_, _ = p.next()
+		case tokRParen:
+			_, _ = p.next()
+			return options, nil
+		default:
+			return nil, p.errorAt(tok, "expected , or )")
+		}
+	}
+}
+
+func (p *parser) parseOptionScalar() (Value, error) {
+	tok, err := p.next()
+	if err != nil {
+		return Value{}, err
+	}
+	switch tok.typ {
+	case tokIdent:
+		if tok.lit == "true" {
+			return Value{Kind: ValueBool, Bool: true}, nil
+		}
+		if tok.lit == "false" {
+			return Value{Kind: ValueBool, Bool: false}, nil
+		}
+		return Value{Kind: ValueIdent, String: tok.lit}, nil
+	case tokString:
+		return Value{Kind: ValueString, String: tok.lit}, nil
+	case tokInt:
+		value, err := strconv.ParseInt(tok.lit, 10, 64)
+		if err != nil {
+			return Value{}, p.errorAt(tok, "invalid integer literal")
+		}
+		return Value{Kind: ValueInt, Int: value}, nil
+	default:
+		return Value{}, p.errorAt(tok, "expected table option value")
+	}
+}
+
+func isColumnConstraintStart(word string) bool {
+	return word == "not" || word == "null" || word == "default" || word == "references" || isUnsupportedTableConstraint(word)
+}
+
+func isUnsupportedTableConstraint(word string) bool {
+	switch word {
+	case "primary", "unique", "check", "constraint", "foreign", "family", "index":
+		return true
+	default:
+		return false
+	}
+}
+
+// INSERT recursive descent: INSERT INTO t (cols...) VALUES (vals...), (vals...).
+// Column list is optional; row count is implicit by the VALUES tuples.
+
+func (p *parser) parseInsert() (*InsertStmt, error) {
+	if err := p.expectWord("into"); err != nil {
+		return nil, err
+	}
+	tableName, err := p.parseName()
+	if err != nil {
+		return nil, err
+	}
+
+	var columns []string
+	if ok, err := p.maybe(tokLParen); err != nil {
+		return nil, err
+	} else if ok {
+		for {
+			name, err := p.parseName()
+			if err != nil {
+				return nil, err
+			}
+			columns = append(columns, name)
+			tok, err := p.peek()
+			if err != nil {
+				return nil, err
+			}
+			switch tok.typ {
+			case tokComma:
+				_, _ = p.next()
+			case tokRParen:
+				_, _ = p.next()
+				goto columnsDone
+			default:
+				return nil, p.errorAt(tok, "expected , or )")
+			}
+		}
+	}
+
+columnsDone:
+	if err := p.expectWord("values"); err != nil {
+		return nil, err
+	}
+
+	var rows [][]Value
+	for {
+		if _, err := p.expect(tokLParen); err != nil {
+			return nil, err
+		}
+		var row []Value
+		for {
+			value, err := p.parseValue()
+			if err != nil {
+				return nil, err
+			}
+			row = append(row, value)
+
+			tok, err := p.peek()
+			if err != nil {
+				return nil, err
+			}
+			switch tok.typ {
+			case tokComma:
+				_, _ = p.next()
+			case tokRParen:
+				_, _ = p.next()
+				goto rowDone
+			default:
+				return nil, p.errorAt(tok, "expected , or )")
+			}
+		}
+
+	rowDone:
+		rows = append(rows, row)
+		tok, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if tok.typ != tokComma {
+			return &InsertStmt{Table: tableName, Columns: columns, Values: rows}, nil
+		}
+		_, _ = p.next()
+	}
+}
+
+// DELETE FROM table [WHERE expr]. No table aliases or joins in the DELETE surface yet.
+// Empty WHERE means delete all rows in the table.
+
+func (p *parser) parseDelete() (*DeleteStmt, error) {
+	if err := p.expectWord("from"); err != nil {
+		return nil, err
+	}
+	tableName, err := p.parseName()
+	if err != nil {
+		return nil, err
+	}
+	where, err := p.parseOptionalWhere()
+	if err != nil {
+		return nil, err
+	}
+	return &DeleteStmt{Table: tableName, Where: where}, nil
+}
+
+// UPDATE table SET col = lit [, col = lit ...] [WHERE expr]. Assignment values are literals only.
+// Empty WHERE rewrites every row in the table with the supplied assignments.
+
+
+func (p *parser) parseUpdate() (*UpdateStmt, error) {
+	tableName, err := p.parseName()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("set"); err != nil {
+		return nil, err
+	}
+	assignments, err := p.parseAssignments()
+	if err != nil {
+		return nil, err
+	}
+	where, err := p.parseOptionalWhere()
+	if err != nil {
+		return nil, err
+	}
+	return &UpdateStmt{Table: tableName, Assignments: assignments, Where: where}, nil
+}
+
+func (p *parser) parseAssignments() ([]Assignment, error) {
+	var out []Assignment
+	for {
+		col, err := p.parseName()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tokEqual); err != nil {
+			return nil, err
+		}
+		val, err := p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Assignment{Column: col, Value: val})
+		ok, err := p.maybe(tokComma)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("UPDATE SET requires at least one assignment")
+	}
+	return out, nil
+}
+
+// EXPLAIN [ANALYZE] SELECT ... wraps an inner SelectStmt; only SELECT is allowed for now.
+
+func (p *parser) parseExplain() (Stmt, error) {
+	analyze, err := p.maybeWord("analyze")
+	if err != nil {
+		return nil, err
+	}
+	tok, err := p.peek()
+	if err != nil {
+		return nil, err
+	}
+	if tok.typ != tokIdent {
+		return nil, p.errorAt(tok, "EXPLAIN requires a SELECT statement")
+	}
+	if tok.lit != "select" {
+		return nil, p.errorAt(tok, "EXPLAIN supports SELECT only, got %q", tok.lit)
+	}
+	_, _ = p.next()
+	inner, err := p.parseSelect()
+	if err != nil {
+		return nil, err
+	}
+	return &ExplainStmt{Analyze: analyze, Inner: inner}, nil
+}
+
+// SELECT recursive descent: projection, WHERE (or/and/not), GROUP BY, HAVING, ORDER BY, LIMIT/OFFSET.
+// Scalar precedence ladder: path-op > term (mul/div/mod/div) > expr (concat/plus/minus).
+
+
+func (p *parser) parseSelect() (*SelectStmt, error) {
+	selectExprs, err := p.parseSelectList()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := p.expectWord("from"); err != nil {
+		return nil, err
+	}
+
+	from, err := p.parseFrom()
+	if err != nil {
+		return nil, err
+	}
+
+	where, err := p.parseOptionalWhere()
+	if err != nil {
+		return nil, err
+	}
+
+	groupBy, err := p.parseOptionalGroupBy()
+	if err != nil {
+		return nil, err
+	}
+	having, err := p.parseOptionalHaving()
+	if err != nil {
+		return nil, err
+	}
+	orderBy, err := p.parseOptionalOrderBy()
+	if err != nil {
+		return nil, err
+	}
+	limit, err := p.parseOptionalLimit()
+	if err != nil {
+		return nil, err
+	}
+	offset, err := p.parseOptionalOffset()
+	if err != nil {
+		return nil, err
+	}
+
+	return &SelectStmt{
+		From:    from,
+		Select:  selectExprs,
+		Where:   where,
+		GroupBy: groupBy,
+		Having:  having,
+		OrderBy: orderBy,
+		Limit:   limit,
+		Offset:  offset,
+	}, nil
+}
+
+// parseFrom reads a base table plus a left-deep chain of JOINs. Each successive JOIN wraps the
+// current tree as Left and the new TableName as Right.
+func (p *parser) parseFrom() (TableExpr, error) {
+	base, err := p.parseTableName()
+	if err != nil {
+		return nil, err
+	}
+	var node TableExpr = base
+	for {
+		tok, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		if tok.typ != tokIdent || tok.quoted {
+			return node, nil
+		}
+		kind := JoinInner
+		switch tok.lit {
+		case "join", "inner":
+			_, _ = p.next()
+			if tok.lit == "inner" {
+				if err := p.expectWord("join"); err != nil {
+					return nil, err
+				}
+			}
+		case "left":
+			_, _ = p.next()
+			if _, err := p.maybeWord("outer"); err != nil {
+				return nil, err
+			}
+			if err := p.expectWord("join"); err != nil {
+				return nil, err
+			}
+			kind = JoinLeft
+		case "right":
+			_, _ = p.next()
+			if _, err := p.maybeWord("outer"); err != nil {
+				return nil, err
+			}
+			if err := p.expectWord("join"); err != nil {
+				return nil, err
+			}
+			kind = JoinRight
+		case "full":
+			_, _ = p.next()
+			if _, err := p.maybeWord("outer"); err != nil {
+				return nil, err
+			}
+			if err := p.expectWord("join"); err != nil {
+				return nil, err
+			}
+			kind = JoinFull
+		default:
+			return node, nil
+		}
+		right, err := p.parseTableName()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectWord("on"); err != nil {
+			return nil, err
+		}
+		on, err := p.parsePredicateOr()
+		if err != nil {
+			return nil, err
+		}
+		node = &JoinExpr{Kind: kind, Left: node, Right: right, On: on}
+	}
+}
+
+func (p *parser) parseTableName() (*TableName, error) {
+	name, err := p.parseName()
+	if err != nil {
+		return nil, err
+	}
+	alias, err := p.parseOptionalAlias(aliasStopsTable...)
+	if err != nil {
+		return nil, err
+	}
+	return &TableName{Name: name, Alias: alias}, nil
+}
+
+func (p *parser) parseSelectList() ([]SelectExpr, error) {
+	tok, err := p.peek()
+	if err != nil {
+		return nil, err
+	}
+
+	if tok.typ == tokStar {
+		_, _ = p.next()
+		return []SelectExpr{{Expr: &StarRef{}}}, nil
+	}
+
+	expr, _, err := p.parseScalarExpr()
+	if err != nil {
+		return nil, err
+	}
+	alias, err := p.parseOptionalAlias(aliasStopsColumn...)
+	if err != nil {
+		return nil, err
+	}
+	exprs := []SelectExpr{{Expr: expr, Alias: alias}}
+
+	for {
+		ok, err := p.maybe(tokComma)
+		if err != nil || !ok {
+			return exprs, err
+		}
+		expr, _, err := p.parseScalarExpr()
+		if err != nil {
+			return nil, err
+		}
+		alias, err := p.parseOptionalAlias(aliasStopsColumn...)
+		if err != nil {
+			return nil, err
+		}
+		exprs = append(exprs, SelectExpr{Expr: expr, Alias: alias})
+	}
+}
+
+func (p *parser) parseScalarExpr() (Expr, string, error) {
+	expr, name, err := p.parseScalarTerm()
+	if err != nil {
+		return nil, "", err
+	}
+	for {
+		if ok, err := p.maybe(tokConcat); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarTerm()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinaryConcat, Right: right}
+			name = ""
+			continue
+		}
+		if ok, err := p.maybe(tokPlus); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarTerm()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinaryAdd, Right: right}
+			name = ""
+			continue
+		}
+		if ok, err := p.maybe(tokMinus); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarTerm()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinarySubtract, Right: right}
+			name = ""
+			continue
+		}
+		return expr, name, nil
+	}
+}
+
+func (p *parser) parseScalarTerm() (Expr, string, error) {
+	expr, name, err := p.parseScalarPathOp()
+	if err != nil {
+		return nil, "", err
+	}
+	for {
+		if ok, err := p.maybe(tokStar); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarPathOp()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinaryMultiply, Right: right}
+			name = ""
+			continue
+		}
+		if ok, err := p.maybe(tokSlash); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarPathOp()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinaryDivide, Right: right}
+			name = ""
+			continue
+		}
+		if ok, err := p.maybe(tokPercent); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarPathOp()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinaryModulo, Right: right}
+			name = ""
+			continue
+		}
+		if ok, err := p.maybeWord("mod"); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarPathOp()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinaryModulo, Right: right}
+			name = ""
+			continue
+		}
+		if ok, err := p.maybeWord("div"); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarPathOp()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinaryIntDivide, Right: right}
+			name = ""
+			continue
+		}
+		return expr, name, nil
+	}
+}
+
+// JSON path ops bind tighter than arithmetic so payload->'k'->>'inner' left-associates correctly.
+func (p *parser) parseScalarPathOp() (Expr, string, error) {
+	expr, name, err := p.parseScalarPrimary()
+	if err != nil {
+		return nil, "", err
+	}
+	for {
+		if ok, err := p.maybe(tokJSONGetText); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarPrimary()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinaryJSONGetText, Right: right}
+			name = ""
+			continue
+		}
+		if ok, err := p.maybe(tokJSONGet); err != nil || ok {
+			if err != nil {
+				return nil, "", err
+			}
+			right, _, err := p.parseScalarPrimary()
+			if err != nil {
+				return nil, "", err
+			}
+			expr = &BinaryExpr{Left: expr, Op: BinaryJSONGet, Right: right}
+			name = ""
+			continue
+		}
+		return expr, name, nil
+	}
+}
+
+func (p *parser) parseScalarPrimary() (Expr, string, error) {
+	tok, err := p.peek()
+	if err != nil {
+		return nil, "", err
+	}
+	if tok.typ == tokMinus {
+		_, _ = p.next()
+		inner, _, err := p.parseScalarPrimary()
+		if err != nil {
+			return nil, "", err
+		}
+		if lit, ok := inner.(*Literal); ok {
+			switch lit.Value.Kind {
+			case ValueInt:
+				return &Literal{Value: Value{Kind: ValueInt, Int: -lit.Value.Int}}, "", nil
+			case ValueFloat:
+				return &Literal{Value: Value{Kind: ValueFloat, Float: -lit.Value.Float}}, "", nil
+			}
+		}
+		return &BinaryExpr{Left: &Literal{Value: Value{Kind: ValueInt, Int: 0}}, Op: BinarySubtract, Right: inner}, "", nil
+	}
+	if tok.typ == tokString || tok.typ == tokInt || tok.typ == tokFloat ||
+		(tok.typ == tokIdent && !tok.quoted && (tok.lit == "true" || tok.lit == "false" || tok.lit == "null")) {
+		value, err := p.parseValue()
+		if err != nil {
+			return nil, "", err
+		}
+		return &Literal{Value: value}, "", nil
+	}
+	if ok, err := p.maybe(tokLParen); err != nil || ok {
+		if err != nil {
+			return nil, "", err
+		}
+		expr, _, err := p.parseScalarExpr()
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := p.expect(tokRParen); err != nil {
+			return nil, "", err
+		}
+		return expr, "", nil
+	}
+	name, err := p.parseName()
+	if err != nil {
+		return nil, "", err
+	}
+	if ok, err := p.maybe(tokLParen); err != nil || ok {
+		if err != nil {
+			return nil, "", err
+		}
+		expr, err := p.parseScalarCallArgs(name)
+		return expr, "", err
+	}
+	if ok, err := p.maybe(tokDot); err != nil || ok {
+		if err != nil {
+			return nil, "", err
+		}
+		colName, err := p.parseName()
+		if err != nil {
+			return nil, "", err
+		}
+		return &ColumnRef{Qualifier: name, Name: colName}, colName, nil
+	}
+	return &ColumnRef{Name: name}, name, nil
+}
+
+func (p *parser) parseScalarCallArgs(funcName string) (Expr, error) {
+	if ok, err := p.maybe(tokRParen); err != nil || ok {
+		return &FuncCall{Name: funcName}, err
+	}
+	if ok, err := p.maybe(tokStar); err != nil || ok {
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tokRParen); err != nil {
+			return nil, err
+		}
+		return &FuncCall{Name: funcName, Star: true}, nil
+	}
+	args := make([]Expr, 0, 1)
+	for {
+		arg, _, err := p.parseScalarExpr()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, arg)
+		if ok, err := p.maybe(tokComma); err != nil || !ok {
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+	if _, err := p.expect(tokRParen); err != nil {
+		return nil, err
+	}
+	return &FuncCall{Name: funcName, Args: args}, nil
+}
+
+// parseOptionalAlias accepts an optional alias after an expression or table reference.
+// `as` makes the next token a name unconditionally; without `as`, a bare ident is taken as an
+// alias unless it is one of `stops` (the keywords that legitimately follow at this site).
+func (p *parser) parseOptionalAlias(stops ...string) (string, error) {
+	ok, err := p.maybeWord("as")
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return p.parseName()
+	}
+	tok, err := p.peek()
+	if err != nil || tok.typ != tokIdent || tok.quoted {
+		return "", err
+	}
+	for _, s := range stops {
+		if tok.lit == s {
+			return "", nil
+		}
+	}
+	_, _ = p.next()
+	return tok.lit, nil
+}
+
+// Stop sets used at each alias call site.
+var (
+	aliasStopsTable  = []string{"join", "inner", "left", "right", "full", "outer", "on", "where", "group", "having", "order", "limit", "offset"}
+	aliasStopsColumn = []string{"from"}
+)
+
+func (p *parser) parseOptionalWhere() (Expr, error) {
+	ok, err := p.maybeWord("where")
+	if err != nil || !ok {
+		return nil, err
+	}
+	return p.parsePredicateOr()
+}
+
+func (p *parser) parseOptionalHaving() (Expr, error) {
+	ok, err := p.maybeWord("having")
+	if err != nil || !ok {
+		return nil, err
+	}
+	return p.parsePredicateOr()
+}
+
+func (p *parser) parsePredicateAfterLeft(left Expr) (Expr, error) {
+	if ok, err := p.maybeWord("between"); err != nil || ok {
+		if err != nil {
+			return nil, err
+		}
+		low, _, err := p.parseScalarExpr()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectWord("and"); err != nil {
+			return nil, err
+		}
+		high, _, err := p.parseScalarExpr()
+		if err != nil {
+			return nil, err
+		}
+		return &BetweenExpr{Expr: left, Low: low, High: high}, nil
+	}
+
+	inNot := false
+	if ok, err := p.maybeWord("not"); err != nil {
+		return nil, err
+	} else if ok {
+		inNot = true
+	}
+	if ok, err := p.maybeWord("in"); err != nil || ok {
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tokLParen); err != nil {
+			return nil, err
+		}
+		values := make([]Expr, 0, 2)
+		for {
+			value, _, err := p.parseScalarExpr()
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, value)
+			if ok, err := p.maybe(tokComma); err != nil || !ok {
+				if err != nil {
+					return nil, err
+				}
+				break
+			}
+		}
+		if _, err := p.expect(tokRParen); err != nil {
+			return nil, err
+		}
+		return &InExpr{Expr: left, Values: values, Not: inNot}, nil
+	} else if inNot {
+		tok, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		return nil, p.errorAt(tok, "expected IN after NOT")
+	}
+
+	if ok, err := p.maybe(tokNotEqual); err != nil || ok {
+		if err != nil {
+			return nil, err
+		}
+		right, _, err := p.parseScalarExpr()
+		if err != nil {
+			return nil, err
+		}
+		return &BinaryExpr{Left: left, Op: BinaryNotEqual, Right: right}, nil
+	}
+
+	if op, ok, err := p.parseComparisonOp(); err != nil || ok {
+		if err != nil {
+			return nil, err
+		}
+		right, _, err := p.parseScalarExpr()
+		if err != nil {
+			return nil, err
+		}
+		return &BinaryExpr{Left: left, Op: op, Right: right}, nil
+	}
+
+	if _, err := p.expect(tokEqual); err != nil {
+		return nil, err
+	}
+	right, _, err := p.parseScalarExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	return &BinaryExpr{Left: left, Op: BinaryEqual, Right: right}, nil
+}
+
+func (p *parser) parseComparisonOp() (BinaryOp, bool, error) {
+	if ok, err := p.maybe(tokLess); err != nil || ok {
+		return BinaryLess, ok, err
+	}
+	if ok, err := p.maybe(tokLessEqual); err != nil || ok {
+		return BinaryLessEqual, ok, err
+	}
+	if ok, err := p.maybe(tokGreater); err != nil || ok {
+		return BinaryGreater, ok, err
+	}
+	if ok, err := p.maybe(tokGreaterEqual); err != nil || ok {
+		return BinaryGreaterEqual, ok, err
+	}
+	return BinaryEqual, false, nil
+}
+
+func (p *parser) parseOptionalGroupBy() ([]Expr, error) {
+	ok, err := p.maybeWord("group")
+	if err != nil || !ok {
+		return nil, err
+	}
+	if err := p.expectWord("by"); err != nil {
+		return nil, err
+	}
+	keys := make([]Expr, 0, 1)
+	for {
+		expr, _, err := p.parseScalarExpr()
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, expr)
+		if ok, err := p.maybe(tokComma); err != nil || !ok {
+			return keys, err
+		}
+	}
+}
+
+func (p *parser) parseOptionalOrderBy() ([]OrderExpr, error) {
+	ok, err := p.maybeWord("order")
+	if err != nil || !ok {
+		return nil, err
+	}
+	if err := p.expectWord("by"); err != nil {
+		return nil, err
+	}
+	orderBy := make([]OrderExpr, 0, 1)
+	for {
+		tok, err := p.peek()
+		if err != nil {
+			return nil, err
+		}
+		expr, name, err := p.parseScalarExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := expr.(*Literal); ok {
+			return nil, p.errorAt(tok, "expected identifier")
+		}
+		desc := false
+		if ok, err := p.maybeWord("asc"); err != nil || ok {
+			orderBy = append(orderBy, OrderExpr{Name: name, Expr: expr, Desc: desc})
+			if err != nil {
+				return nil, err
+			}
+			if ok, err := p.maybe(tokComma); err != nil || !ok {
+				if err != nil {
+					return nil, err
+				}
+				return orderBy, nil
+			}
+			continue
+		}
+		if ok, err := p.maybeWord("desc"); err != nil || ok {
+			if err != nil {
+				return nil, err
+			}
+			desc = true
+		}
+		orderBy = append(orderBy, OrderExpr{Name: name, Expr: expr, Desc: desc})
+		if ok, err := p.maybe(tokComma); err != nil || !ok {
+			if err != nil {
+				return nil, err
+			}
+			return orderBy, nil
+		}
+	}
+}
+
+func (p *parser) parseOptionalLimit() (*int64, error) {
+	return p.parseOptionalIntClause("limit")
+}
+
+func (p *parser) parseOptionalOffset() (*int64, error) {
+	return p.parseOptionalIntClause("offset")
+}
+
+func (p *parser) parseOptionalIntClause(word string) (*int64, error) {
+	ok, err := p.maybeWord(word)
+	if err != nil || !ok {
+		return nil, err
+	}
+	tok, err := p.expect(tokInt)
+	if err != nil {
+		return nil, err
+	}
+	limit, err := strconv.ParseInt(tok.lit, 10, 64)
+	if err != nil {
+		return nil, p.errorAt(tok, "invalid integer literal")
+	}
+	return &limit, nil
+}
+
