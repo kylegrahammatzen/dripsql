@@ -1,5 +1,7 @@
 // Shared expression helpers used by DML and (later) scan-projection pruning to discover
-// which columns a BoundExpr references. Output is sorted so callers get deterministic order.
+// which columns a BoundExpr references. addExprColumns mutates the caller's set so update
+// and delete avoid the sort+slice round-trip; exprColumnNames keeps a sorted wrapper for
+// callers that genuinely need deterministic order.
 package engine
 
 import (
@@ -9,19 +11,19 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
+func addExprColumns(seen map[string]struct{}, expr sql.BoundExpr) {
+	if expr.Op == sql.ExprColumn {
+		seen[types.NormalizeName(expr.Column)] = struct{}{}
+		return
+	}
+	for _, a := range expr.Args {
+		addExprColumns(seen, a)
+	}
+}
+
 func exprColumnNames(expr sql.BoundExpr) []string {
 	seen := make(map[string]struct{})
-	var walk func(e sql.BoundExpr)
-	walk = func(e sql.BoundExpr) {
-		if e.Op == sql.ExprColumn {
-			seen[types.NormalizeName(e.Column)] = struct{}{}
-			return
-		}
-		for _, a := range e.Args {
-			walk(a)
-		}
-	}
-	walk(expr)
+	addExprColumns(seen, expr)
 	out := make([]string, 0, len(seen))
 	for n := range seen {
 		out = append(out, n)

@@ -100,36 +100,35 @@ type updatePlan struct {
 type updateCol struct {
 	def       sql.BoundColumnDef
 	decodeIdx int
-	assign    *sql.BoundAssignment
+	value     sql.Value
+	assigned  bool
 }
 
 func buildUpdatePlan(plan *sql.Plan) (*updatePlan, error) {
 	tableDefs := plan.Table.Columns
-	assigned := make([]*sql.BoundAssignment, len(tableDefs))
+	tableIdx := make(map[string]int, len(tableDefs))
+	for i, d := range tableDefs {
+		tableIdx[types.NormalizeName(d.Name)] = i
+	}
+
+	assigned := make([]bool, len(tableDefs))
+	values := make([]sql.Value, len(tableDefs))
 	for i := range plan.Assignments {
 		a := &plan.Assignments[i]
-		idx := -1
-		want := types.NormalizeName(a.Column.Name)
-		for ti, d := range tableDefs {
-			if types.NormalizeName(d.Name) == want {
-				idx = ti
-				break
-			}
-		}
-		if idx < 0 {
+		idx, ok := tableIdx[types.NormalizeName(a.Column.Name)]
+		if !ok {
 			return nil, fmt.Errorf("update: assigned column %q not in table", a.Column.Name)
 		}
-		assigned[idx] = a
+		assigned[idx] = true
+		values[idx] = a.Value
 	}
 
 	need := make(map[string]struct{})
 	if plan.Where != nil {
-		for _, n := range exprColumnNames(*plan.Where) {
-			need[n] = struct{}{}
-		}
+		addExprColumns(need, *plan.Where)
 	}
 	for ti, d := range tableDefs {
-		if assigned[ti] == nil {
+		if !assigned[ti] {
 			need[types.NormalizeName(d.Name)] = struct{}{}
 		}
 	}
@@ -146,13 +145,9 @@ func buildUpdatePlan(plan *sql.Plan) (*updatePlan, error) {
 	}
 
 	for ti, d := range tableDefs {
-		col := updateCol{def: d, decodeIdx: -1, assign: assigned[ti]}
-		if assigned[ti] == nil {
-			decodeIdx, ok := decodeIdxByName[types.NormalizeName(d.Name)]
-			if !ok {
-				return nil, fmt.Errorf("update: unassigned column %q missing from decode set", d.Name)
-			}
-			col.decodeIdx = decodeIdx
+		col := updateCol{def: d, decodeIdx: -1, assigned: assigned[ti], value: values[ti]}
+		if !col.assigned {
+			col.decodeIdx = decodeIdxByName[types.NormalizeName(d.Name)]
 		}
 		up.cols[ti] = col
 	}
@@ -303,8 +298,8 @@ func allocUpdateCols(up *updatePlan, rows int) ([]types.Column, error) {
 		// determined at allocation time: null assignment leaves the all-invalid zero
 		// bitmap, non-null nullable gets all-valid up front. Unassigned columns let
 		// CopyVecRow lazily allocate.
-		if c.assign != nil {
-			if c.assign.Value.Kind == sql.ValueNull {
+		if c.assigned {
+			if c.value.Kind == sql.ValueNull {
 				v.Valid = make(types.Validity, types.ValidityWords(rows))
 			} else if c.def.Nullable {
 				v.Valid = types.NewAllValid(rows)
@@ -328,11 +323,11 @@ func (b *updateBuffer) reset() error {
 func (b *updateBuffer) appendRow(src types.Batch, srcRow int) error {
 	dst := b.rows
 	for i, c := range b.plan.cols {
-		if c.assign != nil {
-			if c.assign.Value.Kind == sql.ValueNull {
+		if c.assigned {
+			if c.value.Kind == sql.ValueNull {
 				continue
 			}
-			if err := writeAssignedRow(&b.cols[i].V, b.cols[i].V.Kind, c, dst); err != nil {
+			if err := writeAssignedRow(&b.cols[i].V, b.cols[i].V.Kind, c.value, dst); err != nil {
 				return err
 			}
 			continue
@@ -345,29 +340,20 @@ func (b *updateBuffer) appendRow(src types.Batch, srcRow int) error {
 	return nil
 }
 
+// materialize returns the buffered batch without a second copy. allocUpdateCols sized each
+// Vec at StandardBatchRows; setting Len to the actual row count makes the existing buffer
+// the output. reset allocates a fresh buffer for the next chunk so callers never see
+// overwrites after WriteSegment retains references.
 func (b *updateBuffer) materialize() (types.Batch, error) {
 	out := make([]types.Column, len(b.cols))
-	for i, src := range b.cols {
-		vk, err := types.VecKindOf(src.Type)
-		if err != nil {
-			return types.Batch{}, err
-		}
-		v, err := types.NewVecForKind(vk, b.rows)
-		if err != nil {
-			return types.Batch{}, err
-		}
-		for r := range b.rows {
-			if err := types.CopyVecRow(src.V, r, &v, r); err != nil {
-				return types.Batch{}, err
-			}
-		}
-		out[i] = types.Column{Name: src.Name, Type: src.Type, EnumLabels: src.EnumLabels, V: v}
+	for i, c := range b.cols {
+		c.V.Truncate(b.rows)
+		out[i] = c
 	}
 	return types.NewBatch(out)
 }
 
-func writeAssignedRow(v *types.Vec, vk types.VecKind, c updateCol, row int) error {
-	val := c.assign.Value
+func writeAssignedRow(v *types.Vec, vk types.VecKind, val sql.Value, row int) error {
 	switch vk {
 	case types.VecBool:
 		if val.Bool {

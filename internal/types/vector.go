@@ -139,6 +139,20 @@ func (v *Vec) UUID() []UUID16   { return vecSlice[UUID16](v) }
 func (v *Vec) BoolBits() []byte { return vecBytes(v, (int(v.Len)+7)/8) }
 func (v *Vec) Var() *VarBytes   { return (*VarBytes)(v.data) }
 
+// Truncate shrinks the logical row count of v to rows. Fixed-width vectors just lower Len;
+// varbytes additionally slice the views slice so VarBytes.Rows() agrees with Vec.Len. Caller
+// is responsible for ensuring rows <= current Len.
+func (v *Vec) Truncate(rows int) {
+	if rows < 0 || rows > int(v.Len) {
+		return
+	}
+	v.Len = int32(rows)
+	if v.Kind.FixedWidth() == WidthVarBytes && v.data != nil {
+		vb := (*VarBytes)(v.data)
+		vb.views = vb.views[:rows]
+	}
+}
+
 func (v Vec) FixedBytes() []byte {
 	w := v.Kind.FixedWidth()
 	if w <= 0 {
