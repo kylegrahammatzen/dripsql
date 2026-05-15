@@ -31,6 +31,7 @@ type Segment struct {
 	DV        types.Validity
 	DictHists DictHistograms
 	IntBlooms IntBlooms
+	NumSums   NumericSums
 }
 
 func (s *Segment) Path() string { return s.path }
@@ -86,7 +87,12 @@ func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
 		f.Close()
 		return nil, fmt.Errorf("OpenSegment: load bloom: %w", err)
 	}
-	return &Segment{f: f, path: path, bodyEnd: bodyEnd, Cols: cols, DV: dv, DictHists: hist, IntBlooms: blooms}, nil
+	sums, err := LoadNumericSums(path)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("OpenSegment: load numeric sums: %w", err)
+	}
+	return &Segment{f: f, path: path, bodyEnd: bodyEnd, Cols: cols, DV: dv, DictHists: hist, IntBlooms: blooms, NumSums: sums}, nil
 }
 
 const knownPageFlags = PageFlagAllValid | PageFlagAllNull | PageFlagInMembership | PageFlagEncodedEvalOK

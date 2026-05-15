@@ -1,5 +1,5 @@
-// Per-segment Bloom filter sidecar for int equality. Built at seal time, consulted by
-// boundEqInt64.PruneSegment. Bloom only proves absence; false positives fall through.
+// Sidecar Bloom filter per int column. Proves absence for `WHERE col = N` when the
+// value lies inside min/max; false positives fall through to the regular scan.
 package storage
 
 import (

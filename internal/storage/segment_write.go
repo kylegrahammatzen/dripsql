@@ -64,6 +64,9 @@ func WriteSegmentWithCodecs(path string, pages []types.Batch, codecs map[string]
 	if blooms := buildIntBlooms(pages); blooms != nil {
 		_ = writeBloomSidecar(path, blooms)
 	}
+	if sums := buildNumericSums(pages); sums != nil {
+		_ = writeNumericSumSidecar(path, sums)
+	}
 	return nil
 }
 

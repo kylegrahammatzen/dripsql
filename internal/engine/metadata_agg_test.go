@@ -32,6 +32,8 @@ func TestEngine_MetadataAggregate_CountStarAndMinMax(t *testing.T) {
 		{"SELECT max(age) FROM u", int32(11)},
 		{"SELECT min(id) FROM u", int64(1)},
 		{"SELECT max(id) FROM u", int64(6)},
+		{"SELECT sum(age) FROM u", int64(36)},
+		{"SELECT sum(id) FROM u", int64(21)},
 	}
 	for _, c := range cases {
 		rows, err := db.Query(ctx, c.sql)

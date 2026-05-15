@@ -1,5 +1,5 @@
-// Dict-histogram sidecar for GROUP BY count SMA on varbytes columns. Built at seal
-// time, loaded at segment open, consulted by engine.tryGroupByDictHistogram.
+// Sidecar map[value]rowCount per varbytes column. Backs `<col>, count(*) GROUP BY <col>`
+// without decoding pages. Skipped past 4096 distinct values per column.
 package storage
 
 import (

@@ -166,6 +166,12 @@ func computeMetadataAggregate(a sql.AggSpec, scan *sql.Rel, segs []*storage.Segm
 			return nil, false, fmt.Errorf("metadata aggregate: column id %d not in scan", a.ArgColumn)
 		}
 		return mergeMinMax(segs, col.Name, col.Type.Kind, a.Func == sql.AggregateMax)
+	case sql.AggregateSum:
+		col, ok := scanColumnDefByID(scan, a.ArgColumn)
+		if !ok {
+			return nil, false, fmt.Errorf("metadata aggregate: column id %d not in scan", a.ArgColumn)
+		}
+		return mergeSum(segs, col)
 	}
 	return nil, false, nil
 }
@@ -229,6 +235,39 @@ func mergeMinMax(segs []*storage.Segment, name string, kind types.Kind, wantMax 
 		return narrowInt(max64, kind), true, nil
 	}
 	return narrowInt(min64, kind), true, nil
+}
+
+func mergeSum(segs []*storage.Segment, col sql.BoundColumnDef) (any, bool, error) {
+	switch col.Type.Kind {
+	case types.KindInt16, types.KindInt32, types.KindInt64, types.KindDate, types.KindTimestamp, types.KindTime, types.KindDecimal:
+	default:
+		return nil, false, nil
+	}
+	name := types.NormalizeName(col.Name)
+	var total int64
+	for _, seg := range segs {
+		s, ok := seg.NumSums[name]
+		if !ok {
+			return nil, false, nil
+		}
+		if addOverflows(total, s.Sum) {
+			return nil, false, nil
+		}
+		total += s.Sum
+	}
+	return total, true, nil
+}
+
+func addOverflows(a, b int64) bool {
+	const maxI64 = int64(^uint64(0) >> 1)
+	const minI64 = -maxI64 - 1
+	if b > 0 && a > maxI64-b {
+		return true
+	}
+	if b < 0 && a < minI64-b {
+		return true
+	}
+	return false
 }
 
 func segColInt64MinMax(c *storage.SegmentColumn) (int64, int64, bool) {
