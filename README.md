@@ -6,13 +6,13 @@ will change.
 
 ## Layout
 
-- `cmd/cli` — admin shell (`version`, `exec`, `query`).
-- `cmd/bench` — workload benchmark driver.
-- `internal/engine` — DB lifecycle, query/exec, EXPLAIN.
-- `internal/storage` — immutable columnar segments, predicate pushdown.
-- `internal/sql` — parser, binder, logical plan.
-- `internal/exec` — pull-based vector operators (scan/filter/aggregate/project/sort/limit/hashjoin).
-- `internal/types` — table specs, typed batches, and vectors.
+- `cmd/cli` is the single-shot SQL runner (`-db <path> -exec <sql>`).
+- `cmd/bench` is the workload benchmark driver.
+- `internal/engine` owns DB lifecycle, plan dispatch, INSERT/UPDATE/DELETE, the query runner, and the segment open cache.
+- `internal/storage` owns immutable columnar segments, the manifest with atomic transaction records, deletion vectors, and predicate plus top-K page pruning.
+- `internal/sql` owns the lexer, parser, binder, unified `Plan` + `Rel` IR, and plan cache.
+- `internal/exec` owns the pull-based vector operators (scan, filter, project, aggregate, sort, limit, hash join).
+- `internal/types` owns table specs, typed batches, vectors, validity bitmaps, and selection masks.
 
 ## Tests
 
@@ -24,101 +24,100 @@ go test -count=1 ./...
 
 ## Benchmarks
 
-All benchmark commands assume `AMD Ryzen 7 3700X` / `Windows amd64`. Numbers shift on other hardware; the relative shape (and the comparisons in tables below) holds.
+All numbers below were captured on `AMD Ryzen 7 3700X` / `Windows amd64` /
+`go1.26.0`, and shift on other hardware while the relative shape holds.
 
-Use longer `-benchtime` and higher `-count` for noisy paths.
-
-### Codec benchmarks (single page, 2048 rows)
-
-```
-go test ./internal/storage/codec -run ^$ -bench . -benchmem -benchtime=1s -count=1
-```
-
-Snapshot (2026-05-11):
-
-| Bench | ns/op | allocs |
-| --- | --- | --- |
-| `PlainDecodeInt64/DecodeInto_reuse` | 165 | 0 |
-| `PlainEncodeInt64/EncodeInto_reuse` | 309 | 0 |
-| `PlainDecodeText` | 913 | 0 |
-| `PlainEncodeText` | 1,461 | 0 |
-| `DictionaryDecodeText/DecodeInto_reuse` | 48 | 0 |
-| `DictionaryEncodeText` (`EncodeInto` only) | 78 | 0 |
-| `FORBitPackDecodeInt64` (widths 10-31) | 1,300-2,600 | 0 |
-| `FORBitPackEncodeInt64` (widths 10-31) | ~9,000 | 0 |
-| `ConstantDecodeInt64` | 964 | 0 |
-| `FlatePrepareText` (klauspost) | 395,000 | 24 |
-| `FlateDecodeText` (klauspost) | 258,000 | 71 |
-| `ZstdPrepareText` | 224,000 | 4 |
-| `ZstdDecodeText` | 81,000 | 1 |
-
-### Segment scan benchmarks (131,072 rows, full segment)
+### Exec microbenchmarks
 
 ```
-go test ./internal/storage -run ^$ -bench BenchmarkStorageReadSegmentDecode -benchtime=3s -count=1
+go test ./internal/exec -bench=. -benchmem -run=^$ -count=1
 ```
 
-Snapshot (2026-05-11):
+Snapshot:
 
-| Bench | ns/op | rows/s | allocs/op |
+| Bench | ns/op | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `all_columns` | 21.7 ms | 6.0 M | 796 |
-| `flat_text` (high-cardinality, compressed) | 20.2 ms | 6.5 M | 798 |
-| `encoded_numeric` (FOR/Constant) | 1.9 ms | 70 M | 128 |
-| `dictionary_text` | 1.0 ms | 129 M | 128 |
+| `Filter_Int64Less` | 2841 | 256 | 1 |
+| `Filter_Int64Between` | 3465 | 256 | 1 |
+| `Filter_Int64AndCompound` | 5247 | 512 | 2 |
+| `Filter_Int64Equal` | 2650 | 256 | 1 |
+| `Sort_FullAsc_Int64_10k` | 1.54 ms | 252 K | 38 |
+| `Sort_FullDesc_Int64_10k` | 1.43 ms | 252 K | 38 |
+| `Sort_TopK_Int64_10k_K100` | 149 us | 7.7 K | 17 |
+| `Sort_TopK_Int64_100k_K100` | 989 us | 29.6 K | 64 |
+| `Sort_TopK_Int64_100k_K100_Off50` | 1.03 ms | 31.0 K | 64 |
+| `Sort_TopK_Int64_100k_K100_NullsEvery10` | 1.02 ms | 29.6 K | 64 |
+| `Sort_FullAsc_Text_10k` | 6.72 ms | 2.48 MB | 30 059 |
+
+Streaming top-K stays bounded at `K+Offset` regardless of N. The text full-sort
+is the known slow path. It goes through a boxed `any` comparator. No production
+workload exercises it today.
 
 ### Workload benchmark
 
-End-to-end query workload via the bench driver:
-
 ```
-go run ./cmd/bench -rows 10000000 -segment-rows 2097152 -profile structured -runs 50
+go run ./cmd/bench -query <name> -rows <N> -runs <R> -mode hot -json
 ```
 
-Snapshot (2026-05-12), `structured` profile, 10M rows, 2M-row segments, `sort_by = 'tenant_id'`:
+Flags: `-query` picks one of the cataloged queries (`go run ./cmd/bench list`),
+`-rows` sizes the synthetic `users` dataset, `-runs` is the timed-run count,
+`-mode` is one of `hot`, `cold-soft` (close+reopen DB between runs), or
+`cold-hard` (also drops the OS page cache, needs root/admin).
 
-| Query | best | strategy |
-| --- | --- | --- |
-| `SELECT count(*) WHERE event_type = 'checkout'` | 45 µs | text summary + metadata count |
-| `SELECT event_type, count(*) GROUP BY event_type` | 5 µs | metadata group |
-| `SELECT status, count(*) GROUP BY status` | 4 µs | metadata group |
-| `SELECT count(*) WHERE path = '/checkout/confirm'` | 27 µs | text summary prune |
-| `SELECT count(*), sum(amount), min(amount), max(amount)` | 6 µs | metadata aggregates |
-| `SELECT country, count(*), sum(amount) GROUP BY country` | 4 µs | per-segment SMA |
-| `SELECT count(*) WHERE tenant_id = 42 AND event_type = 'checkout'` | 168 µs | min/max + value prune (sort_by) |
-| `SELECT count(*) WHERE tenant_id = 999999` | 3 µs | min/max + value prune (sort_by) |
-| `SELECT sum(amount) WHERE tenant_id = 42 AND event_type = 'checkout'` | 168 µs | min/max + value prune (sort_by) |
-| `SELECT country, count(*) WHERE event_type = 'checkout' GROUP BY country` | 6 µs | cross-count SMA |
-| `SELECT count(*) WHERE user_id = 778` | 170 µs | min/max + value prune (int bloom) |
-| `SELECT count(*) WHERE created_at = ...` | 168 µs | min/max + value prune (int bloom) |
-| `SELECT count(*) WHERE event_uuid = '...'` | 174 µs | uuid summary prune |
-| `SELECT count(*) WHERE url = '...'` | 253 µs | text summary prune |
+Snapshot (hot mode, median ms across timed runs):
 
-Every query is sub-millisecond on this profile.
+| Query | Rows | Runs | Median (ms) | io | decode | exec |
+| --- | --- | --- | --- | --- | --- | --- |
+| `count` | 100k | 200 | 5.96 | 1.37 | 3.32 | 1.28 |
+| `id_lookup` | 100k | 200 | 5.02 | 1.09 | 2.89 | 1.03 |
+| `category_groupby` | 100k | 100 | 11.77 | 1.05 | 1.73 | 9.00 |
+| `category_groupby` | 10M | 10 | 1129 | 93.95 | 149.15 | 886.02 |
+| `top_age` | 100k | 200 | 6.37 | 1.20 | 3.52 | 1.64 |
+| `top_age` | 1M | 50 | 50.07 | 9.76 | 29.48 | 10.84 |
+| `top_age` | 10M | 10 | 514.60 | 97.58 | 285.38 | 131.64 |
 
-Four query modes decompose the latency picture:
-
-- `same-process`: everything warm in the running process.
-- `warm-reopen`: DB closed and reopened once before the timed samples.
-- `byte-cold`: DB stays open; the in-process byte cache is cleared between samples.
-- `cold-ish`: DB closed and reopened between every sample.
-
-On this profile, `user id lookup` cold-ish lands at **~30 ms best / ~40 ms avg** at 5-segment scale (10M rows, 2M-row segments). Scaling up to 100M rows (763 default-sized segments) puts cold-ish at **~180 ms best / ~210 ms avg** after the lazy-column-decode pass (down from ~465 ms / ~490 ms when every footer eagerly allocated heavy fields). Cold-ish cost is in the open path, not the query path: `byte-cold` for the same query is 100–200 µs, which is the actual query-and-byte-cache-miss work.
-
-OS file cache is not dropped (no portable way without admin), so cold-ish still measures "first query after process restart" rather than truly cold disk.
-
-Full usage in [`cmd/bench/README.md`](cmd/bench/README.md). The driver exercises segment build, predicate pushdown, and aggregate execution end-to-end.
-
-These are reference points, not regression gates. Re-baseline with `-count=5` or higher for any comparison work.
+The harness also prints min / p95 / max / mean / stddev. These are reference
+points, not regression gates.
 
 ## CLI
 
 ```
-go run ./cmd/cli version
-go run ./cmd/cli exec <db> "CREATE TABLE events (id INT64 NOT NULL)"
-go run ./cmd/cli query <db> "SELECT count(*) FROM events"
-go run ./cmd/cli query <db> "EXPLAIN ANALYZE SELECT count(*) FROM events WHERE id = 42"
+go run ./cmd/cli -db <path> -exec "CREATE TABLE events (id INT64 NOT NULL)"
+go run ./cmd/cli -db <path> -exec "INSERT INTO events (id) VALUES (1),(2),(42)"
+go run ./cmd/cli -db <path> -exec "SELECT count(*) FROM events"
 ```
+
+One SQL string per invocation. `-db` is required. The directory is created
+if missing.
+
+## Feature coverage
+
+What the engine currently supports versus what's still on the list:
+
+| Area | Status | Notes |
+| --- | --- | --- |
+| Columnar segments, per-column + per-page min/max | yes | |
+| Codecs (plain, dictionary, constant, FOR+BitPack, delta+BitPack, Flate, Zstd) | yes | Cascade chooses by encoded size |
+| 15 types (numeric, text, bytes, UUID, date/time/timestamp, JSON, enum) | yes | |
+| Validity bitmaps, null-aware filter/sort/aggregate | yes | |
+| SQL parser, binder, plan + rel IR, plan cache | yes | |
+| Pull-based vectorized operators (scan/filter/aggregate/project/sort/limit) | yes | |
+| Hash join (inner/left/right/full) | yes | maphash-keyed probe |
+| INSERT, UPDATE, DELETE | yes | UPDATE/DELETE atomic via versioned DV + manifest transaction record |
+| Top-K page pruning (single-column ORDER BY ... LIMIT) | yes | Sound: only prunes pages strictly dominated by others |
+| Streaming top-K with bounded heap | yes | `K+Offset` items, no `O(N)` materialization |
+| Segment handle cache | yes | DB-level, keyed by `(path, dvPath)` |
+| EXPLAIN / EXPLAIN ANALYZE | no | Parser accepts it but engine rejects with `Query supports SELECT only` |
+| JSON path operators (`->`, `->>`) | partial | Parsed and bound but exec not wired |
+| Window functions, subqueries, CTEs | no | Not in grammar |
+| Bloom / Xor / Ribbon skip filters | no | |
+| Cross-column SMA (count/sum from metadata alone) | no | |
+| Parallel per-segment scans | no | |
+| Predicate-on-encoded execution | no | Predicates evaluate post-decode |
+| Lazy column-metadata decode | no | Full footer parsed at segment open |
+| Compaction / vacuum (for DV path) | no | UPDATE/DELETE already atomic, but DV files accumulate |
+| WAL, recovery, MVCC | no | Manifest lines carry a 32-bit checksum but no row-level durability story exists |
+| User-declared codecs in DDL | no | |
 
 ## License
 
