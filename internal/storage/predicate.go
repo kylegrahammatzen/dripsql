@@ -294,7 +294,13 @@ func (b boundEqInt64) PruneSegment(seg *Segment) bool {
 	if !stats.HasNonNull {
 		return false
 	}
-	return b.value < stats.Min || b.value > stats.Max
+	if b.value < stats.Min || b.value > stats.Max {
+		return true
+	}
+	if bloom, ok := seg.IntBlooms[types.NormalizeName(b.column)]; ok && !bloom.Contains(b.value) {
+		return true
+	}
+	return false
 }
 
 func (b boundEqInt64) PrunePage(seg *Segment, pageIdx int) bool {

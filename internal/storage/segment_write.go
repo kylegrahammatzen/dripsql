@@ -59,10 +59,13 @@ func WriteSegmentWithCodecs(path string, pages []types.Batch, codecs map[string]
 	if err := syncDir(filepath.Dir(path)); err != nil {
 		return err
 	}
-	// Dict histogram sidecar is best-effort: a failed write doesn't fail the segment,
-	// it just means the GROUP BY SMA falls back to the operator path for this segment.
+	// Sidecars are best-effort: a failed write doesn't fail the segment, the relevant
+	// metadata path just falls back to the operator scan for this segment.
 	if hist := buildDictHistograms(pages); hist != nil {
 		_ = writeDictHistogramSidecar(path, hist)
+	}
+	if blooms := buildIntBlooms(pages); blooms != nil {
+		_ = writeBloomSidecar(path, blooms)
 	}
 	return nil
 }

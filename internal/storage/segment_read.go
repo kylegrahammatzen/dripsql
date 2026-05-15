@@ -30,6 +30,7 @@ type Segment struct {
 	Cols      []SegmentColumn
 	DV        types.Validity
 	DictHists DictHistograms
+	IntBlooms IntBlooms
 }
 
 func (s *Segment) Path() string { return s.path }
@@ -80,7 +81,12 @@ func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
 		f.Close()
 		return nil, fmt.Errorf("OpenSegment: load dict histograms: %w", err)
 	}
-	return &Segment{f: f, path: path, bodyEnd: bodyEnd, Cols: cols, DV: dv, DictHists: hist}, nil
+	blooms, err := LoadIntBlooms(path)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("OpenSegment: load bloom: %w", err)
+	}
+	return &Segment{f: f, path: path, bodyEnd: bodyEnd, Cols: cols, DV: dv, DictHists: hist, IntBlooms: blooms}, nil
 }
 
 const knownPageFlags = PageFlagAllValid | PageFlagAllNull | PageFlagInMembership | PageFlagEncodedEvalOK
