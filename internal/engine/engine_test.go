@@ -705,4 +705,12 @@ func TestEngine_JSONPath(t *testing.T) {
 	if rows.Values[0][1].(string) != `["a","b"]` {
 		t.Fatalf("tags = %q", rows.Values[0][1])
 	}
+	rows = mustQuery(t, db, "SELECT payload -> 'user' -> 'name' AS name FROM events")
+	if got := rows.Values[0][0].(string); got != `"alice"` {
+		t.Fatalf("nested -> name = %q, want JSON-quoted \"alice\"", got)
+	}
+	rows = mustQuery(t, db, "SELECT payload -> 'tags' -> 1 AS t1 FROM events")
+	if got := rows.Values[0][0].(string); got != `"b"` {
+		t.Fatalf("array index -> 1 = %q, want \"b\"", got)
+	}
 }

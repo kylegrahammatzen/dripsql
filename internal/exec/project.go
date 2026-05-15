@@ -108,7 +108,8 @@ func materializeVec(ctx *evalCtx, expr sql.BoundExpr, sel *types.SelectionMask, 
 }
 
 func newComputedVec(vk types.VecKind, rows int) types.Vec {
-	if vk == types.VecText {
+	switch vk {
+	case types.VecText, types.VecBytes, types.VecJSON:
 		return types.NewVarVec(vk, rows, 0)
 	}
 	return types.NewVec(vk, rows)
@@ -137,12 +138,21 @@ func writeComputedRow(v *types.Vec, vk types.VecKind, row int, raw any) error {
 			bits := v.BoolBits()
 			bits[row>>3] |= 1 << (row & 7)
 		}
-	case types.VecText:
+	case types.VecText, types.VecJSON:
 		s, ok := raw.(string)
 		if !ok {
-			return fmt.Errorf("project: text column got %T", raw)
+			return fmt.Errorf("project: %v column got %T", vk, raw)
 		}
 		v.Var().AppendString(row, s)
+	case types.VecBytes:
+		switch b := raw.(type) {
+		case []byte:
+			v.Var().AppendBytes(row, b)
+		case string:
+			v.Var().AppendString(row, b)
+		default:
+			return fmt.Errorf("project: bytes column got %T", raw)
+		}
 	default:
 		return fmt.Errorf("project: computed kind %v not supported yet", vk)
 	}
