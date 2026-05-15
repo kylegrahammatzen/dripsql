@@ -99,26 +99,13 @@ func (a *AggregateOp) build() error {
 
 	a.specs = append(append([]sql.AggSpec{}, a.Aggregates...), a.Hidden...)
 	grouped := len(a.GroupBy) == 1
-
-	var groupIdx map[any]int
-	if grouped {
-		groupIdx = make(map[any]int)
-	} else {
+	if !grouped {
 		a.groups = append(a.groups, aggGroup{aggs: make([]aggAccum, len(a.specs))})
 	}
 
-	getGroup := func(key any) *aggGroup {
-		if !grouped {
-			return &a.groups[0]
-		}
-		idx, ok := groupIdx[key]
-		if !ok {
-			idx = len(a.groups)
-			groupIdx[key] = idx
-			a.groups = append(a.groups, aggGroup{key: key, aggs: make([]aggAccum, len(a.specs))})
-		}
-		return &a.groups[idx]
-	}
+	intIdx := map[int64]int{}
+	strIdx := map[string]int{}
+	anyIdx := map[any]int{}
 
 	var specCols []aggCol
 	groupCol := -1
@@ -152,36 +139,139 @@ func (a *AggregateOp) build() error {
 				specCols[i] = aggCol{idx: ci, vk: batch.Columns[ci].V.Kind}
 			}
 		}
-		var loopErr error
-		batch.Sel.IterSet(func(row int) {
-			if loopErr != nil {
-				return
+		if !grouped {
+			if err := a.aggregateBatchNoGroup(batch, specCols); err != nil {
+				return err
 			}
-			var key any
-			if grouped {
-				col := &batch.Columns[groupCol]
-				if col.V.Valid != nil && !col.V.Valid.IsValid(row) {
-					return
-				}
-				key = readGroupKey(col, groupKind, row)
-				if key == nil {
-					return
-				}
+			continue
+		}
+		col := &batch.Columns[groupCol]
+		switch groupKind {
+		case types.VecInt16, types.VecInt32, types.VecDate, types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+			if err := a.aggregateBatchIntKey(batch, col, groupKind, specCols, intIdx); err != nil {
+				return err
 			}
-			g := getGroup(key)
-			for i, spec := range a.specs {
-				if err := updateAccumFast(&g.aggs[i], &batch.Columns[max(specCols[i].idx, 0)], specCols[i], spec, row); err != nil {
-					loopErr = err
-					return
-				}
+		case types.VecText, types.VecBytes, types.VecJSON:
+			if err := a.aggregateBatchTextKey(batch, col, specCols, strIdx); err != nil {
+				return err
 			}
-		})
-		if loopErr != nil {
-			return loopErr
+		default:
+			if err := a.aggregateBatchAnyKey(batch, col, groupKind, specCols, anyIdx); err != nil {
+				return err
+			}
 		}
 	}
-
 	return nil
+}
+
+func (a *AggregateOp) updateRow(g *aggGroup, batch types.Batch, specCols []aggCol, row int) error {
+	for i, spec := range a.specs {
+		if err := updateAccumFast(&g.aggs[i], &batch.Columns[max(specCols[i].idx, 0)], specCols[i], spec, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *AggregateOp) aggregateBatchNoGroup(batch types.Batch, specCols []aggCol) error {
+	g := &a.groups[0]
+	var loopErr error
+	batch.Sel.IterSet(func(row int) {
+		if loopErr != nil {
+			return
+		}
+		if err := a.updateRow(g, batch, specCols, row); err != nil {
+			loopErr = err
+		}
+	})
+	return loopErr
+}
+
+func (a *AggregateOp) aggregateBatchIntKey(batch types.Batch, col *types.Column, vk types.VecKind, specCols []aggCol, idx map[int64]int) error {
+	valid := col.V.Valid
+	var loopErr error
+	batch.Sel.IterSet(func(row int) {
+		if loopErr != nil {
+			return
+		}
+		if valid != nil && !valid.IsValid(row) {
+			return
+		}
+		var key int64
+		switch vk {
+		case types.VecInt16:
+			key = int64(col.V.I16()[row])
+		case types.VecInt32, types.VecDate:
+			key = int64(col.V.I32()[row])
+		default:
+			key = col.V.I64()[row]
+		}
+		gIdx, ok := idx[key]
+		if !ok {
+			gIdx = len(a.groups)
+			idx[key] = gIdx
+			a.groups = append(a.groups, aggGroup{key: key, aggs: make([]aggAccum, len(a.specs))})
+		}
+		if err := a.updateRow(&a.groups[gIdx], batch, specCols, row); err != nil {
+			loopErr = err
+		}
+	})
+	return loopErr
+}
+
+// aggregateBatchTextKey is the hot path for `GROUP BY <text-col>`. The map index uses
+// string(byteSlice) which Go's compiler converts without allocation when used purely as a
+// map key. Allocation only happens on a miss when we materialize the key into the group.
+func (a *AggregateOp) aggregateBatchTextKey(batch types.Batch, col *types.Column, specCols []aggCol, idx map[string]int) error {
+	valid := col.V.Valid
+	vb := col.V.Var()
+	var loopErr error
+	batch.Sel.IterSet(func(row int) {
+		if loopErr != nil {
+			return
+		}
+		if valid != nil && !valid.IsValid(row) {
+			return
+		}
+		b := vb.Bytes(row)
+		gIdx, ok := idx[string(b)]
+		if !ok {
+			key := string(b)
+			gIdx = len(a.groups)
+			idx[key] = gIdx
+			a.groups = append(a.groups, aggGroup{key: key, aggs: make([]aggAccum, len(a.specs))})
+		}
+		if err := a.updateRow(&a.groups[gIdx], batch, specCols, row); err != nil {
+			loopErr = err
+		}
+	})
+	return loopErr
+}
+
+func (a *AggregateOp) aggregateBatchAnyKey(batch types.Batch, col *types.Column, vk types.VecKind, specCols []aggCol, idx map[any]int) error {
+	var loopErr error
+	batch.Sel.IterSet(func(row int) {
+		if loopErr != nil {
+			return
+		}
+		if col.V.Valid != nil && !col.V.Valid.IsValid(row) {
+			return
+		}
+		key := readGroupKey(col, vk, row)
+		if key == nil {
+			return
+		}
+		gIdx, ok := idx[key]
+		if !ok {
+			gIdx = len(a.groups)
+			idx[key] = gIdx
+			a.groups = append(a.groups, aggGroup{key: key, aggs: make([]aggAccum, len(a.specs))})
+		}
+		if err := a.updateRow(&a.groups[gIdx], batch, specCols, row); err != nil {
+			loopErr = err
+		}
+	})
+	return loopErr
 }
 
 type aggCol struct {
