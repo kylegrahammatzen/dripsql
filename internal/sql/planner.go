@@ -1571,11 +1571,18 @@ func applyOrderLimit(src *Rel, stmt *SelectStmt, outputs []BoundOutput, columns 
 		offset = *stmt.Offset
 	}
 
+	var keys []SortKey
 	if len(stmt.OrderBy) != 0 {
-		keys, err := bindSortKeys(stmt.OrderBy, outputs, columns)
+		bound, err := bindSortKeys(stmt.OrderBy, outputs, columns)
 		if err != nil {
 			return nil, err
 		}
+		keys = bound
+	}
+	if src.Op == RelScan {
+		narrowScanColumns(src, scanProjectionColumnIDs(outputs, keys, src.Where))
+	}
+	if len(keys) != 0 {
 		k, off := int64(0), int64(0)
 		if hasLimit && limit >= 0 {
 			k = limit
@@ -1676,6 +1683,72 @@ func boundExprEqual(left BoundExpr, right BoundExpr) bool {
 		}
 	}
 	return true
+}
+
+// scanProjectionColumnIDs collects ColumnIDs referenced by the SELECT outputs,
+// ORDER BY keys, and WHERE predicate of a single-table scan tail. Used to
+// narrow a RelScan to only the columns the rest of the plan actually reads.
+func scanProjectionColumnIDs(outputs []BoundOutput, keys []SortKey, where *BoundExpr) []ColumnID {
+	seen := make(map[ColumnID]struct{})
+	ids := []ColumnID{}
+	var walk func(expr BoundExpr)
+	walk = func(expr BoundExpr) {
+		if expr.Op == ExprColumn {
+			id := expr.ColumnID
+			if id == 0 {
+				return
+			}
+			if _, ok := seen[id]; ok {
+				return
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+			return
+		}
+		for _, arg := range expr.Args {
+			walk(arg)
+		}
+	}
+	for _, o := range outputs {
+		walk(o.Expr)
+	}
+	for _, k := range keys {
+		walk(k.Expr)
+	}
+	if where != nil {
+		walk(*where)
+	}
+	return ids
+}
+
+// narrowScanColumns trims a RelScan's Columns and Outputs to the given set
+// while preserving table order. A nil or empty ids slice leaves the scan
+// untouched so callers do not have to guard against the no-reference case.
+func narrowScanColumns(rel *Rel, ids []ColumnID) {
+	if rel == nil || rel.Op != RelScan || len(ids) == 0 {
+		return
+	}
+	keep := make(map[ColumnID]struct{}, len(ids))
+	for _, id := range ids {
+		keep[id] = struct{}{}
+	}
+	cols := make([]ColumnID, 0, len(ids))
+	for _, id := range rel.Columns {
+		if _, ok := keep[id]; ok {
+			cols = append(cols, id)
+		}
+	}
+	if len(cols) == 0 || len(cols) == len(rel.Columns) {
+		return
+	}
+	outs := make([]BoundOutput, 0, len(cols))
+	for _, o := range rel.Outputs {
+		if _, ok := keep[o.Expr.ColumnID]; ok {
+			outs = append(outs, o)
+		}
+	}
+	rel.Columns = cols
+	rel.Outputs = outs
 }
 
 func allColumnIDs(columns []BoundColumnDef) []ColumnID {
