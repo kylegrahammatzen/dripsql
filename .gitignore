@@ -4,4 +4,6 @@
 *.prof
 *.out
 db/
+bench-db/
 *.pprof
+*.exe
