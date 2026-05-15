@@ -31,7 +31,7 @@ func buildNumericSums(pages []types.Batch) NumericSums {
 	}
 	out := NumericSums{}
 	for ci, col := range pages[0].Columns {
-		if !bloomEligibleKind(col.V.Kind) {
+		if !kindEligibleForIntFilter(col.V.Kind) {
 			continue
 		}
 		var sum int64

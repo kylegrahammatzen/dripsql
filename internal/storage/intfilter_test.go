@@ -1,28 +1,34 @@
-// Bloom filter correctness + prune path: filter accepts every inserted key, rejects
-// keys absent from the segment, and boundEqInt64.PruneSegment uses the filter when the
-// value lies within column min/max but is not in the segment.
+// Binary Fuse filter correctness + prune path: filter reports presence for every inserted
+// key, rejects keys absent from the segment, and boundEqInt64.PruneSegment uses it when
+// the value lies inside column min/max but is not in the segment.
 package storage
 
 import (
 	"path/filepath"
 	"testing"
 
+	"github.com/FastFilter/xorfilter"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-func TestIntBloom_NoFalseNegatives(t *testing.T) {
-	b := newIntBloom(1000)
-	for i := int64(0); i < 1000; i++ {
-		b.Add(i * 7)
+func TestIntFilter_NoFalseNegatives(t *testing.T) {
+	keys := make([]uint64, 0, 1000)
+	for i := range 1000 {
+		keys = append(keys, uint64(i)*7)
 	}
-	for i := int64(0); i < 1000; i++ {
-		if !b.Contains(i * 7) {
-			t.Fatalf("Bloom missed inserted key %d", i*7)
+	fuse, err := xorfilter.PopulateBinaryFuse8(keys)
+	if err != nil {
+		t.Fatalf("populate: %v", err)
+	}
+	f := &IntFilter{fuse: fuse}
+	for _, k := range keys {
+		if !f.Contains(int64(k)) {
+			t.Fatalf("Binary Fuse missed inserted key %d", k)
 		}
 	}
 }
 
-func TestBoundEqInt64_PruneSegment_UsesBloomWhenInRange(t *testing.T) {
+func TestBoundEqInt64_PruneSegment_UsesIntFilterWhenInRange(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "seg.dsv4")
 	v := types.NewVec(types.VecInt64, 100)
@@ -43,12 +49,12 @@ func TestBoundEqInt64_PruneSegment_UsesBloomWhenInRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer seg.Close()
-	blooms, err := seg.IntBloomFilters()
+	filters, err := seg.IntFilterSet()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if blooms == nil {
-		t.Fatal("expected bloom sidecar to be loaded")
+	if filters == nil {
+		t.Fatal("expected int filter sidecar to be loaded")
 	}
 
 	pred, err := BindPredicate(EqInt64{Column: "id", Value: 50}, SegmentSchema(seg))
@@ -56,7 +62,7 @@ func TestBoundEqInt64_PruneSegment_UsesBloomWhenInRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !pred.PruneSegment(seg) {
-		t.Fatalf("PruneSegment(id=50) should have pruned via Bloom (50 in [0, 9900] but not in segment)")
+		t.Fatalf("PruneSegment(id=50) should have pruned via Binary Fuse (50 in [0, 9900] but not in segment)")
 	}
 	pred, err = BindPredicate(EqInt64{Column: "id", Value: 100}, SegmentSchema(seg))
 	if err != nil {

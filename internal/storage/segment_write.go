@@ -61,8 +61,8 @@ func WriteSegmentWithCodecs(path string, pages []types.Batch, codecs map[string]
 	if hist := buildDictHistograms(pages); hist != nil {
 		_ = writeDictHistogramSidecar(path, hist)
 	}
-	if blooms := buildIntBlooms(pages); blooms != nil {
-		_ = writeBloomSidecar(path, blooms)
+	if filters := buildIntFilters(pages); filters != nil {
+		_ = writeIntFilterSidecar(path, filters)
 	}
 	if sums := buildNumericSums(pages); sums != nil {
 		_ = writeNumericSumSidecar(path, sums)

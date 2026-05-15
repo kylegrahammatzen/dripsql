@@ -35,9 +35,9 @@ type Segment struct {
 	dictHists     DictHistograms
 	dictHistsErr  error
 
-	intBloomsOnce sync.Once
-	intBlooms     IntBlooms
-	intBloomsErr  error
+	intFiltersOnce sync.Once
+	intFilters     IntFilters
+	intFiltersErr  error
 
 	numSumsOnce sync.Once
 	numSums     NumericSums
@@ -49,9 +49,9 @@ func (s *Segment) DictHistograms() (DictHistograms, error) {
 	return s.dictHists, s.dictHistsErr
 }
 
-func (s *Segment) IntBloomFilters() (IntBlooms, error) {
-	s.intBloomsOnce.Do(func() { s.intBlooms, s.intBloomsErr = LoadIntBlooms(s.path) })
-	return s.intBlooms, s.intBloomsErr
+func (s *Segment) IntFilterSet() (IntFilters, error) {
+	s.intFiltersOnce.Do(func() { s.intFilters, s.intFiltersErr = LoadIntFilters(s.path) })
+	return s.intFilters, s.intFiltersErr
 }
 
 func (s *Segment) NumericSums() (NumericSums, error) {

@@ -297,11 +297,11 @@ func (b boundEqInt64) PruneSegment(seg *Segment) bool {
 	if b.value < stats.Min || b.value > stats.Max {
 		return true
 	}
-	blooms, err := seg.IntBloomFilters()
+	filters, err := seg.IntFilterSet()
 	if err != nil {
 		return false
 	}
-	if bloom, ok := blooms[types.NormalizeName(b.column)]; ok && !bloom.Contains(b.value) {
+	if f, ok := filters[types.NormalizeName(b.column)]; ok && !f.Contains(b.value) {
 		return true
 	}
 	return false
