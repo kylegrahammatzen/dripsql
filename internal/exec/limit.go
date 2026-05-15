@@ -73,23 +73,14 @@ func (l *LimitOp) Next() (types.Batch, bool, error) {
 
 func (l *LimitOp) limitAllRows(batch types.Batch) (types.Batch, bool) {
 	rows := int64(batch.Len)
-	if l.seen+rows <= l.Offset {
+	start := max(int64(0), l.Offset-l.seen)
+	if start >= rows {
 		l.seen += rows
 		return types.Batch{}, false
 	}
-	start := int64(0)
-	if l.seen < l.Offset {
-		start = l.Offset - l.seen
-	}
 	take := rows - start
 	if l.N > 0 {
-		remaining := l.N - l.sent
-		if remaining <= 0 {
-			return types.Batch{}, false
-		}
-		if take > remaining {
-			take = remaining
-		}
+		take = min(take, l.N-l.sent)
 	}
 	if take <= 0 {
 		l.seen += rows
@@ -104,10 +95,7 @@ func (l *LimitOp) limitAllRows(batch types.Batch) (types.Batch, bool) {
 }
 
 func (l *LimitOp) limitSelectedRows(batch types.Batch) (types.SelectionMask, int64, int64) {
-	skip := l.Offset - l.seen
-	if skip < 0 {
-		skip = 0
-	}
+	skip := max(int64(0), l.Offset-l.seen)
 	take := int64(-1)
 	if l.N > 0 {
 		take = l.N - l.sent

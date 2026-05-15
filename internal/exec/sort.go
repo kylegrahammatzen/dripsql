@@ -1,6 +1,7 @@
 // SortOp buffers selected rows, sorts an index permutation by the bound keys, and emits
 // chunks of StandardBatchRows. K > 0 with a single int-like column key takes the streaming
-// top-K path: only K+Offset heap items live in memory at once.
+// top-K path: only K+Offset heap items live in sort metadata, though source batches are
+// still retained for materialization so total memory remains O(input payload).
 package exec
 
 import (
@@ -35,6 +36,7 @@ type SortOp struct {
 	nulls []uint64
 
 	slowRows []sortRow
+	slowKeys []any
 }
 
 type bufferedBatch struct {
@@ -55,7 +57,7 @@ type rowRef32 struct {
 type sortRow struct {
 	bufIdx int
 	row    int
-	keys   []any
+	keyOff int
 }
 
 // selectionForBatch returns a mask the caller can store. nil Sel means "all rows visible"
@@ -89,6 +91,7 @@ func (s *SortOp) Open(ctx context.Context) error {
 	s.keys = nil
 	s.nulls = nil
 	s.slowRows = nil
+	s.slowKeys = nil
 	return nil
 }
 
@@ -105,10 +108,7 @@ func (s *SortOp) Next() (types.Batch, bool, error) {
 	if s.cursor >= len(s.order) {
 		return types.Batch{}, false, nil
 	}
-	end := s.cursor + types.StandardBatchRows
-	if end > len(s.order) {
-		end = len(s.order)
-	}
+	end := min(s.cursor+types.StandardBatchRows, len(s.order))
 	batch, sel, err := s.materializeChunk(s.cursor, end)
 	if err != nil {
 		return types.Batch{}, false, err
@@ -141,6 +141,9 @@ func (s *SortOp) build() error {
 }
 
 func (s *SortOp) buildSlow() error {
+	total := s.countSelectedRows()
+	s.slowRows = make([]sortRow, 0, total)
+	s.slowKeys = make([]any, 0, total*len(s.Keys))
 	for bi, bb := range s.bufs {
 		ctx := newEvalCtx(bb.batch)
 		var loopErr error
@@ -148,16 +151,16 @@ func (s *SortOp) buildSlow() error {
 			if loopErr != nil {
 				return
 			}
-			keys := make([]any, len(s.Keys))
-			for ki, key := range s.Keys {
+			keyOff := len(s.slowKeys)
+			for _, key := range s.Keys {
 				v, err := ctx.eval(key.Expr, row)
 				if err != nil {
 					loopErr = err
 					return
 				}
-				keys[ki] = v
+				s.slowKeys = append(s.slowKeys, v)
 			}
-			s.slowRows = append(s.slowRows, sortRow{bufIdx: bi, row: row, keys: keys})
+			s.slowRows = append(s.slowRows, sortRow{bufIdx: bi, row: row, keyOff: keyOff})
 		})
 		if loopErr != nil {
 			return loopErr
@@ -175,7 +178,7 @@ func (s *SortOp) buildSlow() error {
 		}
 		ra, rb := &s.slowRows[a], &s.slowRows[b]
 		for ki, key := range s.Keys {
-			c, err := compareNullable(ra.keys[ki], rb.keys[ki])
+			c, err := compareNullable(s.slowKeys[ra.keyOff+ki], s.slowKeys[rb.keyOff+ki])
 			if err != nil {
 				cmpErr = err
 				return 0
@@ -355,15 +358,17 @@ func (s *SortOp) applyLimitOffset() {
 	if s.K <= 0 {
 		return
 	}
-	start := int(s.Offset)
-	if start > len(s.order) {
-		start = len(s.order)
+	n := len(s.order)
+	start := 0
+	if s.Offset > 0 {
+		if s.Offset >= int64(n) {
+			s.order = s.order[:0]
+			return
+		}
+		start = int(s.Offset)
 	}
-	end := start + int(s.K)
-	if end > len(s.order) {
-		end = len(s.order)
-	}
-	s.order = s.order[start:end]
+	take := min(s.K, int64(n-start))
+	s.order = s.order[start : start+int(take)]
 }
 
 func (s *SortOp) countSelectedRows() int {
