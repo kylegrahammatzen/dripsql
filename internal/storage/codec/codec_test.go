@@ -24,9 +24,8 @@ func TestLookup_KnownAndUnknown(t *testing.T) {
 type autoCodec struct{}
 
 func (autoCodec) Encoding() types.Encoding                                 { return types.EncodingAuto }
-func (autoCodec) Encode(types.Vec, []byte) ([]byte, error)                 { return nil, nil }
+func (autoCodec) Encode(types.Vec, *EncodeContext) ([]byte, error)         { return nil, nil }
 func (autoCodec) Decode([]byte, types.VecKind, int, int, *types.Vec) error { return nil }
-func (autoCodec) Estimate(types.Vec) (int, bool)                           { return 0, false }
 
 func TestRegister_RejectsEncodingAuto(t *testing.T) {
 	defer func() {

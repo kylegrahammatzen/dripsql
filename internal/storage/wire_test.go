@@ -45,28 +45,31 @@ func TestPage_FlagBits(t *testing.T) {
 
 func TestFooterSuffix_RoundTrip(t *testing.T) {
 	var buf [FooterSuffixSize]byte
-	WriteFooterSuffix(buf[:], 12345)
-	length, ok := ReadFooterSuffix(buf[:])
+	WriteFooterSuffix(buf[:], 12345, 6789)
+	length, sidecar, ok := ReadFooterSuffix(buf[:])
 	if !ok {
 		t.Fatal("magic mismatch on round-trip")
 	}
 	if length != 12345 {
 		t.Fatalf("length = %d, want 12345", length)
 	}
+	if sidecar != 6789 {
+		t.Fatalf("sidecar = %d, want 6789", sidecar)
+	}
 }
 
 func TestFooterSuffix_RejectsBadMagic(t *testing.T) {
 	var buf [FooterSuffixSize]byte
-	WriteFooterSuffix(buf[:], 1)
-	buf[8] = 'X'
-	if _, ok := ReadFooterSuffix(buf[:]); ok {
+	WriteFooterSuffix(buf[:], 1, 0)
+	buf[FooterSuffixSize-1] = 'X'
+	if _, _, ok := ReadFooterSuffix(buf[:]); ok {
 		t.Fatal("bad magic must be rejected")
 	}
 }
 
-func TestMagic_IsDRIPV4S2(t *testing.T) {
-	if Magic != "DRIPV4S2" {
-		t.Fatalf("magic = %q, want DRIPV4S2", Magic)
+func TestMagic_Current(t *testing.T) {
+	if Magic != "DRIPV4S3" {
+		t.Fatalf("magic = %q, want DRIPV4S3", Magic)
 	}
 	if len(Magic) != MagicLen {
 		t.Fatalf("magic length %d != %d", len(Magic), MagicLen)

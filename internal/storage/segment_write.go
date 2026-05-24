@@ -1,9 +1,11 @@
-// WriteSegment serializes pages into a segment file column-major, one Batch per page.
-// Atomic: writes to path.tmp, fsyncs the file, renames to path, fsyncs the parent directory on POSIX.
+// WriteSegment serializes pages column-major as one Batch per page.
+// Atomic via tmp file, fsync, rename, and a parent-directory fsync on POSIX.
 package storage
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +13,8 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
+
+const segmentWriteBufferSize = 1 << 16
 
 const (
 	columnMarkerMixed    uint8 = 0
@@ -31,80 +35,168 @@ type writerColumn struct {
 	PageStats [][StatsWireSize]byte
 }
 
-func WriteSegment(path string, pages []types.Batch) error {
-	return WriteSegmentWithCodecs(path, pages, nil)
-}
+// codecs may be nil to use the cascade. A non-nil entry per column overrides
+// EncodingAuto and bypasses Pick. The span is always returned, even on error,
+// so partial timings remain visible.
+func WriteSegment(path string, pages []types.Batch, codecs map[string]types.Encoding) (*Span, error) {
+	root := NewSpan("write")
+	defer root.End()
 
-// An override of EncodingAuto (or absent) keeps the cascade. Any other Encoding
-// bypasses Pick. Codec/kind mismatches surface as an Encode error at write time.
-func WriteSegmentWithCodecs(path string, pages []types.Batch, codecs map[string]types.Encoding) error {
 	tmpPath := path + ".tmp"
 	_ = os.Remove(tmpPath)
 
+	prep := root.Child("prepare")
 	cols, err := prepareWriterColumns(pages)
+	prep.End()
 	if err != nil {
-		return err
+		return root, err
 	}
-	if err := writeSegmentBody(tmpPath, pages, cols, codecs); err != nil {
+	for _, p := range pages {
+		root.AddRows(int64(p.Len))
+	}
+
+	totalRows := 0
+	for _, p := range pages {
+		totalRows += int(p.Len)
+	}
+	sinks := make([]*colSink, len(cols))
+	for i, c := range cols {
+		sinks[i] = newColSink(c.Kind, totalRows)
+	}
+
+	body := root.Child("body")
+	err = writeSegmentBody(tmpPath, pages, cols, codecs, sinks, root)
+	body.End()
+	if err != nil {
 		os.Remove(tmpPath)
-		return err
+		return root, err
 	}
+
+	pub := root.Child("publish")
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
-		return err
+		pub.End()
+		return root, err
 	}
 	if err := syncDir(filepath.Dir(path)); err != nil {
-		return err
+		pub.End()
+		return root, err
 	}
-	// Sidecars are best-effort: a failed write doesn't fail the segment, the relevant
-	// metadata path just falls back to the operator scan for this segment.
-	if hist := buildDictHistograms(pages); hist != nil {
-		_ = writeDictHistogramSidecar(path, hist)
-	}
-	if filters := buildIntFilters(pages); filters != nil {
-		_ = writeIntFilterSidecar(path, filters)
-	}
-	if sums := buildNumericSums(pages); sums != nil {
-		_ = writeNumericSumSidecar(path, sums)
-	}
-	return nil
+	pub.End()
+
+	return root, nil
 }
 
-func writeSegmentBody(path string, pages []types.Batch, cols []writerColumn, codecs map[string]types.Encoding) error {
+// materializeSidecarBytes builds the sidecar container body to be appended inside the
+// segment file. Returns nil when there's nothing to write. All work is done now so the
+// segment write streams it in one bufio path with the column data and footer.
+func materializeSidecarBytes(root *Span, cols []writerColumn, sinks []*colSink) []byte {
+	hists, filters, sums, varBlooms := materializeSidecarsFromSinks(cols, sinks)
+	if hists == nil && filters == nil && sums == nil && varBlooms == nil {
+		return nil
+	}
+	sc := root.Child("sidecars")
+	defer sc.End()
+	sections := make(map[uint8][]byte, 4)
+	if hists != nil {
+		dh := sc.Child("dicthist")
+		if b, err := dictHistSidecar.Encode(map[string]DictHistogram(hists)); err == nil && b != nil {
+			sections[sidecarSectionDictHist] = b
+		}
+		dh.End()
+	}
+	if filters != nil {
+		bf := sc.Child("intfilter")
+		if b, err := intFilterSidecar.Encode(map[string]*IntFilter(filters)); err == nil && b != nil {
+			sections[sidecarSectionIntFilter] = b
+		}
+		bf.End()
+	}
+	if sums != nil {
+		sm := sc.Child("numsum")
+		if b, err := numSumSidecar.Encode(map[string]NumericSum(sums)); err == nil && b != nil {
+			sections[sidecarSectionNumSum] = b
+		}
+		sm.End()
+	}
+	if varBlooms != nil {
+		vb := sc.Child("varbloom")
+		if b, err := varBloomSidecar.Encode(map[string]*VarBloom(varBlooms)); err == nil && b != nil {
+			sections[sidecarSectionVarBloom] = b
+		}
+		vb.End()
+	}
+	if len(sections) == 0 {
+		return nil
+	}
+	return EncodeSidecarContainer(sections)
+}
+
+func writeSegmentBody(path string, pages []types.Batch, cols []writerColumn, codecs map[string]types.Encoding, sinks []*colSink, root *Span) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	closed := false
-	defer func() {
-		if !closed {
-			f.Close()
-		}
-	}()
+	bw := bufio.NewWriterSize(f, segmentWriteBufferSize)
 
-	if _, err := f.Write([]byte(Magic)); err != nil {
+	if err := writeSegmentStream(bw, pages, cols, codecs, sinks, root); err != nil {
+		f.Close()
 		return err
 	}
-	if err := writePayloads(f, pages, cols, codecs); err != nil {
+	return finishSegmentFile(f, bw)
+}
+
+func writeSegmentStream(bw *bufio.Writer, pages []types.Batch, cols []writerColumn, codecs map[string]types.Encoding, sinks []*colSink, root *Span) error {
+	if _, err := bw.Write([]byte(Magic)); err != nil {
 		return err
+	}
+	if err := writePayloads(bw, pages, cols, codecs, sinks); err != nil {
+		return err
+	}
+	for ci := range cols {
+		if !marshalColumnStatsFromSink(cols[ci].Kind, sinks[ci], cols[ci].Stats[:]) {
+			marshalColumnStats(cols[ci].Kind, pages, ci, cols[ci].Stats[:])
+		}
 	}
 	footer, err := encodeFooter(cols)
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(footer); err != nil {
+	if _, err := bw.Write(footer); err != nil {
 		return err
+	}
+	// Sidecars must materialize AFTER writePayloads since the colSinks are filled
+	// during the analyzer pass that walks each page during body encoding.
+	sidecarBytes := materializeSidecarBytes(root, cols, sinks)
+	if len(sidecarBytes) > 0 {
+		if _, err := bw.Write(sidecarBytes); err != nil {
+			return err
+		}
 	}
 	suffix := make([]byte, FooterSuffixSize)
-	WriteFooterSuffix(suffix, uint64(len(footer)))
-	if _, err := f.Write(suffix); err != nil {
+	WriteFooterSuffix(suffix, uint64(len(footer)), uint64(len(sidecarBytes)))
+	if _, err := bw.Write(suffix); err != nil {
 		return err
 	}
-	if err := f.Sync(); err != nil {
-		return err
+	return nil
+}
+
+// Flush then Sync then Close. The first error wins, and Close runs even on
+// earlier failure so handles never leak.
+func finishSegmentFile(f *os.File, bw *bufio.Writer) error {
+	var err error
+	if e := bw.Flush(); e != nil {
+		err = e
 	}
-	closed = true
-	return f.Close()
+	if err == nil {
+		if e := f.Sync(); e != nil {
+			err = e
+		}
+	}
+	if e := f.Close(); err == nil && e != nil {
+		err = e
+	}
+	return err
 }
 
 func prepareWriterColumns(pages []types.Batch) ([]writerColumn, error) {
@@ -172,11 +264,7 @@ func prepareWriterColumns(pages []types.Batch) ([]writerColumn, error) {
 		default:
 			cols[ci].Marker = columnMarkerMixed
 		}
-		marshalColumnStats(cols[ci].Kind, pages, ci, cols[ci].Stats[:])
 		cols[ci].PageStats = make([][StatsWireSize]byte, len(pages))
-		for pi := range pages {
-			marshalPageStats(cols[ci].Kind, pages[pi].Columns[ci].V, cols[ci].PageStats[pi][:])
-		}
 	}
 	return cols, nil
 }
@@ -323,9 +411,10 @@ func marshalColumnStats(k types.VecKind, pages []types.Batch, colIdx int, dst []
 	}
 }
 
-func writePayloads(f *os.File, pages []types.Batch, cols []writerColumn, codecs map[string]types.Encoding) error {
+func writePayloads(w io.Writer, pages []types.Batch, cols []writerColumn, codecs map[string]types.Encoding, sinks []*colSink) error {
 	bodyOff := uint64(MagicLen)
-	var scratch []byte
+	var facts codec.PageFacts
+	ctx := &codec.EncodeContext{Scratch: codec.NewScratchPool(), Facts: &facts}
 	for ci := range cols {
 		override := types.EncodingAuto
 		if codecs != nil {
@@ -356,33 +445,37 @@ func writePayloads(f *os.File, pages []types.Batch, cols []writerColumn, codecs 
 				page.Flags = PageFlagAllNull
 			case pageNulls == 0:
 				// All-valid: cascade chooser by default, user override when set.
-				var codecImpl codec.Codec
+				analyzePage(col.V, &facts, sinks[ci], pageIdx)
+				marshalPageStatsFromFacts(col.V.Kind, &facts, col.V, cols[ci].PageStats[pageIdx][:])
+				var (
+					enc     types.Encoding
+					payload []byte
+					err     error
+				)
 				if override != types.EncodingAuto {
-					c, err := codec.Lookup(override)
-					if err != nil {
-						return fmt.Errorf("WriteSegment: col %q codec override %v: %w", col.Name, override, err)
+					c, lookupErr := codec.Lookup(override)
+					if lookupErr != nil {
+						return fmt.Errorf("WriteSegment: col %q codec override %v: %w", col.Name, override, lookupErr)
 					}
-					codecImpl = c
+					ctx.Scratch.SaveTrial(ctx.Scratch.Trial())
+					payload, err = c.Encode(col.V, ctx)
+					enc = c.Encoding()
 				} else {
-					c, _, ok := codec.Pick(col.V)
-					if !ok {
-						return fmt.Errorf("WriteSegment: no codec accepts col %q page %d kind %v", col.Name, pageIdx, col.V.Kind)
-					}
-					codecImpl = c
+					enc, payload, err = codec.Encode(col.V, ctx)
 				}
-				payload, err := codecImpl.Encode(col.V, scratch[:0])
 				if err != nil {
 					return fmt.Errorf("WriteSegment: encode col %q page %d: %w", col.Name, pageIdx, err)
 				}
-				if _, err := f.Write(payload); err != nil {
+				if _, err := w.Write(payload); err != nil {
 					return err
 				}
 				page.PayloadLength = uint64(len(payload))
-				page.Encoding = codecImpl.Encoding().Wire()
+				page.Encoding = enc.Wire()
 				page.Flags = PageFlagAllValid
 				bodyOff += uint64(len(payload))
-				scratch = payload
 			default:
+				// Mixed page (some nulls, some values). Facts path skipped here.
+				marshalPageStats(col.V.Kind, col.V, cols[ci].PageStats[pageIdx][:])
 				// Mixed page layout is <validity bytes><plain payload>.
 				// Plain ignores null slot values. Reader strips validity
 				// before handing the inner payload to the codec.
@@ -392,21 +485,21 @@ func writePayloads(f *os.File, pages []types.Batch, cols []writerColumn, codecs 
 				if err != nil {
 					return err
 				}
-				inner, err := plain.Encode(col.V, scratch[:0])
+				inner, err := plain.Encode(col.V, ctx)
 				if err != nil {
 					return fmt.Errorf("WriteSegment: encode col %q page %d: %w", col.Name, pageIdx, err)
 				}
-				if _, err := f.Write(validityBytes); err != nil {
+				if _, err := w.Write(validityBytes); err != nil {
 					return err
 				}
-				if _, err := f.Write(inner); err != nil {
+				if _, err := w.Write(inner); err != nil {
 					return err
 				}
 				page.PayloadLength = uint64(len(validityBytes) + len(inner))
 				page.Encoding = types.EncodingFlat.Wire()
 				page.Flags = 0
 				bodyOff += uint64(len(validityBytes) + len(inner))
-				scratch = inner
+				ctx.Scratch.SaveTrial(inner)
 			}
 
 			cols[ci].Pages = append(cols[ci].Pages, page)

@@ -10,6 +10,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 )
@@ -17,16 +18,26 @@ import (
 // ManifestEntry is either a single legacy segment add (Path set) or a transaction record
 // that publishes Adds and applies DVUpdates atomically (Path empty). Snapshot resolution
 // flattens transaction records into per-segment views with the latest DV path.
+//
+// CommitTs is the monotonic commit timestamp assigned at commitManifestTxn time. Used by
+// SnapshotAt(commit_ts) so future MVCC readers see a consistent snapshot. Zero on legacy
+// records written before PR-V1, treated as "earliest" for visibility.
 type ManifestEntry struct {
-	Version uint64 `json:"version"`
+	Version  uint64 `json:"version"`
+	CommitTs uint64 `json:"commit_ts,omitempty"`
 
 	Path               string `json:"path,omitempty"`
 	Rows               uint32 `json:"rows,omitempty"`
 	ContentHash        uint64 `json:"content_hash,omitempty"`
 	DeletionVectorPath string `json:"deletion_vector_path,omitempty"`
+	// DVCommitTs is the CommitTs of the record that wrote DeletionVectorPath. Zero when
+	// there is no DV. Retention reads it to keep a segment alive for readers pinned
+	// between the segment's insert ts and its DV-out ts.
+	DVCommitTs uint64 `json:"-"`
 
 	Adds      []ManifestSegmentAdd `json:"adds,omitempty"`
 	DVUpdates []ManifestDVUpdate   `json:"dv_updates,omitempty"`
+	Removes   []string             `json:"removes,omitempty"`
 }
 
 type ManifestSegmentAdd struct {
@@ -55,9 +66,19 @@ type Manifest struct {
 }
 
 func OpenManifest(path string) (*Manifest, error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	created, err := openOrCreate(path)
 	if err != nil {
 		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if created {
+		if err := syncDir(filepath.Dir(path)); err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
 	m := &Manifest{path: path, f: f}
 	if err := m.load(); err != nil {
@@ -65,6 +86,25 @@ func OpenManifest(path string) (*Manifest, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// openOrCreate creates the file if absent and reports whether the creation happened.
+// A true return means the caller must fsync the parent directory so the new entry
+// survives a crash.
+func openOrCreate(path string) (bool, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+	if err == nil {
+		if err := f.Sync(); err != nil {
+			f.Close()
+			return false, err
+		}
+		f.Close()
+		return true, nil
+	}
+	if os.IsExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 func (m *Manifest) Close() error {
@@ -84,12 +124,13 @@ func (m *Manifest) Append(entry ManifestEntry) error {
 
 // Commit writes one atomic manifest record that publishes new segments AND applies DV
 // updates in a single fsync'd line. Callers must have already written all segment files
-// and DV files to their final paths; this record makes them visible together.
-func (m *Manifest) Commit(adds []ManifestSegmentAdd, dvUpdates []ManifestDVUpdate) error {
+// and DV files to their final paths. The commitTs is the monotonic timestamp assigned
+// by the caller's transaction counter so future MVCC readers can pick a snapshot.
+func (m *Manifest) Commit(commitTs uint64, adds []ManifestSegmentAdd, dvUpdates []ManifestDVUpdate) error {
 	if len(adds) == 0 && len(dvUpdates) == 0 {
 		return nil
 	}
-	return m.appendRecord(ManifestEntry{Adds: adds, DVUpdates: dvUpdates})
+	return m.appendRecord(ManifestEntry{CommitTs: commitTs, Adds: adds, DVUpdates: dvUpdates})
 }
 
 func (m *Manifest) appendRecord(entry ManifestEntry) error {
@@ -149,15 +190,45 @@ func (m *Manifest) At(version uint64) ManifestView {
 	return ManifestView{Version: clamped, Entries: m.resolveLocked(clamped)}
 }
 
+// SnapshotAt returns the per-segment view containing only records whose CommitTs is at most
+// maxCommitTs. Legacy records (CommitTs == 0, written before PR-V1) are treated as committed
+// at time 0 and are always visible -- they predate the timestamp regime.
+func (m *Manifest) SnapshotAt(maxCommitTs uint64) ManifestView {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return ManifestView{Version: m.version, Entries: m.resolveLockedFiltered(m.version, maxCommitTs)}
+}
+
+// MaxCommitTs returns the highest CommitTs across all records, or 0 if none have one set.
+// Used at DB.Open to bootstrap the global nextCommitTs counter past any persisted state.
+func (m *Manifest) MaxCommitTs() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var maxTs uint64
+	for _, rec := range m.records {
+		if rec.CommitTs > maxTs {
+			maxTs = rec.CommitTs
+		}
+	}
+	return maxTs
+}
+
 // resolveLocked flattens records up to and including upTo into per-segment entries.
 // Legacy single-segment records become entries directly. Transaction records contribute
 // their Adds as synthetic entries and patch DV paths via DVUpdates on prior entries.
 func (m *Manifest) resolveLocked(upTo uint64) []ManifestEntry {
+	return m.resolveLockedFiltered(upTo, ^uint64(0))
+}
+
+func (m *Manifest) resolveLockedFiltered(upTo, maxCommitTs uint64) []ManifestEntry {
 	out := make([]ManifestEntry, 0, len(m.records))
 	idxByPath := make(map[string]int)
 	for _, rec := range m.records {
 		if rec.Version > upTo {
 			break
+		}
+		if rec.CommitTs > maxCommitTs {
+			continue
 		}
 		if rec.Path != "" {
 			out = append(out, rec)
@@ -167,6 +238,7 @@ func (m *Manifest) resolveLocked(upTo uint64) []ManifestEntry {
 		for _, a := range rec.Adds {
 			out = append(out, ManifestEntry{
 				Version:     rec.Version,
+				CommitTs:    rec.CommitTs,
 				Path:        a.Path,
 				Rows:        a.Rows,
 				ContentHash: a.ContentHash,
@@ -179,9 +251,32 @@ func (m *Manifest) resolveLocked(upTo uint64) []ManifestEntry {
 				continue
 			}
 			out[i].DeletionVectorPath = dv.DVPath
+			out[i].DVCommitTs = rec.CommitTs
+		}
+		for _, p := range rec.Removes {
+			i, ok := idxByPath[p]
+			if !ok {
+				continue
+			}
+			out[i].Path = ""
+			delete(idxByPath, p)
 		}
 	}
-	return out
+	compact := out[:0]
+	for _, e := range out {
+		if e.Path == "" {
+			continue
+		}
+		compact = append(compact, e)
+	}
+	return compact
+}
+
+func (m *Manifest) Retire(commitTs uint64, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	return m.appendRecord(ManifestEntry{CommitTs: commitTs, Removes: paths})
 }
 
 func (m *Manifest) load() error {

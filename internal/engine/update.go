@@ -14,7 +14,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-func (db *DB) update(ctx context.Context, plan *sql.Plan) (int64, error) {
+func (db *DB) update(ctx context.Context, plan *sql.Plan, target commitTarget) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -34,6 +34,12 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan) (int64, error) {
 		return 0, err
 	}
 
+	stmt := storage.NewSpan("UPDATE " + def.Name)
+	defer func() {
+		stmt.End()
+		db.publishWriteSpan(stmt)
+	}()
+
 	stage := stagedUpdate{}
 	flush := func() error {
 		if pending.rows == 0 {
@@ -44,7 +50,11 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan) (int64, error) {
 			return err
 		}
 		path := db.nextSegmentPath(def.Name)
-		if err := storage.WriteSegmentWithCodecs(path, []types.Batch{batch}, columnCodecs(def)); err != nil {
+		span, err := storage.WriteSegment(path, []types.Batch{batch}, columnCodecs(def))
+		if span != nil {
+			stmt.AppendChild(span)
+		}
+		if err != nil {
 			return err
 		}
 		stage.adds = append(stage.adds, storage.ManifestSegmentAdd{Path: path, Rows: uint32(pending.rows)})
@@ -73,7 +83,7 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan) (int64, error) {
 		stage.cleanup()
 		return updated, err
 	}
-	if err := m.Commit(stage.adds, stage.dvUpdates); err != nil {
+	if err := target.commit(def.Name, stage.adds, stage.dvUpdates); err != nil {
 		stage.cleanup()
 		return updated, err
 	}

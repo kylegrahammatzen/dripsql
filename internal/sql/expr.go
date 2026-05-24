@@ -23,6 +23,11 @@ func bindExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
 		}
 		col, ok := findColumn(columns, name)
 		if !ok {
+			if activeBindPlanner != nil {
+				if outer, ok2 := activeBindPlanner.lookupOuter(name); ok2 {
+					return BoundExpr{Op: ExprColumn, Type: outer.Type, Column: outer.Name, ColumnID: outer.ID, Outer: true}, nil
+				}
+			}
 			return BoundExpr{}, fmt.Errorf("missing column %q", name)
 		}
 		return BoundExpr{Op: ExprColumn, Type: col.Type, Column: col.Name, ColumnID: col.ID}, nil
@@ -54,6 +59,11 @@ func bindExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
 		if err != nil {
 			return BoundExpr{}, err
 		}
+		if len(e.Values) == 1 {
+			if sub, ok := e.Values[0].(*SubqueryExpr); ok {
+				return bindInSubqueryExpr(columns, target, sub, e.Not)
+			}
+		}
 		args := make([]BoundExpr, 0, len(e.Values)+1)
 		args = append(args, target)
 		for _, v := range e.Values {
@@ -82,9 +92,126 @@ func bindExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
 			return BoundExpr{}, err
 		}
 		return BoundExpr{Op: ExprNot, Type: types.Bool, Args: []BoundExpr{child}}, nil
+	case *CaseExpr:
+		return bindCaseExpr(columns, e)
+	case *SubqueryExpr:
+		return bindSubqueryExpr(columns, e)
+	case *ExistsExpr:
+		return bindExistsExpr(columns, e)
 	default:
 		return BoundExpr{}, fmt.Errorf("unsupported expression %T", expr)
 	}
+}
+
+// Set by Planner.planSelect for the duration of one statement. Subquery
+// binding consults this since bindExpr otherwise has no planner reference.
+var activeBindPlanner *Planner
+
+func bindInSubqueryExpr(columns map[string]BoundColumnDef, target BoundExpr, e *SubqueryExpr, not bool) (BoundExpr, error) {
+	if e.Query == nil {
+		return BoundExpr{}, fmt.Errorf("IN subquery: nil inner SELECT")
+	}
+	if activeBindPlanner == nil {
+		return BoundExpr{}, fmt.Errorf("IN subquery: no planner context")
+	}
+	activeBindPlanner.pushOuter(columns)
+	sub, err := activeBindPlanner.planSelect(e.Query)
+	refs := activeBindPlanner.popOuter()
+	if err != nil {
+		return BoundExpr{}, fmt.Errorf("IN subquery: %w", err)
+	}
+	if sub.Kind != PlanQuery || sub.Rel == nil {
+		return BoundExpr{}, fmt.Errorf("IN subquery: inner did not yield a query plan")
+	}
+	if len(sub.Rel.Outputs) != 1 {
+		return BoundExpr{}, fmt.Errorf("IN subquery: inner must return exactly one column, got %d", len(sub.Rel.Outputs))
+	}
+	sub.OuterRefs = refs
+	return BoundExpr{Op: ExprInSubquery, Type: types.Bool, Args: []BoundExpr{target}, SubPlan: sub, Not: not}, nil
+}
+
+func bindExistsExpr(columns map[string]BoundColumnDef, e *ExistsExpr) (BoundExpr, error) {
+	if e.Query == nil {
+		return BoundExpr{}, fmt.Errorf("EXISTS: nil inner SELECT")
+	}
+	if activeBindPlanner == nil {
+		return BoundExpr{}, fmt.Errorf("EXISTS: no planner context")
+	}
+	activeBindPlanner.pushOuter(columns)
+	sub, err := activeBindPlanner.planSelect(e.Query)
+	refs := activeBindPlanner.popOuter()
+	if err != nil {
+		return BoundExpr{}, fmt.Errorf("EXISTS: %w", err)
+	}
+	if sub.Kind != PlanQuery || sub.Rel == nil {
+		return BoundExpr{}, fmt.Errorf("EXISTS: inner did not yield a query plan")
+	}
+	sub.OuterRefs = refs
+	return BoundExpr{Op: ExprExists, Type: types.Bool, SubPlan: sub, Not: e.Not}, nil
+}
+
+func bindSubqueryExpr(columns map[string]BoundColumnDef, e *SubqueryExpr) (BoundExpr, error) {
+	if e.Query == nil {
+		return BoundExpr{}, fmt.Errorf("subquery: nil inner SELECT")
+	}
+	if activeBindPlanner == nil {
+		return BoundExpr{}, fmt.Errorf("subquery: no planner context")
+	}
+	activeBindPlanner.pushOuter(columns)
+	sub, err := activeBindPlanner.planSelect(e.Query)
+	refs := activeBindPlanner.popOuter()
+	if err != nil {
+		return BoundExpr{}, fmt.Errorf("subquery: %w", err)
+	}
+	if sub.Kind != PlanQuery || sub.Rel == nil {
+		return BoundExpr{}, fmt.Errorf("subquery: inner did not yield a query plan")
+	}
+	if len(sub.Rel.Outputs) != 1 {
+		return BoundExpr{}, fmt.Errorf("subquery: scalar subquery must return exactly one column, got %d", len(sub.Rel.Outputs))
+	}
+	out := sub.Rel.Outputs[0]
+	sub.OuterRefs = refs
+	return BoundExpr{Op: ExprSubquery, Type: out.Expr.Type, SubPlan: sub}, nil
+}
+
+func bindCaseExpr(columns map[string]BoundColumnDef, e *CaseExpr) (BoundExpr, error) {
+	if len(e.When) == 0 {
+		return BoundExpr{}, fmt.Errorf("CASE requires at least one WHEN clause")
+	}
+	args := make([]BoundExpr, 0, 2*len(e.When)+1)
+	var resultType types.Type
+	for i, wc := range e.When {
+		whenBound, err := bindExpr(columns, wc.When)
+		if err != nil {
+			return BoundExpr{}, fmt.Errorf("CASE WHEN %d: %w", i, err)
+		}
+		if whenBound.Type.Kind != types.KindBool {
+			return BoundExpr{}, fmt.Errorf("CASE WHEN %d: predicate must be boolean, got %s", i, whenBound.Type)
+		}
+		thenBound, err := bindExpr(columns, wc.Then)
+		if err != nil {
+			return BoundExpr{}, fmt.Errorf("CASE THEN %d: %w", i, err)
+		}
+		if i == 0 {
+			resultType = thenBound.Type
+		} else if thenBound.Type.Kind != resultType.Kind {
+			return BoundExpr{}, fmt.Errorf("CASE THEN %d type %s does not match earlier THEN type %s", i, thenBound.Type, resultType)
+		}
+		args = append(args, whenBound, thenBound)
+	}
+	if e.Else != nil {
+		elseBound, err := bindExpr(columns, e.Else)
+		if err != nil {
+			return BoundExpr{}, fmt.Errorf("CASE ELSE: %w", err)
+		}
+		if elseBound.Type.Kind != resultType.Kind {
+			return BoundExpr{}, fmt.Errorf("CASE ELSE type %s does not match THEN type %s", elseBound.Type, resultType)
+		}
+		args = append(args, elseBound)
+	} else {
+		args = append(args, BoundExpr{Op: ExprLiteral, Type: resultType, Literal: nil})
+	}
+	return BoundExpr{Op: ExprCase, Type: resultType, Args: args}, nil
 }
 
 func bindBinaryExpr(columns map[string]BoundColumnDef, e *BinaryExpr) (BoundExpr, error) {
@@ -254,6 +381,36 @@ func bindScalarCall(columns map[string]BoundColumnDef, call *FuncCall) (BoundExp
 			out = BoundExpr{Op: ExprConcat, Type: types.Text, Args: []BoundExpr{out, right}}
 		}
 		return out, nil
+	case "abs":
+		if len(call.Args) != 1 {
+			return BoundExpr{}, fmt.Errorf("abs() requires exactly one argument")
+		}
+		arg, err := bindExpr(columns, call.Args[0])
+		if err != nil {
+			return BoundExpr{}, err
+		}
+		switch arg.Type.Kind {
+		case types.KindInt16, types.KindInt32, types.KindInt64, types.KindFloat32, types.KindFloat64:
+		default:
+			return BoundExpr{}, fmt.Errorf("abs() argument must be numeric")
+		}
+		return BoundExpr{Op: ExprAbs, Type: arg.Type, Args: []BoundExpr{arg}}, nil
+	case "nullif":
+		if len(call.Args) != 2 {
+			return BoundExpr{}, fmt.Errorf("nullif() requires exactly two arguments")
+		}
+		left, err := bindExpr(columns, call.Args[0])
+		if err != nil {
+			return BoundExpr{}, err
+		}
+		right, err := bindExpr(columns, call.Args[1])
+		if err != nil {
+			return BoundExpr{}, err
+		}
+		if left.Type.Kind != right.Type.Kind {
+			return BoundExpr{}, fmt.Errorf("nullif() arguments must share a type")
+		}
+		return BoundExpr{Op: ExprNullIf, Type: left.Type, Args: []BoundExpr{left, right}}, nil
 	default:
 		return BoundExpr{}, fmt.Errorf("unsupported scalar function %q", name)
 	}
@@ -750,6 +907,24 @@ func buildColumnIndex(columns []BoundColumnDef) map[string]BoundColumnDef {
 	return index
 }
 
+// buildColumnIndexQualified is buildColumnIndex plus `<qualifier>.<col>` aliases
+// for each given qualifier (table name and/or alias). Lets single-table scopes
+// accept the standard `tbl.col` and `alias.col` syntax that joined scopes already
+// require. Bare names still resolve.
+func buildColumnIndexQualified(columns []BoundColumnDef, qualifiers ...string) map[string]BoundColumnDef {
+	index := buildColumnIndex(columns)
+	for _, q := range qualifiers {
+		if q == "" {
+			continue
+		}
+		prefix := types.NormalizeName(q) + "."
+		for _, col := range columns {
+			index[prefix+types.NormalizeName(col.Name)] = col
+		}
+	}
+	return index
+}
+
 // joinedSource pairs an alias (or the table's own name when no alias was given) with its bound table.
 type joinedSource struct {
 	Alias string
@@ -800,6 +975,8 @@ func aggregateFuncByName(name string) (AggregateFunc, bool) {
 		return AggregateMin, true
 	case "max":
 		return AggregateMax, true
+	case "avg":
+		return AggregateAvg, true
 	default:
 		return AggregateInvalid, false
 	}

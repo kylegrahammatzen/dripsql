@@ -64,14 +64,21 @@ type TableOption struct {
 }
 
 type SelectStmt struct {
-	From    TableExpr
-	Select  []SelectExpr
-	Where   Expr
-	GroupBy []Expr
-	Having  Expr
-	OrderBy []OrderExpr
-	Limit   *int64
-	Offset  *int64
+	With     []CTE
+	From     TableExpr
+	Distinct bool
+	Select   []SelectExpr
+	Where    Expr
+	GroupBy  []Expr
+	Having   Expr
+	OrderBy  []OrderExpr
+	Limit    *int64
+	Offset   *int64
+}
+
+type CTE struct {
+	Name  string
+	Query *SelectStmt
 }
 
 type TableExpr interface{ isTableExpr() }
@@ -79,6 +86,8 @@ type TableExpr interface{ isTableExpr() }
 type TableName struct {
 	Name  string
 	Alias string
+	// AsOf carries the snapshot CommitTs from `AS OF <int>`. Zero means no clause.
+	AsOf uint64
 }
 
 type JoinExpr struct {
@@ -157,6 +166,24 @@ type FuncCall struct {
 	Name string
 	Args []Expr
 	Star bool
+
+	Over *WindowSpec
+}
+
+type WindowSpec struct {
+	Partition []Expr
+	OrderBy   []OrderExpr
+	Frame     *WindowFrame
+}
+
+type WindowFrame struct {
+	IsRange        bool
+	StartUnbounded bool
+	StartCurrent   bool
+	StartPreceding int64
+	EndUnbounded   bool
+	EndCurrent     bool
+	EndFollowing   int64
 }
 
 type Literal struct {
@@ -195,6 +222,25 @@ type NotExpr struct {
 	Expr Expr
 }
 
+type WhenClause struct {
+	When Expr
+	Then Expr
+}
+
+type SubqueryExpr struct {
+	Query *SelectStmt
+}
+
+type ExistsExpr struct {
+	Query *SelectStmt
+	Not   bool
+}
+
+type CaseExpr struct {
+	When []WhenClause
+	Else Expr
+}
+
 func (*ColumnRef) isExpr()   {}
 func (*StarRef) isExpr()     {}
 func (*FuncCall) isExpr()    {}
@@ -204,6 +250,9 @@ func (*BetweenExpr) isExpr() {}
 func (*InExpr) isExpr()      {}
 func (*AndExpr) isExpr()     {}
 func (*OrExpr) isExpr()      {}
+func (*CaseExpr) isExpr()     {}
+func (*SubqueryExpr) isExpr() {}
+func (*ExistsExpr) isExpr()   {}
 func (*NotExpr) isExpr()     {}
 
 type BinaryOp uint8

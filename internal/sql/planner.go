@@ -15,6 +15,57 @@ import (
 
 type Planner struct {
 	resolve TableResolver
+	ctes    map[string]*cteEntry
+	// outerScopes is a stack of parent column indexes visible to nested subqueries.
+	// outerRefs is a parallel stack collecting the names actually referenced by the
+	// currently-binding subquery; the top map becomes Plan.OuterRefs when the sub binds.
+	outerScopes []map[string]BoundColumnDef
+	outerRefs   []map[string]bool
+}
+
+func (p *Planner) pushOuter(cols map[string]BoundColumnDef) {
+	p.outerScopes = append(p.outerScopes, cols)
+	p.outerRefs = append(p.outerRefs, map[string]bool{})
+}
+
+func (p *Planner) popOuter() []string {
+	n := len(p.outerRefs)
+	refs := p.outerRefs[n-1]
+	p.outerScopes = p.outerScopes[:n-1]
+	p.outerRefs = p.outerRefs[:n-1]
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(refs))
+	for k := range refs {
+		out = append(out, k)
+	}
+	return out
+}
+
+// lookupOuter searches outerScopes from innermost-outer to outermost and returns
+// the first match. When found it also records the name in the current top of
+// outerRefs so the binding subquery can publish it on its Plan.OuterRefs.
+func (p *Planner) lookupOuter(name string) (BoundColumnDef, bool) {
+	if len(p.outerScopes) == 0 {
+		return BoundColumnDef{}, false
+	}
+	for i := len(p.outerScopes) - 1; i >= 0; i-- {
+		if col, ok := findColumn(p.outerScopes[i], name); ok {
+			// Record into every active subquery's ref set down to this depth so
+			// nested subqueries each carry the ref they need bound at runtime.
+			for j := i; j < len(p.outerRefs); j++ {
+				p.outerRefs[j][col.Name] = true
+			}
+			return col, true
+		}
+	}
+	return BoundColumnDef{}, false
+}
+
+type cteEntry struct {
+	def BoundTableDef
+	rel *Rel
 }
 
 func NewPlanner(resolve TableResolver) *Planner {
@@ -74,6 +125,19 @@ func (p *Planner) planSelect(stmt *SelectStmt) (*Plan, error) {
 	if stmt == nil {
 		return nil, fmt.Errorf("SELECT statement is nil")
 	}
+	prevBindPlanner := activeBindPlanner
+	activeBindPlanner = p
+	defer func() { activeBindPlanner = prevBindPlanner }()
+	if len(stmt.With) > 0 {
+		return p.planSelectWithCTEs(stmt)
+	}
+	if stmt.Distinct {
+		lowered, err := lowerDistinctToGroupBy(stmt)
+		if err != nil {
+			return nil, err
+		}
+		stmt = lowered
+	}
 	rel, sc, err := p.planFrom(stmt)
 	if err != nil {
 		return nil, err
@@ -84,6 +148,143 @@ func (p *Planner) planSelect(stmt *SelectStmt) (*Plan, error) {
 	}
 	pruneJoinedScans(rel)
 	return &Plan{Kind: PlanQuery, Rel: rel}, nil
+}
+
+func (p *Planner) planSelectWithCTEs(stmt *SelectStmt) (*Plan, error) {
+	cteList := stmt.With
+	stripped := *stmt
+	stripped.With = nil
+
+	prev := p.ctes
+	defer func() { p.ctes = prev }()
+	if p.ctes == nil {
+		p.ctes = make(map[string]*cteEntry, len(cteList))
+	}
+
+	for _, cte := range cteList {
+		if cte.Query == nil {
+			return nil, fmt.Errorf("CTE %q has nil query", cte.Name)
+		}
+		inner, err := p.planSelect(cte.Query)
+		if err != nil {
+			return nil, fmt.Errorf("CTE %q: %w", cte.Name, err)
+		}
+		if inner.Kind != PlanQuery || inner.Rel == nil {
+			return nil, fmt.Errorf("CTE %q: inner statement did not yield a query plan", cte.Name)
+		}
+		def := cteDefFromRel(cte.Name, inner.Rel)
+		key := types.NormalizeName(cte.Name)
+		if _, dup := p.ctes[key]; dup {
+			return nil, fmt.Errorf("duplicate CTE name %q", cte.Name)
+		}
+		p.ctes[key] = &cteEntry{def: def, rel: inner.Rel}
+	}
+
+	plan, err := p.planSelect(&stripped)
+	if err != nil {
+		return nil, err
+	}
+	if plan.Rel != nil {
+		plan.Rel = substituteCTEAtRoot(plan.Rel, p.ctes)
+		substituteCTEScans(plan.Rel, p.ctes)
+	}
+	return plan, nil
+}
+
+func substituteCTEAtRoot(rel *Rel, ctes map[string]*cteEntry) *Rel {
+	if rel == nil || rel.Op != RelScan {
+		return rel
+	}
+	entry, ok := ctes[types.NormalizeName(rel.Table.Name)]
+	if !ok {
+		return rel
+	}
+	return &Rel{
+		Op:      RelCTE,
+		Outputs: rel.Outputs,
+		Inputs:  []*Rel{entry.rel},
+		Alias:   rel.Alias,
+	}
+}
+
+func cteDefFromRel(name string, rel *Rel) BoundTableDef {
+	cols := make([]BoundColumnDef, 0, len(rel.Outputs))
+	seen := make(map[string]struct{}, len(rel.Outputs))
+	for i, out := range rel.Outputs {
+		colName := out.Alias
+		if colName == "" {
+			colName = lastNameSegment(out.Expr.Column)
+		}
+		if colName == "" {
+			colName = fmt.Sprintf("col%d", i)
+		}
+		key := types.NormalizeName(colName)
+		if _, dup := seen[key]; dup {
+			colName = fmt.Sprintf("%s_%d", colName, i)
+			key = types.NormalizeName(colName)
+		}
+		seen[key] = struct{}{}
+		cols = append(cols, BoundColumnDef{
+			ID:   ColumnID(i + 1),
+			Name: colName,
+			Type: out.Expr.Type,
+		})
+	}
+	return BoundTableDef{
+		Name:    name,
+		Columns: cols,
+	}
+}
+
+func lastNameSegment(qualified string) string {
+	for i := len(qualified) - 1; i >= 0; i-- {
+		if qualified[i] == '.' {
+			return qualified[i+1:]
+		}
+	}
+	return qualified
+}
+
+func substituteCTEScans(rel *Rel, ctes map[string]*cteEntry) {
+	if rel == nil {
+		return
+	}
+	for i, in := range rel.Inputs {
+		if in != nil && in.Op == RelScan {
+			if entry, ok := ctes[types.NormalizeName(in.Table.Name)]; ok {
+				rel.Inputs[i] = &Rel{
+					Op:      RelCTE,
+					Outputs: in.Outputs,
+					Inputs:  []*Rel{entry.rel},
+					Alias:   in.Alias,
+				}
+				continue
+			}
+		}
+		substituteCTEScans(in, ctes)
+	}
+}
+
+func lowerDistinctToGroupBy(stmt *SelectStmt) (*SelectStmt, error) {
+	if len(stmt.GroupBy) != 0 {
+		return nil, fmt.Errorf("DISTINCT cannot be combined with GROUP BY")
+	}
+	if stmt.Having != nil {
+		return nil, fmt.Errorf("DISTINCT cannot be combined with HAVING")
+	}
+	if len(stmt.Select) == 0 {
+		return nil, fmt.Errorf("SELECT DISTINCT requires at least one expression")
+	}
+	out := *stmt
+	out.Distinct = false
+	out.GroupBy = make([]Expr, 0, len(stmt.Select))
+	for _, se := range stmt.Select {
+		if _, ok := se.Expr.(*StarRef); ok {
+			return nil, fmt.Errorf("SELECT DISTINCT * is not supported; name the columns explicitly")
+		}
+		out.GroupBy = append(out.GroupBy, se.Expr)
+	}
+	return &out, nil
 }
 
 // pruneJoinedScans walks the rel tree and narrows each joined RelScan to the columns its
@@ -225,10 +426,11 @@ func (p *Planner) planFrom(stmt *SelectStmt) (*Rel, *scope, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	primary.AsOf = primaryName.AsOf
 	if len(joins) == 0 {
 		sc := &scope{
 			sources: []joinedSource{{Alias: primaryName.Name, Def: primary}},
-			columns: buildColumnIndex(primary.Columns),
+			columns: buildColumnIndexQualified(primary.Columns, primaryName.Name, primaryName.Alias),
 		}
 		return scanRel(primary, "", allColumnIDs(primary.Columns), nil), sc, nil
 	}
@@ -253,6 +455,7 @@ func (p *Planner) planFrom(stmt *SelectStmt) (*Rel, *scope, error) {
 		if err != nil {
 			return nil, nil, err
 		}
+		right.AsOf = rightName.AsOf
 		rightAlias := rightName.Alias
 		if rightAlias == "" {
 			rightAlias = rightName.Name
@@ -288,6 +491,11 @@ func (p *Planner) planFrom(stmt *SelectStmt) (*Rel, *scope, error) {
 }
 
 func (p *Planner) resolveTable(name string) (BoundTableDef, error) {
+	if p.ctes != nil {
+		if entry, ok := p.ctes[types.NormalizeName(name)]; ok {
+			return entry.def, nil
+		}
+	}
 	if p.resolve == nil {
 		return BoundTableDef{}, fmt.Errorf("planner: no table resolver registered")
 	}
@@ -310,24 +518,24 @@ func planQuery(stmt *SelectStmt, src *Rel, sc *scope) (*Rel, error) {
 		}
 	}
 
-	groupExpr, err := bindGroupExpr(sc.columns, stmt.GroupBy)
+	groupExprs, err := bindGroupExprs(sc.columns, stmt.GroupBy)
 	if err != nil {
 		return nil, err
 	}
-	hasGroup := groupExpr != nil
-	aggregates, hasAgg, err := bindSelectAggregates(stmt.Select, sc.columns, hasGroup)
+	hasGroup := len(groupExprs) > 0
+	aggregates, hasAgg, err := bindSelectAggregates(stmt.Select, sc.columns, len(groupExprs))
 	if err != nil {
 		return nil, err
 	}
 
 	if hasGroup || hasAgg {
-		return planAggregateTail(stmt, src, sc, groupExpr, aggregates, hasGroup, hasAgg)
+		return planAggregateTail(stmt, src, sc, groupExprs, aggregates, hasGroup, hasAgg)
 	}
 	return planScanTail(stmt, src, sc)
 }
 
-func planAggregateTail(stmt *SelectStmt, src *Rel, sc *scope, groupExpr *BoundExpr, aggregates []AggSpec, hasGroup, hasAgg bool) (*Rel, error) {
-	if !hasAgg {
+func planAggregateTail(stmt *SelectStmt, src *Rel, sc *scope, groupExprs []BoundExpr, aggregates []AggSpec, hasGroup, hasAgg bool) (*Rel, error) {
+	if !hasAgg && !hasGroup {
 		if sc.joined {
 			return nil, fmt.Errorf("only count, sum, min, max aggregates are supported in joined SELECT")
 		}
@@ -336,24 +544,29 @@ func planAggregateTail(stmt *SelectStmt, src *Rel, sc *scope, groupExpr *BoundEx
 	outputs := make([]BoundOutput, 0, len(stmt.Select))
 	var group []BoundExpr
 	if hasGroup {
-		selectFirst, err := bindExpr(sc.columns, stmt.Select[0].Expr)
-		if err != nil {
-			return nil, err
+		if len(stmt.Select) < len(groupExprs) {
+			return nil, fmt.Errorf("GROUP BY has %d expressions but SELECT projects only %d", len(groupExprs), len(stmt.Select))
 		}
-		if !boundExprEqual(selectFirst, *groupExpr) {
-			return nil, fmt.Errorf("selected group expression must match GROUP BY expression")
-		}
-		if groupExpr.Op != ExprColumn && stmt.Select[0].Alias == "" {
-			return nil, fmt.Errorf("GROUP BY computed expressions require a selected alias")
-		}
-		if !groupableKind(groupExpr.Type.Kind) {
-			if sc.joined {
-				return nil, fmt.Errorf("GROUP BY expression is %s, want a groupable kind", groupExpr.Type)
+		for i, ge := range groupExprs {
+			selectExpr, err := bindExpr(sc.columns, stmt.Select[i].Expr)
+			if err != nil {
+				return nil, err
 			}
-			return nil, fmt.Errorf("GROUP BY expression is %s, want text, bytes, uuid, int16, int32, int64, bool, date, timestamp, or enum", groupExpr.Type)
+			if !boundExprEqual(selectExpr, ge) {
+				return nil, fmt.Errorf("SELECT expression %d must match GROUP BY expression %d", i, i)
+			}
+			if ge.Op != ExprColumn && stmt.Select[i].Alias == "" {
+				return nil, fmt.Errorf("GROUP BY computed expressions require a selected alias")
+			}
+			if !groupableKind(ge.Type.Kind) {
+				if sc.joined {
+					return nil, fmt.Errorf("GROUP BY expression is %s, want a groupable kind", ge.Type)
+				}
+				return nil, fmt.Errorf("GROUP BY expression is %s, want text, bytes, uuid, int16, int32, int64, bool, date, timestamp, or enum", ge.Type)
+			}
+			outputs = append(outputs, BoundOutput{Alias: stmt.Select[i].Alias, Expr: ge})
 		}
-		group = []BoundExpr{*groupExpr}
-		outputs = append(outputs, BoundOutput{Alias: stmt.Select[0].Alias, Expr: *groupExpr})
+		group = append([]BoundExpr(nil), groupExprs...)
 	}
 	for _, spec := range aggregates {
 		outputs = append(outputs, BoundOutput{Alias: spec.Alias, Expr: BoundExpr{Op: ExprColumn, Type: types.Int64, Column: aggregateOutputName(spec)}})
@@ -414,11 +627,151 @@ func planScanTail(stmt *SelectStmt, src *Rel, sc *scope) (*Rel, error) {
 		}
 		return root, nil
 	}
+	stmtCopy, windowFuncs, err := extractWindowFuncs(stmt, sc.columns)
+	if err != nil {
+		return nil, err
+	}
+	if len(windowFuncs) > 0 {
+		stmt = stmtCopy
+		src = windowRel(src, windowFuncs)
+		// Synthetic columns become visible to subsequent bind passes.
+		for _, wf := range windowFuncs {
+			sc.columns[types.NormalizeName(wf.Alias)] = BoundColumnDef{
+				Name: wf.Alias,
+				Type: windowOutputType(wf),
+			}
+		}
+	}
 	outputs, err := bindScanOutputs(stmt, sc.sources[0].Def, sc.columns)
 	if err != nil {
 		return nil, err
 	}
 	return applyOrderLimit(src, stmt, outputs, sc.columns)
+}
+
+func extractWindowFuncs(stmt *SelectStmt, columns map[string]BoundColumnDef) (*SelectStmt, []WindowFunc, error) {
+	var funcs []WindowFunc
+	out := *stmt
+	out.Select = make([]SelectExpr, len(stmt.Select))
+	copy(out.Select, stmt.Select)
+	for i := range out.Select {
+		sel := out.Select[i]
+		fc, ok := sel.Expr.(*FuncCall)
+		if !ok || fc.Over == nil {
+			continue
+		}
+		kind, ok := WindowFuncByName(types.NormalizeName(fc.Name))
+		if !ok {
+			return nil, nil, fmt.Errorf("unsupported window function %q", fc.Name)
+		}
+		var arg *BoundExpr
+		switch {
+		case kind == WindowRowNumber || kind == WindowRank || kind == WindowDenseRank:
+			if len(fc.Args) != 0 || fc.Star {
+				return nil, nil, fmt.Errorf("%s() takes no arguments", kind)
+			}
+		case kind == WindowCount && fc.Star:
+			// count(*) over (...) - no arg
+		default:
+			if len(fc.Args) != 1 {
+				return nil, nil, fmt.Errorf("%s() OVER requires exactly one argument", kind)
+			}
+			a, err := bindExpr(columns, fc.Args[0])
+			if err != nil {
+				return nil, nil, fmt.Errorf("%s() OVER: %w", kind, err)
+			}
+			arg = &a
+		}
+		spec, err := bindWindowSpec(columns, fc.Over)
+		if err != nil {
+			return nil, nil, err
+		}
+		alias := sel.Alias
+		if alias == "" {
+			alias = fmt.Sprintf("__win_%d", i)
+		}
+		funcs = append(funcs, WindowFunc{
+			Func:      kind,
+			Alias:     alias,
+			Arg:       arg,
+			Partition: spec.partition,
+			OrderBy:   spec.orderBy,
+			Frame:     spec.frame,
+		})
+		out.Select[i] = SelectExpr{
+			Alias: sel.Alias,
+			Expr:  &ColumnRef{Name: alias},
+		}
+	}
+	return &out, funcs, nil
+}
+
+type boundWindowSpec struct {
+	partition []BoundExpr
+	orderBy   []SortKey
+	frame     *WindowFrameBounds
+}
+
+func bindWindowSpec(columns map[string]BoundColumnDef, spec *WindowSpec) (boundWindowSpec, error) {
+	out := boundWindowSpec{}
+	for _, e := range spec.Partition {
+		be, err := bindExpr(columns, e)
+		if err != nil {
+			return out, fmt.Errorf("OVER PARTITION BY: %w", err)
+		}
+		out.partition = append(out.partition, be)
+	}
+	for _, oe := range spec.OrderBy {
+		be, err := bindExpr(columns, oe.Expr)
+		if err != nil {
+			return out, fmt.Errorf("OVER ORDER BY: %w", err)
+		}
+		out.orderBy = append(out.orderBy, SortKey{Name: oe.Name, Expr: be, Desc: oe.Desc})
+	}
+	if spec.Frame != nil {
+		if spec.Frame.StartPreceding < 0 || spec.Frame.EndFollowing < 0 {
+			return out, fmt.Errorf("OVER frame: negative offset not allowed")
+		}
+		if spec.Frame.IsRange && len(out.orderBy) != 1 {
+			return out, fmt.Errorf("OVER RANGE BETWEEN requires exactly one ORDER BY expression")
+		}
+		out.frame = &WindowFrameBounds{
+			IsRange:        spec.Frame.IsRange,
+			StartUnbounded: spec.Frame.StartUnbounded,
+			StartCurrent:   spec.Frame.StartCurrent,
+			StartPreceding: spec.Frame.StartPreceding,
+			EndUnbounded:   spec.Frame.EndUnbounded,
+			EndCurrent:     spec.Frame.EndCurrent,
+			EndFollowing:   spec.Frame.EndFollowing,
+		}
+	}
+	return out, nil
+}
+
+func windowRel(src *Rel, funcs []WindowFunc) *Rel {
+	outputs := append([]BoundOutput{}, src.Outputs...)
+	for _, wf := range funcs {
+		outputs = append(outputs, BoundOutput{Alias: wf.Alias, Expr: BoundExpr{Op: ExprColumn, Type: windowOutputType(wf), Column: wf.Alias}})
+	}
+	return &Rel{
+		Op:          RelWindow,
+		Outputs:     outputs,
+		Inputs:      []*Rel{src},
+		WindowFuncs: funcs,
+	}
+}
+
+func windowOutputType(wf WindowFunc) types.Type {
+	if wf.Func == WindowAvg {
+		return types.Float64
+	}
+	if wf.Arg != nil {
+		k := wf.Arg.Type.Kind
+		if k == types.KindFloat32 || k == types.KindFloat64 {
+			return types.Float64
+		}
+	}
+	return types.Int64
 }
 
 // DDL binding lowers CREATE TYPE / CREATE TABLE statements into validated types.TypeSpec / types.TableSpec.
@@ -851,7 +1204,7 @@ func BindDelete(stmt *DeleteStmt, def BoundTableDef) (*Plan, error) {
 	}
 	plan := &Plan{Kind: PlanDelete, Table: def}
 	if stmt.Where != nil {
-		columns := buildColumnIndex(def.Columns)
+		columns := buildColumnIndexQualified(def.Columns, def.Name)
 		where, err := bindWhereExpr(columns, stmt.Where)
 		if err != nil {
 			return nil, err
@@ -908,7 +1261,7 @@ func BindUpdate(stmt *UpdateStmt, def BoundTableDef) (*Plan, error) {
 	}
 	plan := &Plan{Kind: PlanUpdate, Table: def, Assignments: assignments}
 	if stmt.Where != nil {
-		index := buildColumnIndex(def.Columns)
+		index := buildColumnIndexQualified(def.Columns, def.Name)
 		where, err := bindWhereExpr(index, stmt.Where)
 		if err != nil {
 			return nil, err
@@ -1048,7 +1401,7 @@ func BindSelect(stmt *SelectStmt, def BoundTableDef) (*Plan, error) {
 	}
 	sc := &scope{
 		sources: []joinedSource{{Alias: primary.Name, Def: def}},
-		columns: buildColumnIndex(def.Columns),
+		columns: buildColumnIndexQualified(def.Columns, primary.Name, primary.Alias),
 	}
 	src := scanRel(def, "", allColumnIDs(def.Columns), nil)
 	rel, err := planQuery(stmt, src, sc)
@@ -1174,7 +1527,7 @@ func isScanComputedOp(op ExprOp) bool {
 	switch op {
 	case ExprAdd, ExprSubtract, ExprMultiply, ExprDivide, ExprModulo, ExprIntDivide,
 		ExprConcat, ExprLower, ExprUpper, ExprJSONGet, ExprJSONGetText, ExprLength,
-		ExprCoalesce, ExprSubstring:
+		ExprCoalesce, ExprSubstring, ExprAbs, ExprNullIf, ExprCase, ExprSubquery:
 		return true
 	default:
 		return false
@@ -1285,6 +1638,11 @@ func bindWhereLogicalExpr(columns map[string]BoundColumnDef, expr Expr) (BoundEx
 		if err != nil {
 			return BoundExpr{}, err
 		}
+		if len(expr.Values) == 1 {
+			if sub, ok := expr.Values[0].(*SubqueryExpr); ok {
+				return bindInSubqueryExpr(columns, target, sub, expr.Not)
+			}
+		}
 		args := make([]BoundExpr, 0, len(expr.Values)+1)
 		args = append(args, target)
 		for _, value := range expr.Values {
@@ -1299,6 +1657,8 @@ func bindWhereLogicalExpr(columns map[string]BoundColumnDef, expr Expr) (BoundEx
 			args = append(args, bound)
 		}
 		return BoundExpr{Op: ExprIn, Type: types.Bool, Args: args, Not: expr.Not}, nil
+	case *ExistsExpr:
+		return bindExistsExpr(columns, expr)
 	default:
 		return BoundExpr{}, fmt.Errorf("unsupported WHERE expression")
 	}
@@ -1534,31 +1894,29 @@ func decomposeAggregateCall(call *FuncCall) (AggregateFunc, string, bool, error)
 	return fn, columnRefKey(col), false, nil
 }
 
-func bindGroupExpr(columns map[string]BoundColumnDef, groupBy []Expr) (*BoundExpr, error) {
+func bindGroupExprs(columns map[string]BoundColumnDef, groupBy []Expr) ([]BoundExpr, error) {
 	if len(groupBy) == 0 {
 		return nil, nil
 	}
-	if len(groupBy) != 1 {
-		return nil, fmt.Errorf("only one GROUP BY expression is supported")
-	}
-	bound, err := bindExpr(columns, groupBy[0])
-	if err != nil {
-		if col, ok := groupBy[0].(*ColumnRef); ok {
-			return nil, fmt.Errorf("missing GROUP BY column %q", col.Name)
+	out := make([]BoundExpr, 0, len(groupBy))
+	for _, g := range groupBy {
+		bound, err := bindExpr(columns, g)
+		if err != nil {
+			if col, ok := g.(*ColumnRef); ok {
+				return nil, fmt.Errorf("missing GROUP BY column %q", col.Name)
+			}
+			return nil, err
 		}
-		return nil, err
+		if bound.Type.Kind == types.KindInvalid {
+			return nil, fmt.Errorf("unsupported GROUP BY expression")
+		}
+		out = append(out, bound)
 	}
-	if bound.Type.Kind == types.KindInvalid {
-		return nil, fmt.Errorf("unsupported GROUP BY expression")
-	}
-	return &bound, nil
+	return out, nil
 }
 
-func bindSelectAggregates(exprs []SelectExpr, columns map[string]BoundColumnDef, grouped bool) ([]AggSpec, bool, error) {
-	start := 0
-	if grouped {
-		start = 1
-	}
+func bindSelectAggregates(exprs []SelectExpr, columns map[string]BoundColumnDef, groupKeyCount int) ([]AggSpec, bool, error) {
+	start := groupKeyCount
 	if start >= len(exprs) {
 		return nil, false, nil
 	}
@@ -1628,10 +1986,10 @@ func validateAggregateColumn(agg AggregateFunc, column string, columns map[strin
 		return nil
 	}
 	switch col.Type.Kind {
-	case types.KindInt32, types.KindInt64:
+	case types.KindInt32, types.KindInt64, types.KindFloat32, types.KindFloat64:
 		return nil
 	default:
-		return fmt.Errorf("%s column %q is %s, want int32 or int64", strings.ToUpper(defaultAggregateName(agg)), col.Name, col.Type)
+		return fmt.Errorf("%s column %q is %s, want int32/int64/float32/float64", strings.ToUpper(defaultAggregateName(agg)), col.Name, col.Type)
 	}
 }
 
@@ -1729,6 +2087,8 @@ func defaultAggregateName(aggregate AggregateFunc) string {
 		return "min"
 	case AggregateMax:
 		return "max"
+	case AggregateAvg:
+		return "avg"
 	default:
 		return "count"
 	}

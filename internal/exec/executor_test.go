@@ -31,7 +31,7 @@ func writeUsersSegment(t *testing.T, dir string) *storage.Segment {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(dir, "users.dsv4")
-	if err := storage.WriteSegment(path, []types.Batch{b}); err != nil {
+	if _, err := storage.WriteSegment(path, []types.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := storage.OpenSegment(path)
@@ -259,7 +259,7 @@ func writeSalesSegment(t *testing.T, dir string) *storage.Segment {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(dir, "sales.dsv4")
-	if err := storage.WriteSegment(path, []types.Batch{b}); err != nil {
+	if _, err := storage.WriteSegment(path, []types.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := storage.OpenSegment(path)
@@ -368,7 +368,7 @@ func writeWideGroupSegment(t *testing.T, dir string, groups int) *storage.Segmen
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(dir, "wide.dsv4")
-	if err := storage.WriteSegment(path, []types.Batch{b}); err != nil {
+	if _, err := storage.WriteSegment(path, []types.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := storage.OpenSegment(path)

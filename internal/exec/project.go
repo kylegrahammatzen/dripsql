@@ -14,7 +14,20 @@ type ProjectOp struct {
 	Source  Operator
 	Outputs []sql.BoundOutput
 
-	state operatorState
+	outer    *correlatedOuter
+	subBuild func(*sql.Plan) (Operator, error)
+
+	state    operatorState
+	plan     []projectStep
+	cols     []types.Column
+	planSrc  int
+}
+
+// srcIdx >= 0 aliases child column at that index; -1 marks a computed expr.
+type projectStep struct {
+	srcIdx int
+	name   string
+	out    *sql.BoundOutput
 }
 
 func (p *ProjectOp) Open(ctx context.Context) error {
@@ -37,18 +50,76 @@ func (p *ProjectOp) Next() (types.Batch, bool, error) {
 	if err != nil || !ok {
 		return batch, ok, err
 	}
-	cols := make([]types.Column, len(p.Outputs))
-	for i, o := range p.Outputs {
-		col, err := projectColumn(batch, batch.Sel, o)
+	if p.plan == nil || len(batch.Columns) != p.planSrc || !p.planValid(batch) {
+		if err := p.bindPlan(batch); err != nil {
+			return types.Batch{}, false, err
+		}
+	}
+	if cap(p.cols) < len(p.plan) {
+		p.cols = make([]types.Column, len(p.plan))
+	} else {
+		p.cols = p.cols[:len(p.plan)]
+	}
+	for i, step := range p.plan {
+		if step.srcIdx >= 0 {
+			src := &batch.Columns[step.srcIdx]
+			p.cols[i] = types.Column{Name: step.name, Type: src.Type, EnumLabels: src.EnumLabels, V: src.V}
+			continue
+		}
+		col, err := projectColumn(batch, batch.Sel, *step.out, p.outer, p.subBuild)
 		if err != nil {
 			return types.Batch{}, false, err
 		}
-		cols[i] = col
+		p.cols[i] = col
 	}
-	return types.Batch{Len: batch.Len, Columns: cols, Sel: batch.Sel}, true, nil
+	return types.Batch{Len: batch.Len, Columns: p.cols, Sel: batch.Sel}, true, nil
 }
 
-func projectColumn(batch types.Batch, sel *types.SelectionMask, output sql.BoundOutput) (types.Column, error) {
+func (p *ProjectOp) bindPlan(batch types.Batch) error {
+	p.plan = make([]projectStep, len(p.Outputs))
+	p.planSrc = len(batch.Columns)
+	for i := range p.Outputs {
+		o := &p.Outputs[i]
+		step := projectStep{srcIdx: -1, out: o}
+		if o.Expr.Op == sql.ExprColumn {
+			idx := findColumnIndex(batch, o.Expr.Column)
+			if idx < 0 {
+				return fmt.Errorf("project: column %q not in input batch", o.Expr.Column)
+			}
+			step.srcIdx = idx
+			step.name = o.Alias
+			if step.name == "" {
+				step.name = batch.Columns[idx].Name
+			}
+		}
+		p.plan[i] = step
+	}
+	return nil
+}
+
+func (p *ProjectOp) planValid(batch types.Batch) bool {
+	for _, step := range p.plan {
+		if step.srcIdx < 0 {
+			continue
+		}
+		if step.srcIdx >= len(batch.Columns) {
+			return false
+		}
+	}
+	return true
+}
+
+func findColumnIndex(batch types.Batch, name string) int {
+	want := types.NormalizeName(name)
+	for i := range batch.Columns {
+		if types.NormalizeName(batch.Columns[i].Name) == want {
+			return i
+		}
+	}
+	return -1
+}
+
+func projectColumn(batch types.Batch, sel *types.SelectionMask, output sql.BoundOutput, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (types.Column, error) {
 	if output.Expr.Op == sql.ExprColumn {
 		src, ok := batch.ColumnByName(output.Expr.Column)
 		if !ok {
@@ -64,7 +135,7 @@ func projectColumn(batch types.Batch, sel *types.SelectionMask, output sql.Bound
 	if err != nil {
 		return types.Column{}, fmt.Errorf("project: column %q has no physical kind: %w", output.Alias, err)
 	}
-	ctx := newEvalCtx(batch)
+	ctx := newEvalCtxWith(batch, outer, subBuild)
 	rows := batch.Len
 	v, valid, err := materializeVec(ctx, output.Expr, sel, rows, vk)
 	if err != nil {

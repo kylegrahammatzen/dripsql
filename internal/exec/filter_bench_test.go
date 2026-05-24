@@ -32,7 +32,7 @@ func BenchmarkFilter_Int64Less(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		res, err := filterPredicate(batch, *sel, pred, nil)
+		res, err := filterPredicate(batch, *sel, pred, nil, nil, nil)
 		if err != nil || res.count == 0 {
 			b.Fatal("fast-path missed or errored")
 		}
@@ -48,7 +48,7 @@ func BenchmarkFilter_Int64Between(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		res, err := filterPredicate(batch, *sel, pred, nil)
+		res, err := filterPredicate(batch, *sel, pred, nil, nil, nil)
 		if err != nil || res.count == 0 {
 			b.Fatal("between fast-path missed")
 		}
@@ -63,7 +63,7 @@ func BenchmarkFilter_Int64AndCompound(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		res, err := filterPredicate(batch, *sel, pred, nil)
+		res, err := filterPredicate(batch, *sel, pred, nil, nil, nil)
 		if err != nil || res.count == 0 {
 			b.Fatal("AND fast-path missed")
 		}
@@ -76,7 +76,7 @@ func BenchmarkFilter_Int64Equal(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		res, err := filterPredicate(batch, *sel, pred, nil)
+		res, err := filterPredicate(batch, *sel, pred, nil, nil, nil)
 		if err != nil || res.count == 0 {
 			b.Fatal("fast-path missed or errored")
 		}

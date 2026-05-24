@@ -13,7 +13,7 @@ import (
 func openWrittenSegment(t *testing.T, dir, name string, pages []types.Batch) *Segment {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	if err := WriteSegment(path, pages); err != nil {
+	if _, err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -162,10 +162,10 @@ func TestScan_TopKPushdownDoesNotPruneNullablePages(t *testing.T) {
 func TestScan_TopKPushdownDoesNotPruneWithDeletionVector(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{
+	if _, err := WriteSegment(path, []types.Batch{
 		makeIntValuesBatch(t, "id", 100, 0),
 		makeIntValuesBatch(t, "id", 99, 98),
-	}); err != nil {
+	}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	dv := types.NewValidity(4)
@@ -209,7 +209,7 @@ func TestScan_TopKPushdownPrunesClusteredPages(t *testing.T) {
 	}
 	pages := []types.Batch{mk(0), mk(100), mk(200), mk(300)}
 	path := filepath.Join(dir, "seg.dsv4")
-	if err := WriteSegment(path, pages); err != nil {
+	if _, err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)

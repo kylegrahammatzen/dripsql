@@ -85,19 +85,22 @@ func UnmarshalNumericStats[T int32 | int64](src []byte, hasNonNull bool) Numeric
 	return s
 }
 
-// Float32 values widen to f64 on encode and narrow on decode.
+// NaN counts toward NaNCount and toward row count but never Min/Max. HasFinite
+// gates predicate pruning. Predicate prune treats !HasFinite as "cannot prune".
 type FloatStats struct {
-	Min        float64
-	Max        float64
-	HasNonNull bool
+	Min       float64
+	Max       float64
+	NaNCount  uint32
+	HasFinite bool
 }
 
 func (s *FloatStats) Update(v float64) {
 	if math.IsNaN(v) {
+		s.NaNCount++
 		return
 	}
-	if !s.HasNonNull {
-		s.Min, s.Max, s.HasNonNull = v, v, true
+	if !s.HasFinite {
+		s.Min, s.Max, s.HasFinite = v, v, true
 		return
 	}
 	if v < s.Min {
@@ -108,25 +111,27 @@ func (s *FloatStats) Update(v float64) {
 	}
 }
 
+// HasFinite is persisted via the column directory's HasNonNull bit. NaNCount
+// is transient and not written.
 func (s FloatStats) MarshalWire(dst []byte) {
 	_ = dst[StatsWireSize-1]
 	clear(dst[:StatsWireSize])
-	if !s.HasNonNull {
+	if !s.HasFinite {
 		return
 	}
 	binary.LittleEndian.PutUint64(dst[0:8], math.Float64bits(s.Min))
 	binary.LittleEndian.PutUint64(dst[8:16], math.Float64bits(s.Max))
 }
 
-func UnmarshalFloatStats(src []byte, hasNonNull bool) FloatStats {
+func UnmarshalFloatStats(src []byte, hasFinite bool) FloatStats {
 	_ = src[StatsWireSize-1]
-	if !hasNonNull {
+	if !hasFinite {
 		return FloatStats{}
 	}
 	return FloatStats{
-		Min:        math.Float64frombits(binary.LittleEndian.Uint64(src[0:8])),
-		Max:        math.Float64frombits(binary.LittleEndian.Uint64(src[8:16])),
-		HasNonNull: true,
+		Min:       math.Float64frombits(binary.LittleEndian.Uint64(src[0:8])),
+		Max:       math.Float64frombits(binary.LittleEndian.Uint64(src[8:16])),
+		HasFinite: true,
 	}
 }
 

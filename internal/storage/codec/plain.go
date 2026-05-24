@@ -17,7 +17,7 @@ func init() {
 
 func (plainCodec) Encoding() types.Encoding { return types.EncodingFlat }
 
-func (plainCodec) Estimate(v types.Vec) (int, bool) {
+func (c plainCodec) plainSize(v types.Vec) (int, bool) {
 	w := v.Kind.FixedWidth()
 	if w > 0 {
 		return int(v.Len) * int(w), true
@@ -31,11 +31,12 @@ func (plainCodec) Estimate(v types.Vec) (int, bool) {
 	return 0, false
 }
 
-func (c plainCodec) Encode(v types.Vec, scratch []byte) ([]byte, error) {
-	n, ok := c.Estimate(v)
+func (c plainCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+	n, ok := c.plainSize(v)
 	if !ok {
-		return nil, fmt.Errorf("plain encode: unsupported kind %v", v.Kind)
+		return nil, ErrSkip
 	}
+	scratch := ctxTrial(ctx)
 	if cap(scratch) < n {
 		scratch = make([]byte, n)
 	} else {

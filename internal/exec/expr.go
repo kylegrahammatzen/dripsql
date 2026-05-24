@@ -11,9 +11,17 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-type evalCtx struct{ batch types.Batch }
+type evalCtx struct {
+	batch    types.Batch
+	outer    *correlatedOuter
+	subBuild func(plan *sql.Plan) (Operator, error)
+}
 
 func newEvalCtx(batch types.Batch) *evalCtx { return &evalCtx{batch: batch} }
+
+func newEvalCtxWith(batch types.Batch, outer *correlatedOuter, subBuild func(plan *sql.Plan) (Operator, error)) *evalCtx {
+	return &evalCtx{batch: batch, outer: outer, subBuild: subBuild}
+}
 
 func (c *evalCtx) EvalBool(expr sql.BoundExpr, row int) (truth bool, err error) {
 	v, err := c.eval(expr, row)
@@ -29,9 +37,23 @@ func (c *evalCtx) eval(expr sql.BoundExpr, row int) (any, error) {
 	case sql.ExprLiteral:
 		return expr.Literal, nil
 	case sql.ExprColumn:
+		if expr.Outer {
+			if v, ok := c.outer.get(expr.Column); ok {
+				return v, nil
+			}
+			return nil, fmt.Errorf("eval: outer column %q not bound", expr.Column)
+		}
 		return c.colValue(expr.Column, row)
-	case sql.ExprNot, sql.ExprLower, sql.ExprUpper, sql.ExprLength:
+	case sql.ExprSubquery:
+		return c.evalCorrelatedScalar(expr, row)
+	case sql.ExprInSubquery:
+		return c.evalCorrelatedIn(expr, row)
+	case sql.ExprExists:
+		return c.evalCorrelatedExists(expr, row)
+	case sql.ExprNot, sql.ExprLower, sql.ExprUpper, sql.ExprLength, sql.ExprAbs:
 		return c.evalUnary(expr, row)
+	case sql.ExprNullIf:
+		return c.evalNullIf(expr, row)
 	case sql.ExprBetween:
 		return c.evalBetween(expr, row)
 	case sql.ExprIn:
@@ -42,8 +64,29 @@ func (c *evalCtx) eval(expr sql.BoundExpr, row int) (any, error) {
 		return c.evalSubstring(expr, row)
 	case sql.ExprJSONGet, sql.ExprJSONGetText:
 		return c.evalJSONPath(expr, row)
+	case sql.ExprCase:
+		return c.evalCase(expr, row)
 	}
 	return c.evalBinary(expr, row)
+}
+
+func (c *evalCtx) evalCase(expr sql.BoundExpr, row int) (any, error) {
+	args := expr.Args
+	if len(args) < 1 || len(args)%2 != 1 {
+		return nil, fmt.Errorf("eval: CASE arg shape invalid (got %d args)", len(args))
+	}
+	for i := 0; i+1 < len(args); i += 2 {
+		whenVal, err := c.eval(args[i], row)
+		if err != nil {
+			return nil, err
+		}
+		b, ok := whenVal.(bool)
+		if !ok || !b {
+			continue
+		}
+		return c.eval(args[i+1], row)
+	}
+	return c.eval(args[len(args)-1], row)
 }
 
 func (c *evalCtx) colValue(name string, row int) (any, error) {
@@ -99,8 +142,54 @@ func (c *evalCtx) evalUnary(expr sql.BoundExpr, row int) (any, error) {
 			return nil, fmt.Errorf("eval: LENGTH on non-text %T", v)
 		}
 		return int64(len(s)), nil
+	case sql.ExprAbs:
+		if v == nil {
+			return nil, nil
+		}
+		switch x := v.(type) {
+		case int64:
+			if x < 0 {
+				return -x, nil
+			}
+			return x, nil
+		case float64:
+			if x < 0 {
+				return -x, nil
+			}
+			return x, nil
+		default:
+			return nil, fmt.Errorf("eval: ABS on non-numeric %T", v)
+		}
 	}
 	return nil, fmt.Errorf("eval: unsupported unary op %v", expr.Op)
+}
+
+func (c *evalCtx) evalNullIf(expr sql.BoundExpr, row int) (any, error) {
+	if len(expr.Args) != 2 {
+		return nil, fmt.Errorf("eval: nullif expects 2 args")
+	}
+	left, err := c.eval(expr.Args[0], row)
+	if err != nil {
+		return nil, err
+	}
+	if left == nil {
+		return nil, nil
+	}
+	right, err := c.eval(expr.Args[1], row)
+	if err != nil {
+		return nil, err
+	}
+	if right == nil {
+		return left, nil
+	}
+	eq, err := compare(sql.ExprEqual, left, right)
+	if err != nil {
+		return nil, err
+	}
+	if b, ok := eq.(bool); ok && b {
+		return nil, nil
+	}
+	return left, nil
 }
 
 func (c *evalCtx) evalBinary(expr sql.BoundExpr, row int) (any, error) {

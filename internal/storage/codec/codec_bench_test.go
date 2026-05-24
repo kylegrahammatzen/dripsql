@@ -38,11 +38,11 @@ func BenchmarkCodec_Encode(b *testing.B) {
 				b.Fatal(err)
 			}
 			v := newFilledVec(c.kind, rows, c.fill)
-			scratch := make([]byte, 0, 64*1024)
+			ctx := &EncodeContext{Scratch: NewScratchPool()}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				if _, err := codec.Encode(v, scratch[:0]); err != nil {
+				if _, err := codec.Encode(v, ctx); err != nil {
 					b.Fatal(err)
 				}
 			}

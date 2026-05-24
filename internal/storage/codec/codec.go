@@ -1,18 +1,90 @@
-// Codec encodes/decodes a column page between wire bytes and a types.Vec.
-// Codecs self-register via init() and are dispatched by types.Encoding lookup. No fallback switch.
+// Codec interface plus the EncodeContext / ScratchPool / ErrSkip plumbing the
+// cascade and codec implementations share. Codecs self-register via init().
 package codec
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
+// Codecs return ErrSkip when their preconditions don't fit the Vec. Other
+// errors are fatal and stop the cascade.
+var ErrSkip = errors.New("codec: not applicable to this Vec")
+
+type EncodeContext struct {
+	Scratch *ScratchPool
+	Facts   *PageFacts
+}
+
+// Codecs may mutate trial, u64s, and dictMap. Best is reserved for the
+// cascade. Returned payloads must alias trial or fresh bytes, never best.
+type ScratchPool struct {
+	trial   []byte
+	best    []byte
+	u64s    []uint64
+	dictMap map[string]uint8
+}
+
+func NewScratchPool() *ScratchPool { return &ScratchPool{} }
+
+func (s *ScratchPool) Trial() []byte {
+	if s == nil {
+		return nil
+	}
+	return s.trial[:0]
+}
+
+func (s *ScratchPool) SaveTrial(p []byte) {
+	if s != nil {
+		s.trial = p
+	}
+}
+
+// U64s returns a []uint64 of at least n elements, reusing the underlying
+// array. Used by FOR/Delta for residuals.
+func (s *ScratchPool) U64s(n int) []uint64 {
+	if s == nil {
+		return make([]uint64, n)
+	}
+	if cap(s.u64s) < n {
+		s.u64s = make([]uint64, n)
+	}
+	return s.u64s[:n]
+}
+
+func (s *ScratchPool) DictMap() map[string]uint8 {
+	if s == nil {
+		return make(map[string]uint8, 16)
+	}
+	if s.dictMap == nil {
+		s.dictMap = make(map[string]uint8, 16)
+		return s.dictMap
+	}
+	clear(s.dictMap)
+	return s.dictMap
+}
+
+// Nil-safe so test callers can pass Encode(v, nil) without a setup ritual.
+func ctxTrial(ctx *EncodeContext) []byte {
+	if ctx == nil || ctx.Scratch == nil {
+		return nil
+	}
+	return ctx.Scratch.Trial()
+}
+
+func ctxU64s(ctx *EncodeContext, n int) []uint64 {
+	if ctx == nil || ctx.Scratch == nil {
+		return make([]uint64, n)
+	}
+	return ctx.Scratch.U64s(n)
+}
+
 type Codec interface {
 	Encoding() types.Encoding
-	Encode(v types.Vec, scratch []byte) (payload []byte, err error)
+	Encode(v types.Vec, ctx *EncodeContext) (payload []byte, err error)
 	Decode(payload []byte, kind types.VecKind, rows int, nullCount int, dst *types.Vec) error
-	Estimate(v types.Vec) (int, bool)
 }
 
 var registry = map[types.Encoding]Codec{}
@@ -34,4 +106,17 @@ func Lookup(e types.Encoding) (Codec, error) {
 		return nil, fmt.Errorf("codec: no codec registered for %v", e)
 	}
 	return c, nil
+}
+
+// Test-only helper. Production code calls Encode directly via cascade.
+func Estimate(c Codec, v types.Vec) (int, bool) {
+	ctx := &EncodeContext{Scratch: NewScratchPool()}
+	p, err := c.Encode(v, ctx)
+	if errors.Is(err, ErrSkip) {
+		return 0, false
+	}
+	if err != nil {
+		return 0, false
+	}
+	return len(p), true
 }

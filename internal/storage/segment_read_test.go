@@ -18,7 +18,7 @@ func TestOpenSegment_RoundTrip_IntColumn(t *testing.T) {
 		makeIntBatch(t, "id", 0, 100),
 		makeIntBatch(t, "id", 100, 100),
 	}
-	if err := WriteSegment(path, pages); err != nil {
+	if _, err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -65,7 +65,7 @@ func TestOpenSegment_RoundTrip_TwoColumns(t *testing.T) {
 		makeTwoColumnBatch(t, 0, 64),
 		makeTwoColumnBatch(t, 64, 64),
 	}
-	if err := WriteSegment(path, pages); err != nil {
+	if _, err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -111,7 +111,7 @@ func TestOpenSegment_TooSmallErrors(t *testing.T) {
 
 func TestOpenSegment_BadTailMagicErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -124,7 +124,7 @@ func TestOpenSegment_BadTailMagicErrors(t *testing.T) {
 
 func TestOpenSegment_BadHeadMagicErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -137,7 +137,7 @@ func TestOpenSegment_BadHeadMagicErrors(t *testing.T) {
 
 func TestSegment_ReadPage_OutOfRange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 10)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 10)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -156,7 +156,7 @@ func TestSegment_ReadPage_OutOfRange(t *testing.T) {
 func TestSegment_StatsMarshaledIntoFooter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	pages := []types.Batch{makeIntBatch(t, "id", 5, 100)}
-	if err := WriteSegment(path, pages); err != nil {
+	if _, err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -203,13 +203,13 @@ func TestParseFooter_RejectsAbsurdLabelCount(t *testing.T) {
 
 func TestParseFooter_RejectsTrailingBytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	footerLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
-	footerStart := len(data) - FooterSuffixSize - int(footerLen)
-	body := append([]byte{}, data[footerStart:len(data)-FooterSuffixSize]...)
+	footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
+	footerStart := len(data) - FooterSuffixSize - int(sidecarLen) - int(footerLen)
+	body := append([]byte{}, data[footerStart:footerStart+int(footerLen)]...)
 	body = append(body, 0, 0, 0)
 	if _, err := parseFooter(body); err == nil {
 		t.Fatal("parseFooter must reject trailing bytes after canonical footer")
@@ -218,34 +218,44 @@ func TestParseFooter_RejectsTrailingBytes(t *testing.T) {
 
 func TestOpenSegment_RejectsCorruptPageOffset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	footerLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
-	footerStart := len(data) - FooterSuffixSize - int(footerLen)
+	footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
+	footerStart := len(data) - FooterSuffixSize - int(sidecarLen) - int(footerLen)
 	pageDirOff := footerStart + int(footerLen) - PageEntrySize
 	binary.LittleEndian.PutUint64(data[pageDirOff+0:pageDirOff+8], 1<<40)
 	_ = os.WriteFile(path, data, 0o644)
-	if _, err := OpenSegment(path); err == nil {
-		t.Fatal("OpenSegment must reject page payload offset past bodyEnd")
+	seg, err := OpenSegment(path)
+	if err != nil {
+		t.Fatalf("OpenSegment must not fail before lazy validation: %v", err)
+	}
+	defer seg.Close()
+	if err := seg.ValidateColumns(); err == nil {
+		t.Fatal("ValidateColumns must reject page payload offset past bodyEnd")
 	}
 }
 
 func TestOpenSegment_RejectsPageFlagAllNull(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	footerLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
-	footerStart := len(data) - FooterSuffixSize - int(footerLen)
+	footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
+	footerStart := len(data) - FooterSuffixSize - int(sidecarLen) - int(footerLen)
 	// Footer ends with [page-entries...][page-stats...]; single column with one page means
 	// the page entry is at footerEnd - 1*StatsWireSize - PageEntrySize.
 	pageDirOff := footerStart + int(footerLen) - StatsWireSize - PageEntrySize
 	data[pageDirOff+30] = PageFlagAllValid | PageFlagAllNull
 	_ = os.WriteFile(path, data, 0o644)
-	if _, err := OpenSegment(path); err == nil {
-		t.Fatal("OpenSegment must reject pages with PageFlagAllNull until null support lands")
+	seg, err := OpenSegment(path)
+	if err != nil {
+		t.Fatalf("OpenSegment must not fail before lazy validation: %v", err)
+	}
+	defer seg.Close()
+	if err := seg.ValidateColumns(); err == nil {
+		t.Fatal("ValidateColumns must reject pages with both AllValid and AllNull set")
 	}
 }

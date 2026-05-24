@@ -16,6 +16,9 @@ const (
 	EncodingDeltaBitPack
 	EncodingFlate
 	EncodingZstd
+	EncodingALP
+	EncodingALPRD
+	EncodingFSST
 )
 
 type encodingInfo struct {
@@ -33,6 +36,9 @@ var encodingTable = [...]encodingInfo{
 	EncodingDeltaBitPack: {"delta+bitpack", 6},
 	EncodingFlate:        {"flate", 7},
 	EncodingZstd:         {"zstd", 8},
+	EncodingALP:          {"alp", 9},
+	EncodingALPRD:        {"alp-rd", 10},
+	EncodingFSST:         {"fsst", 11},
 }
 
 func (e Encoding) String() string {

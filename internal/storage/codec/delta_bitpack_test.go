@@ -77,7 +77,7 @@ func TestDeltaBitpack_EstimateRejectsConstantDeltas(t *testing.T) {
 	for i := range src.I64() {
 		src.I64()[i] = int64(i) * 5
 	}
-	if _, ok := (deltaBitpackCodec{}).Estimate(src); ok {
+	if _, ok := Estimate(deltaBitpackCodec{}, src); ok {
 		t.Fatal("Estimate must reject when all deltas are equal (Sequence wins)")
 	}
 }
@@ -85,7 +85,7 @@ func TestDeltaBitpack_EstimateRejectsConstantDeltas(t *testing.T) {
 func TestDeltaBitpack_EstimateRejectsTooFewRows(t *testing.T) {
 	for _, n := range []int{0, 1} {
 		v := types.NewVec(types.VecInt64, n)
-		if _, ok := (deltaBitpackCodec{}).Estimate(v); ok {
+		if _, ok := Estimate(deltaBitpackCodec{}, v); ok {
 			t.Fatalf("Estimate must reject rows=%d", n)
 		}
 	}
@@ -99,7 +99,7 @@ func TestDeltaBitpack_EstimateRejectsNonFORKinds(t *testing.T) {
 		} else {
 			v = types.NewVec(kind, 4)
 		}
-		if _, ok := (deltaBitpackCodec{}).Estimate(v); ok {
+		if _, ok := Estimate(deltaBitpackCodec{}, v); ok {
 			t.Fatalf("Estimate must reject %v", kind)
 		}
 	}
@@ -132,7 +132,7 @@ func TestDeltaBitpack_EstimateMatchesEncode(t *testing.T) {
 		src.I64()[i] = val
 		val += int64(1 + i%4)
 	}
-	est, ok := deltaBitpackCodec{}.Estimate(src)
+	est, ok := Estimate(deltaBitpackCodec{}, src)
 	if !ok {
 		t.Fatal("Estimate must accept near-monotonic series")
 	}

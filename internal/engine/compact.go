@@ -25,6 +25,11 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 	}
 	view := m.Snapshot()
 	rewritten := 0
+	stmt := storage.NewSpan("COMPACT " + table)
+	defer func() {
+		stmt.End()
+		db.publishWriteSpan(stmt)
+	}()
 	for _, entry := range view.Entries {
 		if entry.Path == "" || entry.DeletionVectorPath == "" {
 			continue
@@ -57,7 +62,11 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		}
 		newPath := db.nextSegmentPath(table)
 		if liveCount > 0 {
-			if err := storage.WriteSegmentWithCodecs(newPath, []types.Batch{liveBatch}, columnCodecs(db.boundTable(db.tables[types.NormalizeName(table)]))); err != nil {
+			span, err := storage.WriteSegment(newPath, []types.Batch{liveBatch}, columnCodecs(db.boundTable(db.tables[types.NormalizeName(table)])))
+			if span != nil {
+				stmt.AppendChild(span)
+			}
+			if err != nil {
 				return rewritten, err
 			}
 		}
@@ -76,7 +85,7 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		if liveCount > 0 {
 			adds = append(adds, storage.ManifestSegmentAdd{Path: newPath, Rows: uint32(liveCount)})
 		}
-		if err := m.Commit(adds, []storage.ManifestDVUpdate{{SegmentPath: entry.Path, DVPath: dvPath, Rows: uint32(rows)}}); err != nil {
+		if err := db.commitManifestTxn(table, adds, []storage.ManifestDVUpdate{{SegmentPath: entry.Path, DVPath: dvPath, Rows: uint32(rows)}}); err != nil {
 			if liveCount > 0 {
 				os.Remove(newPath)
 			}
@@ -102,7 +111,112 @@ func (db *DB) Vacuum() (int, error) {
 			return total, err
 		}
 	}
+	if db.opts.AutoRetention && db.opts.RetentionLag > 0 {
+		cur := db.nextCommitTs.Load()
+		if cur > db.opts.RetentionLag {
+			cutoff := cur - db.opts.RetentionLag
+			retired, err := db.vacuumRetentionLocked(cutoff)
+			total += retired
+			if err != nil {
+				return total, err
+			}
+		}
+	}
 	return total, nil
+}
+
+func (db *DB) VacuumRetention(retainBefore uint64) (int, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.closed {
+		return 0, fmt.Errorf("engine: database is closed")
+	}
+	return db.vacuumRetentionLocked(retainBefore)
+}
+
+func (db *DB) vacuumRetentionLocked(retainBefore uint64) (int, error) {
+	cutoff := retainBefore
+	for ts := range db.pinnedReadTs {
+		if ts < cutoff {
+			cutoff = ts
+		}
+	}
+	if cutoff == 0 {
+		return 0, nil
+	}
+	retired := 0
+	for name := range db.tables {
+		n, err := db.retireFullyDeletedSegments(name, cutoff)
+		retired += n
+		if err != nil {
+			return retired, err
+		}
+	}
+	return retired, nil
+}
+
+func (db *DB) retireFullyDeletedSegments(table string, cutoff uint64) (int, error) {
+	m, err := db.manifestFor(table)
+	if err != nil {
+		return 0, err
+	}
+	view := m.Snapshot()
+	var paths []string
+	var dvPaths []string
+	for _, entry := range view.Entries {
+		// Retention is safe only when both seg.CommitTs and DV-out CommitTs are strictly
+		// below cutoff, otherwise a reader pinned between them would expect to see live rows.
+		effectiveTs := entry.CommitTs
+		if entry.DVCommitTs > effectiveTs {
+			effectiveTs = entry.DVCommitTs
+		}
+		if effectiveTs == 0 || effectiveTs >= cutoff {
+			continue
+		}
+		if entry.DeletionVectorPath == "" {
+			continue
+		}
+		seg, err := storage.OpenSegmentWithDV(entry.Path, entry.DeletionVectorPath)
+		if err != nil {
+			return 0, fmt.Errorf("retention: open %q: %w", entry.Path, err)
+		}
+		rows := int(seg.Rows())
+		fullyDead := seg.DV != nil && seg.DV.NullCount(rows) == rows
+		seg.Close()
+		if !fullyDead {
+			continue
+		}
+		paths = append(paths, entry.Path)
+		dvPaths = append(dvPaths, entry.DeletionVectorPath)
+	}
+	if len(paths) == 0 {
+		return 0, nil
+	}
+	for _, p := range paths {
+		for k, elem := range db.segCache {
+			if k.path != p {
+				continue
+			}
+			_ = elem.Value.(*segCacheEntry).seg.Close()
+			db.segLRU.Remove(elem)
+			delete(db.segCache, k)
+		}
+	}
+	commitTs := db.nextCommitTs.Add(1)
+	if err := m.Retire(commitTs, paths); err != nil {
+		return 0, err
+	}
+	for _, p := range paths {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return 0, fmt.Errorf("retention: remove %q: %w", p, err)
+		}
+	}
+	for _, p := range dvPaths {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return 0, fmt.Errorf("retention: remove dv %q: %w", p, err)
+		}
+	}
+	return len(paths), nil
 }
 
 func (db *DB) vacuumTableLocked(table string) (int, error) {

@@ -85,9 +85,11 @@ func TestBindSelect_Scan_WhereInt32Range(t *testing.T) {
 	}
 }
 
-func TestBindSelect_RejectsGroupByWithoutAggregate(t *testing.T) {
-	if _, err := bindSelect(t, "SELECT category FROM sales GROUP BY category"); err == nil {
-		t.Fatal("GROUP BY without aggregate select expr must error")
+func TestBindSelect_GroupByWithoutAggregateIsDistinct(t *testing.T) {
+	// GROUP BY without aggregates is the lowered form of SELECT DISTINCT: keep the
+	// group key as the only output column and dedup. Used to reject this; now valid.
+	if _, err := bindSelect(t, "SELECT category FROM sales GROUP BY category"); err != nil {
+		t.Fatalf("GROUP BY without aggregate is now allowed as DISTINCT equivalent: %v", err)
 	}
 }
 

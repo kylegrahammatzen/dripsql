@@ -178,7 +178,7 @@ func TestBoundPredicate_EmptyBatch_NoPanic(t *testing.T) {
 
 func TestPruneSegment_EqInt64_OutsideRange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 10, 100)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 10, 100)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -198,7 +198,7 @@ func TestPruneSegment_EqInt64_OutsideRange(t *testing.T) {
 
 func TestPruneSegment_LtAndGt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 100, 100)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 100, 100)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, _ := OpenSegment(path)
@@ -217,7 +217,7 @@ func TestPruneSegment_LtAndGt(t *testing.T) {
 
 func TestPruneSegment_And_SkipsIfAnyChildSkips(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 50)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 50)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, _ := OpenSegment(path)
@@ -235,7 +235,7 @@ func TestPruneSegment_And_SkipsIfAnyChildSkips(t *testing.T) {
 
 func TestPruneSegment_Or_SkipsOnlyIfAllChildrenSkip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 50)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 50)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, _ := OpenSegment(path)
@@ -268,7 +268,7 @@ func TestPruneSegment_NoFalseNegatives_Random(t *testing.T) {
 	v := types.NewVec(types.VecInt64, rows)
 	copy(v.I64(), vals)
 	batch, _ := types.NewBatch([]types.Column{{Name: "id", Type: types.Int64, V: v}})
-	if err := WriteSegment(path, []types.Batch{batch}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{batch}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, _ := OpenSegment(path)
@@ -293,7 +293,7 @@ func TestPrunePage_NoFalseNegatives(t *testing.T) {
 		makeIntBatch(t, "id", 400, pageRows),     // [400, 500)
 	}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, pages); err != nil {
+	if _, err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -342,6 +342,57 @@ func TestPrunePage_NoFalseNegatives(t *testing.T) {
 		if bp.PrunePage(seg, pi) {
 			t.Fatalf("GtInt64(value=%d) pruned page %d that has rows > value", bound.lo, pi)
 		}
+	}
+}
+
+func TestPruneSegment_NotConstant(t *testing.T) {
+	v := types.NewVec(types.VecInt64, 50)
+	for i := range v.I64() {
+		v.I64()[i] = 7
+	}
+	batch, _ := types.NewBatch([]types.Column{{Name: "id", Type: types.Int64, V: v}})
+	path := filepath.Join(t.TempDir(), "seg.dsv4")
+	if _, err := WriteSegment(path, []types.Batch{batch}, nil); err != nil {
+		t.Fatalf("WriteSegment: %v", err)
+	}
+	seg, _ := OpenSegment(path)
+	defer seg.Close()
+	schema := []types.Column{{Name: "id", Type: types.Int64}}
+
+	prune, _ := BindPredicate(Not{Child: EqInt64{Column: "id", Value: 7}}, ColumnsSchema(schema))
+	if !prune.PruneSegment(seg) {
+		t.Fatal("NOT(id = 7) on constant-7 segment must prune")
+	}
+	noPrune, _ := BindPredicate(Not{Child: EqInt64{Column: "id", Value: 8}}, ColumnsSchema(schema))
+	if noPrune.PruneSegment(seg) {
+		t.Fatal("NOT(id = 8) on constant-7 segment must not prune")
+	}
+	ltPrune, _ := BindPredicate(Not{Child: LtInt64{Column: "id", Value: 10}}, ColumnsSchema(schema))
+	if !ltPrune.PruneSegment(seg) {
+		t.Fatal("NOT(id < 10) on all-7 segment must prune")
+	}
+}
+
+func TestPruneSegment_EqBytes_DictHistogram(t *testing.T) {
+	batch := buildBytesBatch(t, "cat", []string{"a", "b", "c", "a", "b"})
+	path := filepath.Join(t.TempDir(), "seg.dsv4")
+	if _, err := WriteSegment(path, []types.Batch{batch}, nil); err != nil {
+		t.Fatalf("WriteSegment: %v", err)
+	}
+	seg, err := OpenSegment(path)
+	if err != nil {
+		t.Fatalf("OpenSegment: %v", err)
+	}
+	defer seg.Close()
+	schema := []types.Column{{Name: "cat", Type: types.Text}}
+
+	miss, _ := BindPredicate(EqBytes{Column: "cat", Value: []byte("zzz")}, ColumnsSchema(schema))
+	if !miss.PruneSegment(seg) {
+		t.Fatal("PruneSegment must skip when literal absent from dict histogram")
+	}
+	hit, _ := BindPredicate(EqBytes{Column: "cat", Value: []byte("a")}, ColumnsSchema(schema))
+	if hit.PruneSegment(seg) {
+		t.Fatal("PruneSegment must not skip when literal present in dict histogram")
 	}
 }
 

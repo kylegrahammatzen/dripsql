@@ -151,7 +151,7 @@ func TestPlain_EstimateMatchesEncode(t *testing.T) {
 	src.Var().AppendString(0, "abc")
 	src.Var().AppendString(1, "longer than twelve")
 	src.Var().AppendString(2, "")
-	est, ok := plainCodec{}.Estimate(src)
+	est, ok := Estimate(plainCodec{}, src)
 	if !ok {
 		t.Fatal("Estimate must succeed for varbytes")
 	}
@@ -169,13 +169,16 @@ func TestPlain_EncodeReusesScratch(t *testing.T) {
 	for i := range src.I32() {
 		src.I32()[i] = int32(i)
 	}
-	scratch := make([]byte, 64)
-	payload, err := plainCodec{}.Encode(src, scratch)
+	sp := NewScratchPool()
+	sp.trial = make([]byte, 0, 64)
+	trialBase := &sp.trial[:1][0]
+	ctx := &EncodeContext{Scratch: sp}
+	payload, err := plainCodec{}.Encode(src, ctx)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	if &payload[0] != &scratch[0] {
-		t.Fatal("Encode must reuse provided scratch when capacity is sufficient")
+	if &payload[0] != trialBase {
+		t.Fatal("Encode must reuse pool scratch when capacity is sufficient")
 	}
 }
 

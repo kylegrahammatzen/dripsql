@@ -22,14 +22,31 @@ type SegmentColumn struct {
 	Stats      [StatsWireSize]byte
 	Pages      []Page
 	PageStats  [][StatsWireSize]byte
+
+	// Lazily inflated into PageStats on first prune call. Skips the per-column
+	// alloc on cold open when no predicate ever runs.
+	pageStatsRaw []byte
 }
 
 type Segment struct {
-	f       *os.File
-	path    string
-	bodyEnd int64
-	Cols    []SegmentColumn
-	DV      types.Validity
+	f            *os.File
+	path         string
+	bodyEnd      int64
+	sidecarOff   int64
+	sidecarLen   int64
+	Cols         []SegmentColumn
+	DV           types.Validity
+	// CommitTs is the manifest record's commit timestamp; set by the engine when opening
+	// the segment so the scan visibility filter can skip segments newer than a reader's
+	// ReadTs. Zero on standalone OpenSegment paths (tests, tooling), which treat the
+	// segment as committed at time 0 -- always visible.
+	CommitTs uint64
+
+	containerOnce sync.Once
+	container     map[uint8][]byte
+	containerErr  error
+
+	pageStatsOnce sync.Once
 
 	dictHistsOnce sync.Once
 	dictHists     DictHistograms
@@ -42,21 +59,116 @@ type Segment struct {
 	numSumsOnce sync.Once
 	numSums     NumericSums
 	numSumsErr  error
+
+	varBloomsOnce sync.Once
+	varBlooms     VarBlooms
+	varBloomsErr  error
+
+	validateOnce sync.Once
+	validateErr  error
+	bodyEndCache int64
+}
+
+func (s *Segment) sidecarSection(tag uint8) ([]byte, error) {
+	s.containerOnce.Do(func() {
+		if s.sidecarLen == 0 {
+			return
+		}
+		buf, err := readExactAt(s.f, s.sidecarOff, int(s.sidecarLen), "sidecar")
+		if err != nil {
+			s.containerErr = err
+			return
+		}
+		s.container, s.containerErr = DecodeSidecarContainer(buf)
+	})
+	if s.containerErr != nil {
+		return nil, s.containerErr
+	}
+	return s.container[tag], nil
 }
 
 func (s *Segment) DictHistograms() (DictHistograms, error) {
-	s.dictHistsOnce.Do(func() { s.dictHists, s.dictHistsErr = LoadDictHistograms(s.path) })
+	s.dictHistsOnce.Do(func() {
+		body, err := s.sidecarSection(sidecarSectionDictHist)
+		if err != nil {
+			s.dictHistsErr = err
+			return
+		}
+		m, err := dictHistSidecar.Decode(body)
+		if err != nil {
+			s.dictHistsErr = err
+			return
+		}
+		s.dictHists = DictHistograms(m)
+	})
 	return s.dictHists, s.dictHistsErr
 }
 
 func (s *Segment) IntFilterSet() (IntFilters, error) {
-	s.intFiltersOnce.Do(func() { s.intFilters, s.intFiltersErr = LoadIntFilters(s.path) })
+	s.intFiltersOnce.Do(func() {
+		body, err := s.sidecarSection(sidecarSectionIntFilter)
+		if err != nil {
+			s.intFiltersErr = err
+			return
+		}
+		m, err := intFilterSidecar.Decode(body)
+		if err != nil {
+			s.intFiltersErr = err
+			return
+		}
+		s.intFilters = IntFilters(m)
+	})
 	return s.intFilters, s.intFiltersErr
 }
 
 func (s *Segment) NumericSums() (NumericSums, error) {
-	s.numSumsOnce.Do(func() { s.numSums, s.numSumsErr = LoadNumericSums(s.path) })
+	s.numSumsOnce.Do(func() {
+		body, err := s.sidecarSection(sidecarSectionNumSum)
+		if err != nil {
+			s.numSumsErr = err
+			return
+		}
+		m, err := numSumSidecar.Decode(body)
+		if err != nil {
+			s.numSumsErr = err
+			return
+		}
+		s.numSums = NumericSums(m)
+	})
 	return s.numSums, s.numSumsErr
+}
+
+func (s *Segment) VarBlooms() (VarBlooms, error) {
+	s.varBloomsOnce.Do(func() {
+		body, err := s.sidecarSection(sidecarSectionVarBloom)
+		if err != nil {
+			s.varBloomsErr = err
+			return
+		}
+		m, err := varBloomSidecar.Decode(body)
+		if err != nil {
+			s.varBloomsErr = err
+			return
+		}
+		s.varBlooms = VarBlooms(m)
+	})
+	return s.varBlooms, s.varBloomsErr
+}
+
+func (s *Segment) LoadPageStats() {
+	s.pageStatsOnce.Do(func() {
+		for i := range s.Cols {
+			c := &s.Cols[i]
+			if c.PageStats != nil || len(c.pageStatsRaw) == 0 {
+				continue
+			}
+			n := len(c.pageStatsRaw) / StatsWireSize
+			c.PageStats = make([][StatsWireSize]byte, n)
+			for j := range n {
+				copy(c.PageStats[j][:], c.pageStatsRaw[j*StatsWireSize:(j+1)*StatsWireSize])
+			}
+		}
+	})
 }
 
 func (s *Segment) Path() string { return s.path }
@@ -79,20 +191,14 @@ func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
 	if err != nil {
 		return nil, err
 	}
-	cols, bodyEnd, err := readFooter(f)
+	layout, err := readFooter(f)
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
-	for i := range cols {
-		if err := validateColumnDirectory(&cols[i], bodyEnd); err != nil {
-			f.Close()
-			return nil, fmt.Errorf("OpenSegment: col %q: %w", cols[i].Name, err)
-		}
-	}
 	rows := uint32(0)
-	if len(cols) > 0 {
-		rows = cols[0].Rows
+	if len(layout.cols) > 0 {
+		rows = layout.cols[0].Rows
 	}
 	if dvPath == "" {
 		dvPath = DVPath(path)
@@ -102,8 +208,31 @@ func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
 		f.Close()
 		return nil, fmt.Errorf("OpenSegment: load DV: %w", err)
 	}
-	// Sidecars (.dh, .bf, .sm) load lazily on first call to the accessor methods.
-	return &Segment{f: f, path: path, bodyEnd: bodyEnd, Cols: cols, DV: dv}, nil
+	// Sidecar container lives inline between footer and suffix; lazily read on first access.
+	return &Segment{
+		f:            f,
+		path:         path,
+		bodyEnd:      layout.bodyEnd,
+		bodyEndCache: layout.bodyEnd,
+		sidecarOff:   layout.sidecarStart,
+		sidecarLen:   layout.sidecarLen,
+		Cols:         layout.cols,
+		DV:           dv,
+	}, nil
+}
+
+// ValidateColumns runs structural checks on all column directories. Called once
+// lazily before the first ReadPage so OpenSegment stays a thin footer read.
+func (s *Segment) ValidateColumns() error {
+	s.validateOnce.Do(func() {
+		for i := range s.Cols {
+			if err := validateColumnDirectory(&s.Cols[i], s.bodyEndCache); err != nil {
+				s.validateErr = fmt.Errorf("validateColumns: col %q: %w", s.Cols[i].Name, err)
+				return
+			}
+		}
+	})
+	return s.validateErr
 }
 
 const knownPageFlags = PageFlagAllValid | PageFlagAllNull | PageFlagInMembership | PageFlagEncodedEvalOK
@@ -183,6 +312,9 @@ func (s *Segment) ReadPage(colIdx, pageIdx int) (types.Vec, error) {
 
 // Caller-supplied scratch is grown if too small and returned for reuse on the next call.
 func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (types.Vec, []byte, error) {
+	if err := s.ValidateColumns(); err != nil {
+		return types.Vec{}, scratch, err
+	}
 	if colIdx < 0 || colIdx >= len(s.Cols) {
 		return types.Vec{}, scratch, fmt.Errorf("ReadPage: col %d out of range [0, %d)", colIdx, len(s.Cols))
 	}
@@ -303,46 +435,65 @@ func allInvalidValidity(rows int) types.Validity {
 	return make(types.Validity, types.ValidityWords(rows))
 }
 
-func readFooter(f *os.File) ([]SegmentColumn, int64, error) {
+// footerLayout captures the trailer offsets parsed from the suffix: where the
+// column footer starts, where (and how big) the optional sidecar trailer is, and
+// the segment body's exclusive end (also footerStart).
+type footerLayout struct {
+	cols         []SegmentColumn
+	bodyEnd      int64
+	sidecarStart int64
+	sidecarLen   int64
+}
+
+func readFooter(f *os.File) (footerLayout, error) {
+	var out footerLayout
 	fi, err := f.Stat()
 	if err != nil {
-		return nil, 0, err
+		return out, err
 	}
 	size := fi.Size()
 	if size < int64(MagicLen+FooterSuffixSize) {
-		return nil, 0, fmt.Errorf("readFooter: file too small (%d bytes)", size)
+		return out, fmt.Errorf("readFooter: file too small (%d bytes)", size)
 	}
 	suffix, err := readExactAt(f, size-int64(FooterSuffixSize), FooterSuffixSize, "suffix")
 	if err != nil {
-		return nil, 0, err
+		return out, err
 	}
-	footerLen, ok := ReadFooterSuffix(suffix)
+	footerLen, sidecarLen, ok := ReadFooterSuffix(suffix)
 	if !ok {
-		return nil, 0, fmt.Errorf("readFooter: tail magic mismatch")
+		return out, fmt.Errorf("readFooter: tail magic mismatch")
 	}
 	if footerLen > uint64(math.MaxInt32) {
-		return nil, 0, fmt.Errorf("readFooter: footer length %d exceeds int32 range", footerLen)
+		return out, fmt.Errorf("readFooter: footer length %d exceeds int32 range", footerLen)
 	}
-	footerStart := size - int64(FooterSuffixSize) - int64(footerLen)
+	if sidecarLen > uint64(math.MaxInt32) {
+		return out, fmt.Errorf("readFooter: sidecar length %d exceeds int32 range", sidecarLen)
+	}
+	sidecarStart := size - int64(FooterSuffixSize) - int64(sidecarLen)
+	footerStart := sidecarStart - int64(footerLen)
 	if footerStart < int64(MagicLen) {
-		return nil, 0, fmt.Errorf("readFooter: footer length %d implies negative offset", footerLen)
+		return out, fmt.Errorf("readFooter: footer+sidecar lengths imply negative offset")
 	}
 	head, err := readExactAt(f, 0, MagicLen, "head magic")
 	if err != nil {
-		return nil, 0, err
+		return out, err
 	}
 	if string(head) != Magic {
-		return nil, 0, fmt.Errorf("readFooter: head magic mismatch")
+		return out, fmt.Errorf("readFooter: head magic mismatch")
 	}
 	body, err := readExactAt(f, footerStart, int(footerLen), "body")
 	if err != nil {
-		return nil, 0, err
+		return out, err
 	}
 	cols, err := parseFooter(body)
 	if err != nil {
-		return nil, 0, err
+		return out, err
 	}
-	return cols, footerStart, nil
+	out.cols = cols
+	out.bodyEnd = footerStart
+	out.sidecarStart = sidecarStart
+	out.sidecarLen = int64(sidecarLen)
+	return out, nil
 }
 
 func readExactAt(f *os.File, off int64, n int, label string) ([]byte, error) {
@@ -409,10 +560,7 @@ func parseFooter(body []byte) ([]SegmentColumn, error) {
 		if n == 0 {
 			continue
 		}
-		cols[i].PageStats = make([][StatsWireSize]byte, n)
-		for j := range n {
-			copy(cols[i].PageStats[j][:], r.Raw(StatsWireSize))
-		}
+		cols[i].pageStatsRaw = r.Raw(n * StatsWireSize)
 	}
 	if err := r.Err(); err != nil {
 		return nil, err

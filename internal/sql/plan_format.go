@@ -150,6 +150,8 @@ func (f AggregateFunc) String() string {
 		return "min"
 	case AggregateMax:
 		return "max"
+	case AggregateAvg:
+		return "avg"
 	}
 	return "?"
 }
@@ -258,6 +260,12 @@ func funcExprName(op ExprOp) string {
 		return "coalesce"
 	case ExprSubstring:
 		return "substring"
+	case ExprAbs:
+		return "abs"
+	case ExprNullIf:
+		return "nullif"
+	case ExprCase:
+		return "case"
 	}
 	return ""
 }

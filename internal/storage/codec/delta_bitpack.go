@@ -20,38 +20,44 @@ func init() {
 
 func (deltaBitpackCodec) Encoding() types.Encoding { return types.EncodingDeltaBitPack }
 
-func (c deltaBitpackCodec) Estimate(v types.Vec) (int, bool) {
+func (c deltaBitpackCodec) deltaFits(v types.Vec, ctx *EncodeContext) (first, base int64, width int, ok bool) {
 	if !v.Kind.IsFORPackable() {
-		return 0, false
+		return 0, 0, 0, false
 	}
 	rows := int(v.Len)
 	if rows < 2 {
-		return 0, false
+		return 0, 0, 0, false
 	}
-	_, _, width, ok := deltaParams(v)
+	if ctx != nil && ctx.Facts != nil && ctx.Facts.Int != nil {
+		f := ctx.Facts.Int
+		if !f.DeltaOK {
+			return 0, 0, 0, false
+		}
+		storageBits := int(v.Kind.FixedWidth()) * 8
+		if f.DeltaWidth >= storageBits {
+			return 0, 0, 0, false
+		}
+		return f.First, f.DeltaBase, f.DeltaWidth, true
+	}
+	first, base, width, ok = deltaParams(v)
 	if !ok {
-		return 0, false
+		return 0, 0, 0, false
 	}
 	storageBits := int(v.Kind.FixedWidth()) * 8
 	if width >= storageBits {
-		return 0, false
+		return 0, 0, 0, false
 	}
-	return deltaHeaderSize + PackedSize(rows-1, width), true
+	return first, base, width, true
 }
 
-func (c deltaBitpackCodec) Encode(v types.Vec, scratch []byte) ([]byte, error) {
-	if !v.Kind.IsFORPackable() {
-		return nil, fmt.Errorf("delta+bitpack encode: kind %v not FOR-packable", v.Kind)
+func (c deltaBitpackCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+	first, base, width, ok := c.deltaFits(v, ctx)
+	if !ok {
+		return nil, ErrSkip
 	}
 	rows := int(v.Len)
-	if rows < 2 {
-		return nil, fmt.Errorf("delta+bitpack encode: rows %d < 2", rows)
-	}
-	first, base, width, ok := deltaParams(v)
-	if !ok {
-		return nil, fmt.Errorf("delta+bitpack encode: width 0 or out of range")
-	}
 	n := deltaHeaderSize + PackedSize(rows-1, width)
+	scratch := ctxTrial(ctx)
 	if cap(scratch) < n {
 		scratch = make([]byte, n)
 	} else {
@@ -60,7 +66,7 @@ func (c deltaBitpackCodec) Encode(v types.Vec, scratch []byte) ([]byte, error) {
 	binary.LittleEndian.PutUint64(scratch[0:8], uint64(first))
 	binary.LittleEndian.PutUint64(scratch[8:16], uint64(base))
 	scratch[16] = byte(width)
-	vals := make([]uint64, rows)
+	vals := ctxU64s(ctx, rows)
 	readFORValues(v, vals)
 	residuals := make([]uint64, rows-1)
 	for i := range residuals {

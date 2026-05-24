@@ -19,7 +19,7 @@ func TestConstant_EstimateRejectsNonConstant(t *testing.T) {
 	v.I64()[0] = 1
 	v.I64()[1] = 1
 	v.I64()[2] = 2
-	if _, ok := (constantCodec{}).Estimate(v); ok {
+	if _, ok := Estimate(constantCodec{}, v); ok {
 		t.Fatal("Estimate must return false for non-constant rows")
 	}
 }
@@ -105,10 +105,10 @@ func TestConstant_VarBytesRoundTrip(t *testing.T) {
 }
 
 func TestConstant_EstimateRejectsInvalidKind(t *testing.T) {
-	if _, ok := (constantCodec{}).Estimate(types.Vec{}); ok {
+	if _, ok := Estimate(constantCodec{}, types.Vec{}); ok {
 		t.Fatal("Estimate must reject zero-Kind even when Len=0")
 	}
-	if _, ok := (constantCodec{}).Estimate(types.Vec{Kind: types.VecInvalid}); ok {
+	if _, ok := Estimate(constantCodec{}, types.Vec{Kind: types.VecInvalid}); ok {
 		t.Fatal("Estimate must reject VecInvalid")
 	}
 }
@@ -173,7 +173,7 @@ func TestConstant_EstimateMatchesEncode(t *testing.T) {
 	for i := range 8 {
 		src.Var().AppendString(i, "value")
 	}
-	est, ok := constantCodec{}.Estimate(src)
+	est, ok := Estimate(constantCodec{}, src)
 	if !ok {
 		t.Fatal("constant rows must Estimate")
 	}

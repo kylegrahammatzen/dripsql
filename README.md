@@ -37,21 +37,21 @@ Snapshot:
 
 | Bench | ns/op | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `Filter_Int64Less` | 2841 | 256 | 1 |
-| `Filter_Int64Between` | 3465 | 256 | 1 |
-| `Filter_Int64AndCompound` | 5247 | 512 | 2 |
-| `Filter_Int64Equal` | 2650 | 256 | 1 |
-| `Sort_FullAsc_Int64_10k` | 1.54 ms | 252 K | 38 |
-| `Sort_FullDesc_Int64_10k` | 1.43 ms | 252 K | 38 |
-| `Sort_TopK_Int64_10k_K100` | 149 us | 7.7 K | 17 |
-| `Sort_TopK_Int64_100k_K100` | 989 us | 29.6 K | 64 |
-| `Sort_TopK_Int64_100k_K100_Off50` | 1.03 ms | 31.0 K | 64 |
-| `Sort_TopK_Int64_100k_K100_NullsEvery10` | 1.02 ms | 29.6 K | 64 |
-| `Sort_FullAsc_Text_10k` | 6.72 ms | 2.48 MB | 30 059 |
+| `Filter_Int64Less` | 2435 | 256 | 1 |
+| `Filter_Int64Between` | 3057 | 256 | 1 |
+| `Filter_Int64AndCompound` | 4289 | 256 | 1 |
+| `Filter_Int64Equal` | 2380 | 256 | 1 |
+| `Sort_FullAsc_Int64_10k` | 1.43 ms | 252 K | 38 |
+| `Sort_FullDesc_Int64_10k` | 1.40 ms | 252 K | 38 |
+| `Sort_TopK_Int64_10k_K100` | 159 us | 7.7 K | 17 |
+| `Sort_TopK_Int64_100k_K100` | 1.09 ms | 29.6 K | 64 |
+| `Sort_TopK_Int64_100k_K100_Off50` | 1.13 ms | 31.0 K | 64 |
+| `Sort_TopK_Int64_100k_K100_NullsEvery10` | 1.09 ms | 29.6 K | 64 |
+| `Sort_FullAsc_Text_10k` | 3.44 ms | 253 K | 43 |
 
 Streaming top-K stays bounded at `K+Offset` entries regardless of input size.
-The text full-sort is the known slow path because it goes through a boxed
-`any` comparator, and no production workload exercises it today.
+The text full-sort now rides a typed `bytes.Compare` fast path, dropping
+allocs from ~30k to under 50 per run.
 
 ### Workload benchmark
 
@@ -68,13 +68,24 @@ Snapshot (hot mode, median ms across timed runs):
 
 | Query | Rows | Runs | Median (ms) | io | decode | exec |
 | --- | --- | --- | --- | --- | --- | --- |
-| `count` | 100k | 200 | 5.96 | 1.37 | 3.32 | 1.28 |
-| `id_lookup` | 100k | 200 | 5.02 | 1.09 | 2.89 | 1.03 |
-| `category_groupby` | 100k | 100 | 11.77 | 1.05 | 1.73 | 9.00 |
-| `category_groupby` | 10M | 10 | 1129 | 93.95 | 149.15 | 886.02 |
-| `top_age` | 100k | 200 | 6.37 | 1.20 | 3.52 | 1.64 |
-| `top_age` | 1M | 50 | 50.07 | 9.76 | 29.48 | 10.84 |
-| `top_age` | 10M | 10 | 514.60 | 97.58 | 285.38 | 131.64 |
+| `count` | 100k | 200 | ~0 | 0 | 0 | 0 |
+| `id_lookup` | 100k | 200 | ~0 | 0.03 | 0.05 | 0 |
+| `category_groupby` | 100k | 100 | 5.98 | 1.98 | 2.66 | 1.34 |
+| `category_groupby` | 10M | 10 | 615.53 | 156.63 | 668.55 | ~0 |
+| `top_age` | 100k | 200 | 2.12 | 0.45 | 1.28 | 0.40 |
+| `top_age` | 1M | 50 | 19.15 | 4.32 | 11.22 | 3.62 |
+| `top_age` | 10M | 10 | 249.91 | 52.73 | 150.61 | 46.57 |
+
+TPC-H-shaped queries are also available against a synthetic `lineitem`
+dataset (`tpch_q1`, `tpch_q6`). Dates are stored as int64 days since
+1992-01-01, and `l_disc_rev` / `l_disc_price` are precomputed because the
+aggregate-over-expression binder is not wired yet. Q3 (joined `customer`
+/ `orders` / `lineitem`) is a follow-up.
+
+`count` and `id_lookup` short-circuit through the `.sm` numsum sidecar and
+Binary Fuse 8 page-prune respectively, so they resolve without scanning row
+data. `category_groupby` reads its result from the dict-histogram sidecar
+when no `WHERE` is present.
 
 The harness also prints min, p95, max, mean, and stddev, and these are
 reference points rather than regression gates.
@@ -97,27 +108,43 @@ What the engine currently supports versus what's still on the list:
 | Area | Status | Notes |
 | --- | --- | --- |
 | Columnar segments, per-column + per-page min/max | yes | |
-| Codecs (plain, dictionary, constant, FOR+BitPack, delta+BitPack, Flate, Zstd) | yes | Cascade chooses by encoded size |
+| Codecs (plain, dictionary, constant, sequence, FOR+BitPack, delta+BitPack, Flate, Zstd, ALP, ALP-RD, FSST) | yes | Cascade chooses by encoded size; ALP for decimal floats, ALP-RD for irrational/sci floats, FSST for long/repetitive varbytes |
 | 15 types (numeric, text, bytes, UUID, date/time/timestamp, JSON, enum) | yes | |
 | Validity bitmaps, null-aware filter/sort/aggregate | yes | |
 | SQL parser, binder, plan + rel IR, plan cache | yes | |
 | Pull-based vectorized operators (scan/filter/aggregate/project/sort/limit) | yes | |
 | Hash join (inner/left/right/full) | yes | maphash-keyed probe |
-| INSERT, UPDATE, DELETE | yes | UPDATE/DELETE atomic via versioned DV + manifest transaction record |
+| INSERT, UPDATE, DELETE, BulkInsert | yes | UPDATE/DELETE atomic via versioned DV + manifest transaction record |
+| Multi-statement transactions (`BeginTx` / Exec / Query / Commit / Rollback) | yes | Single-writer; reads inside the txn see staged adds/DV overlays |
+| Cross-table atomic commit | yes | One (TxnID, CommitTs) per `Tx.Commit`; recovery forward-rolls partial groups |
+| MVCC snapshot reads | yes | `runQuery` pins `read_ts` at statement start; segment-level visibility via `ScanOpts.ReadTs` |
+| Time travel (`DB.QueryAt`, SQL `... FROM t AS OF <commit_ts>`) | yes | Per-table-reference snapshot in joins |
+| Retention vacuum | yes | `DB.VacuumRetention(cutoff)`; pin registry blocks retiring snapshots in use; honors max(seg.CommitTs, DV-out CommitTs) |
+| WAL with append-only framing + truncate-after-commit | yes | CRC32 per record; orphan cleanup + forward-roll on `Open` |
 | Top-K page pruning (single-column ORDER BY ... LIMIT) | yes | Sound: only prunes pages strictly dominated by others |
 | Streaming top-K with bounded heap | yes | `K+Offset` items, no `O(N)` materialization |
-| Segment handle cache | yes | DB-level, keyed by `(path, dvPath)` |
-| EXPLAIN / EXPLAIN ANALYZE | no | Parser accepts it but engine rejects with `Query supports SELECT only` |
-| JSON path operators (`->`, `->>`) | partial | Parsed and bound but exec not wired |
-| Window functions, subqueries, CTEs | no | Not in grammar |
-| Bloom / Xor / Ribbon skip filters | no | |
-| Cross-column SMA (count/sum from metadata alone) | no | |
-| Parallel per-segment scans | no | |
-| Predicate-on-encoded execution | no | Predicates evaluate post-decode |
-| Lazy column-metadata decode | no | Full footer parsed at segment open |
-| Compaction / vacuum (for DV path) | no | UPDATE/DELETE already atomic, but DV files accumulate |
-| WAL, recovery, MVCC | no | Manifest lines carry a 32-bit checksum but no row-level durability story exists |
-| User-declared codecs in DDL | no | |
+| Segment handle cache | yes | DB-level LRU bounded at 256, keyed by `(path, dvPath)` |
+| EXPLAIN / EXPLAIN ANALYZE | yes | Per-operator wall + rows + calls tree |
+| Parallel per-segment scans | yes | `ScanOp.Parallelism = GOMAXPROCS` when >1 segment and no TopK pushdown |
+| Bloom skip filters (int columns) | yes | In-house ~10 bits/key, k=8 in `.bf` sidecar |
+| Cross-column SMA (sum/count from metadata alone) | yes | `tryMetadataAggregate` consults `.sm` numsum sidecar |
+| SELECT DISTINCT (single or multi-column) | yes | Lowers to GROUP BY over the named columns; rides the composite-key aggregate path |
+| Multi-column GROUP BY | yes | Composite-key path encodes (col1, col2, ...) per row, single-col stays on the typed fast paths |
+| CASE WHEN ... THEN ... [ELSE ...] END | yes | Searched form. Branches must share a kind. |
+| Configurable retention via OpenWith(OpenOpts) | yes | AutoRetention + RetentionLag makes DB.Vacuum also retire fully-DV'd-out segments below the cutoff |
+| JSON path operators (`->`, `->>`) | yes | `->` returns JSON, `->>` returns Text; both wired through Project |
+| CTEs (`WITH ... AS`) | yes | Plan substitution; CTE name resolves to inner Rel at plan time |
+| Scalar / `IN` / `EXISTS` subqueries | yes | Uncorrelated subqueries materialized once at BuildOperator |
+| Correlated subqueries | yes | Outer column refs bind to parent scope; inner plan rebuilt per outer row with values threaded through a shared carrier |
+| Qualified column refs (`tbl.col`, `alias.col`) | yes | Resolve in single-table and joined scopes |
+| Window functions | yes | `ROW_NUMBER/RANK/DENSE_RANK` and aggregate `SUM/COUNT/MIN/MAX/AVG OVER (PARTITION BY ... ORDER BY ...)`; `ROWS` and `RANGE BETWEEN` frame clauses |
+| Predicate-on-encoded execution | partial | FOR-bitpacked int64 equality + LT/GT/BETWEEN, delta-bitpack int64 equality, dictionary-text equality all run on encoded bytes. Dict-text LT/GT still decode first |
+| Lazy footer / sidecar / validation decode | partial | PageStats, sidecars, and `validateColumnDirectory` are deferred to first access; per-column Pages slice still allocated at OpenSegment |
+| Page-level varbytes pruning | yes | Per-page bloom filter sidecar (`.tbf`), FNV-1a-64 keyed; consulted by `boundEqBytes.PrunePage` after the segment-level dict-hist check |
+| Compaction / vacuum (for DV path) | yes | `DB.Compact` rewrites half-or-more-deleted segments; `DB.Vacuum` drops unreferenced DV files |
+| User-declared codecs in DDL | yes | `CREATE TABLE ... col WITH (codec = 'dictionary' | ... | 'fsst')` overrides cascade |
+| Bench harness (TPC-H Q1/Q6, ClickBench Q1/Q4/Q5/Q7/Q9, SQLsmith fuzz, CI) | yes | Synthetic loaders for `lineitem` and `hits` plus a deterministic SELECT fuzzer; GitHub Actions runs build/vet/test + smoke bench |
+| UNION, Selective Late Materialization, Pcodec, operator fusion | no | Tractable next slices |
 
 ## License
 

@@ -8,12 +8,12 @@ func TestEncoding_WireRejectsAutoAndUnknown(t *testing.T) {
 	if _, ok := EncodingFromWire(0); ok {
 		t.Fatal("wire byte 0 must be rejected (EncodingAuto)")
 	}
-	for b := byte(9); b < 16; b++ {
+	for b := byte(12); b < 16; b++ {
 		if _, ok := EncodingFromWire(b); ok {
 			t.Fatalf("wire byte %d must be rejected as unknown", b)
 		}
 	}
-	for e := EncodingFlat; e <= EncodingZstd; e++ {
+	for e := EncodingFlat; e <= EncodingFSST; e++ {
 		got, ok := EncodingFromWire(e.Wire())
 		if !ok || got != e {
 			t.Fatalf("round-trip failed for %v: got=%v ok=%v", e, got, ok)

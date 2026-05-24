@@ -17,11 +17,12 @@ type AggregateOp struct {
 	Hidden     []sql.AggSpec
 	Having     *sql.BoundExpr
 
-	state  operatorState
-	built  bool
-	cursor int
-	groups []aggGroup
-	specs  []sql.AggSpec
+	state    operatorState
+	built    bool
+	cursor   int
+	groups   []aggGroup
+	specs    []sql.AggSpec
+	specKind []types.VecKind
 }
 
 type aggAccum struct {
@@ -29,6 +30,9 @@ type aggAccum struct {
 	sum   int64
 	min   int64
 	max   int64
+	fsum  float64
+	fmin  float64
+	fmax  float64
 	init  bool
 }
 
@@ -90,26 +94,26 @@ func (a *AggregateOp) Next() (types.Batch, bool, error) {
 }
 
 func (a *AggregateOp) build() error {
-	if len(a.GroupBy) > 1 {
-		return fmt.Errorf("aggregate: only one GROUP BY expression is supported")
-	}
-	if len(a.GroupBy) == 1 && a.GroupBy[0].Op != sql.ExprColumn {
-		return fmt.Errorf("aggregate: only column-ref GROUP BY is supported")
+	for _, g := range a.GroupBy {
+		if g.Op != sql.ExprColumn {
+			return fmt.Errorf("aggregate: only column-ref GROUP BY is supported")
+		}
 	}
 
 	a.specs = append(append([]sql.AggSpec{}, a.Aggregates...), a.Hidden...)
-	grouped := len(a.GroupBy) == 1
-	if !grouped {
+	nKeys := len(a.GroupBy)
+	if nKeys == 0 {
 		a.groups = append(a.groups, aggGroup{aggs: make([]aggAccum, len(a.specs))})
 	}
 
 	intIdx := map[int64]int{}
 	strIdx := map[string]int{}
 	anyIdx := map[any]int{}
+	compositeIdx := map[string]int{}
 
 	var specCols []aggCol
-	groupCol := -1
-	var groupKind types.VecKind
+	groupCols := make([]int, nKeys)
+	groupKinds := make([]types.VecKind, nKeys)
 	for {
 		batch, ok, err := a.Source.Next()
 		if err != nil {
@@ -119,14 +123,16 @@ func (a *AggregateOp) build() error {
 			break
 		}
 		if specCols == nil {
-			if grouped {
-				groupCol = batchColumnIndex(batch, a.GroupBy[0].Column)
-				if groupCol == -1 {
-					return fmt.Errorf("aggregate: group column %q not in batch", a.GroupBy[0].Column)
+			for i, g := range a.GroupBy {
+				idx := batchColumnIndex(batch, g.Column)
+				if idx == -1 {
+					return fmt.Errorf("aggregate: group column %q not in batch", g.Column)
 				}
-				groupKind = batch.Columns[groupCol].V.Kind
+				groupCols[i] = idx
+				groupKinds[i] = batch.Columns[idx].V.Kind
 			}
 			specCols = make([]aggCol, len(a.specs))
+			a.specKind = make([]types.VecKind, len(a.specs))
 			for i, spec := range a.specs {
 				if spec.Star {
 					specCols[i] = aggCol{idx: -1}
@@ -137,31 +143,110 @@ func (a *AggregateOp) build() error {
 					return fmt.Errorf("aggregate: column %q not in batch", spec.ArgName)
 				}
 				specCols[i] = aggCol{idx: ci, vk: batch.Columns[ci].V.Kind}
+				a.specKind[i] = batch.Columns[ci].V.Kind
 			}
 		}
-		if !grouped {
+		switch nKeys {
+		case 0:
 			if err := a.aggregateBatchNoGroup(batch, specCols); err != nil {
 				return err
 			}
-			continue
-		}
-		col := &batch.Columns[groupCol]
-		switch groupKind {
-		case types.VecInt16, types.VecInt32, types.VecDate, types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
-			if err := a.aggregateBatchIntKey(batch, col, groupKind, specCols, intIdx); err != nil {
-				return err
-			}
-		case types.VecText, types.VecBytes, types.VecJSON:
-			if err := a.aggregateBatchTextKey(batch, col, specCols, strIdx); err != nil {
-				return err
+		case 1:
+			col := &batch.Columns[groupCols[0]]
+			switch groupKinds[0] {
+			case types.VecInt16, types.VecInt32, types.VecDate, types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+				if err := a.aggregateBatchIntKey(batch, col, groupKinds[0], specCols, intIdx); err != nil {
+					return err
+				}
+			case types.VecText, types.VecBytes, types.VecJSON:
+				if err := a.aggregateBatchTextKey(batch, col, specCols, strIdx); err != nil {
+					return err
+				}
+			default:
+				if err := a.aggregateBatchAnyKey(batch, col, groupKinds[0], specCols, anyIdx); err != nil {
+					return err
+				}
 			}
 		default:
-			if err := a.aggregateBatchAnyKey(batch, col, groupKind, specCols, anyIdx); err != nil {
+			if err := a.aggregateBatchCompositeKey(batch, groupCols, groupKinds, specCols, compositeIdx); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func (a *AggregateOp) aggregateBatchCompositeKey(batch types.Batch, groupCols []int, groupKinds []types.VecKind, specCols []aggCol, idx map[string]int) error {
+	var loopErr error
+	var keyBuf []byte
+	batch.Sel.IterSet(func(row int) {
+		if loopErr != nil {
+			return
+		}
+		for _, gc := range groupCols {
+			if v := batch.Columns[gc].V.Valid; v != nil && !v.IsValid(row) {
+				return
+			}
+		}
+		keyBuf = encodeCompositeKey(keyBuf[:0], batch.Columns, groupCols, groupKinds, row)
+		gIdx, ok := idx[string(keyBuf)]
+		if !ok {
+			gIdx = len(a.groups)
+			keyCopy := make([]byte, len(keyBuf))
+			copy(keyCopy, keyBuf)
+			idx[string(keyCopy)] = gIdx
+			rowKeys := make([]any, len(groupCols))
+			for i, gc := range groupCols {
+				rowKeys[i] = readGroupKey(&batch.Columns[gc], groupKinds[i], row)
+			}
+			a.groups = append(a.groups, aggGroup{key: rowKeys, aggs: make([]aggAccum, len(a.specs))})
+		}
+		if err := a.updateRow(&a.groups[gIdx], batch, specCols, row); err != nil {
+			loopErr = err
+		}
+	})
+	return loopErr
+}
+
+func encodeCompositeKey(dst []byte, cols []types.Column, groupCols []int, groupKinds []types.VecKind, row int) []byte {
+	for i, gc := range groupCols {
+		col := &cols[gc]
+		dst = appendKeyBytes(dst, col, groupKinds[i], row)
+		dst = append(dst, 0x00)
+	}
+	return dst
+}
+
+func appendKeyBytes(dst []byte, col *types.Column, vk types.VecKind, row int) []byte {
+	switch vk {
+	case types.VecInt16:
+		x := uint16(col.V.I16()[row])
+		return append(dst, byte(x), byte(x>>8))
+	case types.VecInt32, types.VecDate:
+		x := uint32(col.V.I32()[row])
+		return append(dst, byte(x), byte(x>>8), byte(x>>16), byte(x>>24))
+	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+		x := uint64(col.V.I64()[row])
+		return append(dst,
+			byte(x), byte(x>>8), byte(x>>16), byte(x>>24),
+			byte(x>>32), byte(x>>40), byte(x>>48), byte(x>>56))
+	case types.VecBool:
+		if col.V.BoolBits()[row>>3]&(1<<(row&7)) != 0 {
+			return append(dst, 1)
+		}
+		return append(dst, 0)
+	case types.VecText, types.VecBytes, types.VecJSON:
+		b := col.V.Var().Bytes(row)
+		n := uint32(len(b))
+		dst = append(dst, byte(n), byte(n>>8), byte(n>>16), byte(n>>24))
+		return append(dst, b...)
+	case types.VecEnum32:
+		x := col.V.U32()[row]
+		return append(dst, byte(x), byte(x>>8), byte(x>>16), byte(x>>24))
+	case types.VecUUID:
+		return append(dst, col.V.FixedBytes()[row*16:row*16+16]...)
+	}
+	return dst
 }
 
 func (a *AggregateOp) updateRow(g *aggGroup, batch types.Batch, specCols []aggCol, row int) error {
@@ -323,6 +408,29 @@ func updateAccumFast(acc *aggAccum, col *types.Column, rc aggCol, spec sql.AggSp
 		acc.count++
 		return nil
 	}
+	if rc.vk == types.VecFloat32 || rc.vk == types.VecFloat64 {
+		var x float64
+		if rc.vk == types.VecFloat64 {
+			x = col.V.F64()[row]
+		} else {
+			x = float64(col.V.F32()[row])
+		}
+		acc.count++
+		switch spec.Func {
+		case sql.AggregateSum, sql.AggregateAvg:
+			acc.fsum += x
+		case sql.AggregateMin:
+			if !acc.init || x < acc.fmin {
+				acc.fmin = x
+			}
+		case sql.AggregateMax:
+			if !acc.init || x > acc.fmax {
+				acc.fmax = x
+			}
+		}
+		acc.init = true
+		return nil
+	}
 	var x int64
 	switch rc.vk {
 	case types.VecInt16:
@@ -332,11 +440,11 @@ func updateAccumFast(acc *aggAccum, col *types.Column, rc aggCol, spec sql.AggSp
 	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
 		x = col.V.I64()[row]
 	default:
-		return fmt.Errorf("aggregate: %v on non-integer column %q (kind %v)", spec.Func, spec.ArgName, rc.vk)
+		return fmt.Errorf("aggregate: %v on non-numeric column %q (kind %v)", spec.Func, spec.ArgName, rc.vk)
 	}
 	acc.count++
 	switch spec.Func {
-	case sql.AggregateSum:
+	case sql.AggregateSum, sql.AggregateAvg:
 		acc.sum += x
 	case sql.AggregateMin:
 		if !acc.init || x < acc.min {
@@ -364,15 +472,31 @@ func (a *AggregateOp) materializeChunk(start, end int) (types.Batch, *types.Sele
 		}
 		cols = append(cols, types.Column{Name: expr.Column, Type: expr.Type, V: v})
 	}
+	if len(a.GroupBy) > 1 {
+		// Composite-key groups store their per-column raw values as []any in group.key.
+		// Build one output vector per GROUP BY expression.
+		for keyIdx, expr := range a.GroupBy {
+			v, err := buildCompositeKeyColumnVec(expr.Type, chunk, keyIdx)
+			if err != nil {
+				return types.Batch{}, nil, err
+			}
+			cols = append(cols, types.Column{Name: expr.Column, Type: expr.Type, V: v})
+		}
+	}
 
 	for i, spec := range a.specs {
-		v, valid, err := buildAggregateVec(spec, chunk, i)
+		argKind := types.VecInvalid
+		if i < len(a.specKind) {
+			argKind = a.specKind[i]
+		}
+		v, valid, err := buildAggregateVec(spec, argKind, chunk, i)
 		if err != nil {
 			return types.Batch{}, nil, err
 		}
 		v.Valid = valid
 		name := aggregateColumnName(spec)
-		cols = append(cols, types.Column{Name: name, Type: types.Int64, V: v})
+		t := aggregateOutputType(spec, argKind)
+		cols = append(cols, types.Column{Name: name, Type: t, V: v})
 	}
 
 	out, err := types.NewBatch(cols)
@@ -391,7 +515,7 @@ func (a *AggregateOp) materializeChunk(start, end int) (types.Batch, *types.Sele
 
 func (a *AggregateOp) applyHaving(batch types.Batch, sel *types.SelectionMask) (*types.SelectionMask, error) {
 	batch.Sel = sel
-	res, err := filterPredicate(batch, *sel, *a.Having, nil)
+	res, err := filterPredicate(batch, *sel, *a.Having, nil, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -409,9 +533,26 @@ func aggregateColumnName(spec sql.AggSpec) string {
 		return "min"
 	case sql.AggregateMax:
 		return "max"
+	case sql.AggregateAvg:
+		return "avg"
 	default:
 		return "count"
 	}
+}
+
+func buildCompositeKeyColumnVec(t types.Type, groups []aggGroup, keyIdx int) (types.Vec, error) {
+	pickKey := func(g aggGroup) any {
+		keys, ok := g.key.([]any)
+		if !ok || keyIdx >= len(keys) {
+			return nil
+		}
+		return keys[keyIdx]
+	}
+	projected := make([]aggGroup, len(groups))
+	for i, g := range groups {
+		projected[i] = aggGroup{key: pickKey(g)}
+	}
+	return buildGroupKeyVec(t, projected)
 }
 
 func buildGroupKeyVec(t types.Type, groups []aggGroup) (types.Vec, error) {
@@ -478,8 +619,82 @@ func buildGroupKeyVec(t types.Type, groups []aggGroup) (types.Vec, error) {
 	return types.Vec{}, fmt.Errorf("aggregate: group key kind %v not supported", vk)
 }
 
-func buildAggregateVec(spec sql.AggSpec, groups []aggGroup, slot int) (types.Vec, types.Validity, error) {
+func aggregateOutputType(spec sql.AggSpec, argKind types.VecKind) types.Type {
+	if spec.Func == sql.AggregateAvg {
+		return types.Float64
+	}
+	if argKind == types.VecFloat32 || argKind == types.VecFloat64 {
+		switch spec.Func {
+		case sql.AggregateSum, sql.AggregateMin, sql.AggregateMax:
+			return types.Float64
+		}
+	}
+	return types.Int64
+}
+
+func buildAggregateVec(spec sql.AggSpec, argKind types.VecKind, groups []aggGroup, slot int) (types.Vec, types.Validity, error) {
 	rows := len(groups)
+	if spec.Func == sql.AggregateAvg {
+		v := types.NewVec(types.VecFloat64, rows)
+		data := v.F64()
+		var valid types.Validity
+		for i, g := range groups {
+			acc := g.aggs[slot]
+			if !acc.init || acc.count == 0 {
+				if valid == nil {
+					valid = types.NewAllValid(rows)
+				}
+				valid.SetInvalid(i)
+				continue
+			}
+			if argKind == types.VecFloat32 || argKind == types.VecFloat64 {
+				data[i] = acc.fsum / float64(acc.count)
+			} else {
+				data[i] = float64(acc.sum) / float64(acc.count)
+			}
+		}
+		return v, valid, nil
+	}
+	if argKind == types.VecFloat32 || argKind == types.VecFloat64 {
+		v := types.NewVec(types.VecFloat64, rows)
+		data := v.F64()
+		var valid types.Validity
+		for i, g := range groups {
+			acc := g.aggs[slot]
+			switch spec.Func {
+			case sql.AggregateSum:
+				if !acc.init {
+					if valid == nil {
+						valid = types.NewAllValid(rows)
+					}
+					valid.SetInvalid(i)
+					continue
+				}
+				data[i] = acc.fsum
+			case sql.AggregateMin:
+				if !acc.init {
+					if valid == nil {
+						valid = types.NewAllValid(rows)
+					}
+					valid.SetInvalid(i)
+					continue
+				}
+				data[i] = acc.fmin
+			case sql.AggregateMax:
+				if !acc.init {
+					if valid == nil {
+						valid = types.NewAllValid(rows)
+					}
+					valid.SetInvalid(i)
+					continue
+				}
+				data[i] = acc.fmax
+			default:
+				return types.Vec{}, nil, fmt.Errorf("aggregate: unsupported func %v on float", spec.Func)
+			}
+		}
+		return v, valid, nil
+	}
 	v := types.NewVec(types.VecInt64, rows)
 	data := v.I64()
 	var valid types.Validity

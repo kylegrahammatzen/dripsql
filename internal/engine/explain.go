@@ -19,25 +19,25 @@ func (db *DB) runExplain(ctx context.Context, plan *sql.Plan) (*Rows, error) {
 	}
 	body := plan.Inner.Rel.String()
 	rows := &Rows{Columns: []string{"plan"}}
-	for _, line := range strings.Split(body, "\n") {
+	for line := range strings.SplitSeq(body, "\n") {
 		rows.Values = append(rows.Values, []any{line})
 	}
 	if !plan.Analyze {
 		return rows, nil
 	}
-	stats, err := db.runAnalyze(ctx, plan.Inner)
+	root, err := db.runAnalyze(ctx, plan.Inner)
 	if err != nil {
 		return nil, err
 	}
 	rows.Values = append(rows.Values, []any{""})
-	rows.Values = append(rows.Values, []any{"ANALYZE timings (pre-order):"})
-	for _, s := range stats {
-		rows.Values = append(rows.Values, []any{fmt.Sprintf("  %-22s wall=%s rows=%d calls=%d", s.Label, s.Wall, s.Rows, s.Calls)})
+	rows.Values = append(rows.Values, []any{"ANALYZE timings:"})
+	for line := range strings.SplitSeq(strings.TrimRight(root.Tree(), "\n"), "\n") {
+		rows.Values = append(rows.Values, []any{line})
 	}
 	return rows, nil
 }
 
-func (db *DB) runAnalyze(ctx context.Context, plan *sql.Plan) ([]*exec.TimingStats, error) {
+func (db *DB) runAnalyze(ctx context.Context, plan *sql.Plan) (*exec.TimingStats, error) {
 	openSegs := make(map[string][]*storage.Segment)
 	resolve := func(d sql.BoundTableDef) ([]*storage.Segment, error) {
 		key := types.NormalizeName(d.Name)
@@ -51,7 +51,7 @@ func (db *DB) runAnalyze(ctx context.Context, plan *sql.Plan) ([]*exec.TimingSta
 		openSegs[key] = segs
 		return segs, nil
 	}
-	op, stats, err := exec.BuildOperatorAnalyzed(plan, resolve)
+	op, root, err := exec.BuildOperatorAnalyzed(plan, resolve)
 	if err != nil {
 		return nil, err
 	}
@@ -71,5 +71,5 @@ func (db *DB) runAnalyze(ctx context.Context, plan *sql.Plan) ([]*exec.TimingSta
 			break
 		}
 	}
-	return stats, nil
+	return root, nil
 }

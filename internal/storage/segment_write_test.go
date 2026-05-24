@@ -47,7 +47,7 @@ func makeTwoColumnBatch(t *testing.T, start, n int64) types.Batch {
 
 func TestWriteSegment_FileExistsAndStartsWithMagic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 100)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 100)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -64,11 +64,11 @@ func TestWriteSegment_FileExistsAndStartsWithMagic(t *testing.T) {
 
 func TestWriteSegment_FooterSuffixDecodes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 50)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 50)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	footerLen, ok := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
+	footerLen, _, ok := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
 	if !ok {
 		t.Fatal("footer magic mismatch")
 	}
@@ -84,13 +84,13 @@ func TestWriteSegment_ColumnMajorPagesContiguous(t *testing.T) {
 		makeTwoColumnBatch(t, 100, 100),
 		makeTwoColumnBatch(t, 200, 100),
 	}
-	if err := WriteSegment(path, pages); err != nil {
+	if _, err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	footerLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
-	footerStart := uint64(len(data)) - FooterSuffixSize - footerLen
-	footer := data[footerStart : uint64(len(data))-FooterSuffixSize]
+	footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
+	footerStart := uint64(len(data)) - FooterSuffixSize - sidecarLen - footerLen
+	footer := data[footerStart : footerStart+footerLen]
 
 	colCount := binary.LittleEndian.Uint32(footer[0:4])
 	if colCount != 2 {
@@ -167,7 +167,7 @@ func TestWriteSegment_NullableRoundTrip(t *testing.T) {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "nullable.dsv4")
-	if err := WriteSegment(path, []types.Batch{b}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -204,7 +204,7 @@ func TestWriteSegment_AllNullRoundTrip(t *testing.T) {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "allnull.dsv4")
-	if err := WriteSegment(path, []types.Batch{b}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -227,7 +227,7 @@ func TestWriteSegment_AllNullRoundTrip(t *testing.T) {
 }
 
 func TestWriteSegment_RejectsEmpty(t *testing.T) {
-	if err := WriteSegment(filepath.Join(t.TempDir(), "x"), nil); err == nil {
+	if _, err := WriteSegment(filepath.Join(t.TempDir(), "x"), nil, nil); err == nil {
 		t.Fatal("WriteSegment must reject empty page list")
 	}
 }
@@ -236,7 +236,7 @@ func TestWriteSegment_RejectsMismatchedBatchLen(t *testing.T) {
 	v := types.NewVec(types.VecInt64, 10)
 	bad := types.Batch{Len: 20, Columns: []types.Column{{Name: "id", Type: types.Int64, V: v}}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{bad}); err == nil {
+	if _, err := WriteSegment(path, []types.Batch{bad}, nil); err == nil {
 		t.Fatal("WriteSegment must reject Batch.Len != Vec.Len")
 	}
 }
@@ -246,7 +246,7 @@ func TestWriteSegment_RejectsTypeDrift(t *testing.T) {
 	v := types.NewVec(types.VecInt32, 10)
 	second := types.Batch{Len: 10, Columns: []types.Column{{Name: "id", Type: types.Int32, V: v}}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{first, second}); err == nil {
+	if _, err := WriteSegment(path, []types.Batch{first, second}, nil); err == nil {
 		t.Fatal("WriteSegment must reject type drift across batches")
 	}
 }
@@ -255,7 +255,7 @@ func TestWriteSegment_RejectsKindMismatchVsType(t *testing.T) {
 	v := types.NewVec(types.VecInt32, 5)
 	bad := types.Batch{Len: 5, Columns: []types.Column{{Name: "id", Type: types.Int64, V: v}}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{bad}); err == nil {
+	if _, err := WriteSegment(path, []types.Batch{bad}, nil); err == nil {
 		t.Fatal("WriteSegment must reject Vec.Kind that does not match Column.Type")
 	}
 }
@@ -270,7 +270,7 @@ func TestWriteSegment_AtomicNoFinalOnFailure(t *testing.T) {
 	// Force a failure via Vec.Kind that does not match the declared Type.
 	v := types.NewVec(types.VecInt32, 4)
 	bad := types.Batch{Len: 4, Columns: []types.Column{{Name: "id", Type: types.Int64, V: v}}}
-	if err := WriteSegment(path, []types.Batch{bad}); err == nil {
+	if _, err := WriteSegment(path, []types.Batch{bad}, nil); err == nil {
 		t.Fatal("WriteSegment must reject kind mismatch")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -284,7 +284,7 @@ func TestWriteSegment_AtomicNoFinalOnFailure(t *testing.T) {
 func TestWriteSegment_AtomicRenamesTmpToFinal(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 16)}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 16)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -305,7 +305,7 @@ func TestWriteSegment_RejectsEnumLabelDrift(t *testing.T) {
 		{Name: "k", Type: types.Named("status"), EnumLabels: []string{"a", "b", "c"}, V: v2},
 	}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if err := WriteSegment(path, []types.Batch{first, second}); err == nil {
+	if _, err := WriteSegment(path, []types.Batch{first, second}, nil); err == nil {
 		t.Fatal("WriteSegment must reject enum-label drift across batches")
 	}
 }

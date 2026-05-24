@@ -21,30 +21,30 @@ func init() {
 
 func (dictionaryCodec) Encoding() types.Encoding { return types.EncodingDictionary }
 
-func (c dictionaryCodec) Estimate(v types.Vec) (int, bool) {
+func (c dictionaryCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !v.Kind.IsVarBytes() || v.Len == 0 {
-		return 0, false
+		return nil, ErrSkip
 	}
-	_, _, dictBytes, ok := buildDict(v)
-	if !ok {
-		return 0, false
-	}
-	return dictHeaderSize + dictBytes + int(v.Len), true
-}
-
-func (c dictionaryCodec) Encode(v types.Vec, scratch []byte) ([]byte, error) {
-	if !v.Kind.IsVarBytes() {
-		return nil, fmt.Errorf("dictionary encode: kind %v not varbytes", v.Kind)
-	}
-	if v.Len == 0 {
-		return nil, fmt.Errorf("dictionary encode: zero rows")
-	}
-	indices, entries, dictBytes, ok := buildDict(v)
-	if !ok {
-		return nil, fmt.Errorf("dictionary encode: > %d distinct values", DictMaxValues)
+	var (
+		indices   []byte
+		entries   [][]byte
+		dictBytes int
+	)
+	if ctx != nil && ctx.Facts != nil && ctx.Facts.VarBytes != nil && ctx.Facts.VarBytes.DictFits {
+		f := ctx.Facts.VarBytes
+		indices = f.DictIndices
+		entries = f.DictEntries
+		dictBytes = f.DictBytes
+	} else {
+		var ok bool
+		indices, entries, dictBytes, ok = buildDict(v)
+		if !ok {
+			return nil, ErrSkip
+		}
 	}
 	rows := int(v.Len)
 	n := dictHeaderSize + dictBytes + rows
+	scratch := ctxTrial(ctx)
 	if cap(scratch) < n {
 		scratch = make([]byte, n)
 	} else {

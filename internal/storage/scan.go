@@ -17,6 +17,10 @@ type ScanOpts struct {
 	Columns   []string
 	Predicate Predicate
 	TopK      *TopKPushdown
+	// ReadTs is the MVCC visibility cutoff. Segments with CommitTs > ReadTs are skipped.
+	// Zero means "no cutoff" (latest), matching the pre-MVCC behavior. Engine-level
+	// snapshots set this to nextCommitTs.Load() at statement start.
+	ReadTs uint64
 }
 
 // TopKPushdown is storage-owned scan metadata for ORDER BY ... LIMIT/OFFSET over a single
@@ -55,6 +59,9 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 		topKPages = selectTopKPages(opts.Segments, opts.TopK)
 	}
 	for si, seg := range opts.Segments {
+		if opts.ReadTs != 0 && seg.CommitTs > opts.ReadTs {
+			continue
+		}
 		decodeIdx, projIdx, err := resolveSegmentColumns(seg, decode, projection)
 		if err != nil {
 			return fmt.Errorf("Scan: %w", err)
@@ -65,6 +72,7 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 			if err != nil {
 				return fmt.Errorf("Scan: bind predicate: %w", err)
 			}
+			seg.LoadPageStats()
 			if bp.PruneSegment(seg) {
 				continue
 			}
@@ -115,6 +123,7 @@ func selectTopKPages(segments []*Segment, tk *TopKPushdown) map[[2]int]bool {
 		if colIdx < 0 || !topKKindEligible(seg.Cols[colIdx].Kind) {
 			return nil
 		}
+		seg.LoadPageStats()
 		col := &seg.Cols[colIdx]
 		if len(col.PageStats) != len(col.Pages) {
 			return nil

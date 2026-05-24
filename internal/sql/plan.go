@@ -33,6 +33,10 @@ type BoundTableDef struct {
 	Options types.TableOptions
 	Path    string
 	Version SchemaVersion
+	// AsOf carries the parsed `AS OF <commit_ts>` clause from the table reference. Zero
+	// means use the statement-level snapshot. The engine resolver uses this per-reference
+	// so different tables in one join can scan different snapshots.
+	AsOf uint64
 }
 
 type PlanKind uint8
@@ -59,6 +63,8 @@ const (
 	RelProject
 	RelSort
 	RelLimit
+	RelCTE
+	RelWindow
 )
 
 type JoinKey struct {
@@ -101,6 +107,95 @@ type Rel struct {
 
 	Offset int64
 	Limit  int64
+
+	WindowFuncs []WindowFunc
+}
+
+type WindowFunc struct {
+	Func      WindowFuncKind
+	Alias     string
+	Arg       *BoundExpr
+	Partition []BoundExpr
+	OrderBy   []SortKey
+	Frame     *WindowFrameBounds
+}
+
+// Nil Frame means default semantics: full-partition without ORDER BY, running
+// aggregate with ORDER BY. IsRange switches to value-distance on the order key.
+type WindowFrameBounds struct {
+	IsRange        bool
+	StartUnbounded bool
+	StartCurrent   bool
+	StartPreceding int64
+	EndUnbounded   bool
+	EndCurrent     bool
+	EndFollowing   int64
+}
+
+type WindowFuncKind uint8
+
+const (
+	WindowInvalid WindowFuncKind = iota
+	WindowRowNumber
+	WindowRank
+	WindowDenseRank
+	WindowSum
+	WindowCount
+	WindowMin
+	WindowMax
+	WindowAvg
+)
+
+func (w WindowFuncKind) String() string {
+	switch w {
+	case WindowRowNumber:
+		return "row_number"
+	case WindowRank:
+		return "rank"
+	case WindowDenseRank:
+		return "dense_rank"
+	case WindowSum:
+		return "sum"
+	case WindowCount:
+		return "count"
+	case WindowMin:
+		return "min"
+	case WindowMax:
+		return "max"
+	case WindowAvg:
+		return "avg"
+	}
+	return "window_unknown"
+}
+
+func WindowFuncByName(name string) (WindowFuncKind, bool) {
+	switch name {
+	case "row_number":
+		return WindowRowNumber, true
+	case "rank":
+		return WindowRank, true
+	case "dense_rank":
+		return WindowDenseRank, true
+	case "sum":
+		return WindowSum, true
+	case "count":
+		return WindowCount, true
+	case "min":
+		return WindowMin, true
+	case "max":
+		return WindowMax, true
+	case "avg":
+		return WindowAvg, true
+	}
+	return WindowInvalid, false
+}
+
+func (w WindowFuncKind) IsAggregate() bool {
+	switch w {
+	case WindowSum, WindowCount, WindowMin, WindowMax, WindowAvg:
+		return true
+	}
+	return false
 }
 
 // Plan is the bound statement. Kind selects which payload is meaningful.
@@ -119,6 +214,11 @@ type Plan struct {
 	Values      InsertValues
 	Assignments []BoundAssignment
 	Where       *BoundExpr
+
+	// OuterRefs lists outer column names referenced inside this plan (only set on
+	// subquery plans). When non-empty the executor cannot materialize the result
+	// once; it must re-run the plan per outer row with the named values bound in.
+	OuterRefs []string
 }
 
 type BoundAssignment struct {
@@ -178,6 +278,7 @@ const (
 	AggregateSum
 	AggregateMin
 	AggregateMax
+	AggregateAvg
 )
 
 type AggSpec struct {
@@ -237,6 +338,15 @@ const (
 	ExprJSONGetText
 	ExprBetween
 	ExprIn
+	ExprAbs
+	ExprNullIf
+	// ExprCase: Args = [when1, then1, when2, then2, ..., elseExpr]. Args has even length
+	// when no ELSE is present (binder synthesizes a NULL literal so length stays odd).
+	// Type is the common kind across all THEN/ELSE branches.
+	ExprCase
+	ExprSubquery
+	ExprInSubquery
+	ExprExists
 )
 
 type BoundExpr struct {
@@ -247,4 +357,9 @@ type BoundExpr struct {
 	ColumnID ColumnID
 	Literal  any
 	Not      bool
+	SubPlan  *Plan
+	// Outer marks an ExprColumn that resolves to a parent scope rather than the
+	// current batch. The evaluator reads its value from a runtime outer-row table
+	// keyed by Column name. Only meaningful for Op == ExprColumn.
+	Outer bool
 }

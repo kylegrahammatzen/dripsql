@@ -76,7 +76,7 @@ func TestDictionary_ExactBoundary_256Values(t *testing.T) {
 	for i := range rows {
 		vb.AppendString(i, fmt.Sprintf("v%d", i))
 	}
-	if _, ok := (dictionaryCodec{}).Estimate(src); !ok {
+	if _, ok := Estimate(dictionaryCodec{}, src); !ok {
 		t.Fatal("Estimate must accept exactly 256 distinct values")
 	}
 	payload, err := dictionaryCodec{}.Encode(src, nil)
@@ -96,7 +96,7 @@ func TestDictionary_RejectsAbove256(t *testing.T) {
 	for i := range rows {
 		vb.AppendString(i, fmt.Sprintf("v%d", i))
 	}
-	if _, ok := (dictionaryCodec{}).Estimate(src); ok {
+	if _, ok := Estimate(dictionaryCodec{}, src); ok {
 		t.Fatal("Estimate must reject 257 distinct values")
 	}
 	if _, err := (dictionaryCodec{}).Encode(src, nil); err == nil {
@@ -107,7 +107,7 @@ func TestDictionary_RejectsAbove256(t *testing.T) {
 func TestDictionary_EstimateRejectsNonVarBytes(t *testing.T) {
 	for _, kind := range []types.VecKind{types.VecInt64, types.VecBool, types.VecUUID, types.VecFloat32} {
 		v := types.NewVec(kind, 4)
-		if _, ok := (dictionaryCodec{}).Estimate(v); ok {
+		if _, ok := Estimate(dictionaryCodec{}, v); ok {
 			t.Fatalf("Estimate must reject %v", kind)
 		}
 	}
@@ -140,7 +140,7 @@ func TestDictionary_EstimateMatchesEncode(t *testing.T) {
 	for i := range rows {
 		vb.AppendString(i, fmt.Sprintf("k%d", i%5))
 	}
-	est, ok := dictionaryCodec{}.Estimate(src)
+	est, ok := Estimate(dictionaryCodec{}, src)
 	if !ok {
 		t.Fatal("Estimate must accept low-cardinality varbytes")
 	}

@@ -4,12 +4,24 @@
 package storage
 
 import (
+	"fmt"
+	"math"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Size()
+}
 
 const benchPageRows = 2048
 
@@ -20,9 +32,70 @@ func BenchmarkStorage_WriteSegment(b *testing.B) {
 	for b.Loop() {
 		tmp := b.TempDir()
 		path := filepath.Join(tmp, "seg.dsv4")
-		if err := WriteSegment(path, pages); err != nil {
+		if _, err := WriteSegment(path, pages, nil); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func BenchmarkStorage_WriteSegment_Int64Random(b *testing.B) {
+	runWriteShapeBench(b, makeInt64RandomBatch(benchPageRows))
+}
+
+func BenchmarkStorage_WriteSegment_Int64Monotonic(b *testing.B) {
+	runWriteShapeBench(b, makeInt64MonotonicBatch(benchPageRows))
+}
+
+func BenchmarkStorage_WriteSegment_Int64Constant(b *testing.B) {
+	runWriteShapeBench(b, makeInt64ConstantBatch(benchPageRows))
+}
+
+func BenchmarkStorage_WriteSegment_Int64SparseNulls(b *testing.B) {
+	runWriteShapeBench(b, makeInt64SparseNullsBatch(benchPageRows))
+}
+
+func BenchmarkStorage_WriteSegment_TextLowCardinality(b *testing.B) {
+	runWriteShapeBench(b, makeTextLowCardBatch(benchPageRows))
+}
+
+func BenchmarkStorage_WriteSegment_TextHighCardinality(b *testing.B) {
+	runWriteShapeBench(b, makeTextHighCardBatch(benchPageRows))
+}
+
+func BenchmarkStorage_WriteSegment_TextLongValues(b *testing.B) {
+	runWriteShapeBench(b, makeTextLongBatch(benchPageRows))
+}
+
+func BenchmarkStorage_WriteSegment_Float64Decimal(b *testing.B) {
+	runWriteShapeBench(b, makeFloat64DecimalBatch(benchPageRows))
+}
+
+func BenchmarkStorage_WriteSegment_Float64Plain(b *testing.B) {
+	runWriteShapeBench(b, makeFloat64PlainBatch(benchPageRows))
+}
+
+// TestFloat64_ALPVsPlain_FileSize is a one-shot check that ALP actually shrinks
+// segment files for decimal-shaped float data. Asserts the ALP-default file is
+// strictly smaller than the same data forced to flat encoding.
+func TestFloat64_ALPVsPlain_FileSize(t *testing.T) {
+	page := makeFloat64DecimalBatch(benchPageRows)
+	pages := []types.Batch{page, page, page, page}
+	tmp := t.TempDir()
+
+	defaultPath := filepath.Join(tmp, "alp.dsv4")
+	if _, err := WriteSegment(defaultPath, pages, nil); err != nil {
+		t.Fatal(err)
+	}
+	forcedPath := filepath.Join(tmp, "plain.dsv4")
+	overrides := map[string]types.Encoding{"price": types.EncodingFlat}
+	if _, err := WriteSegment(forcedPath, pages, overrides); err != nil {
+		t.Fatal(err)
+	}
+	alpSize := fileSize(t, defaultPath)
+	plainSize := fileSize(t, forcedPath)
+	t.Logf("alp=%d plain=%d ratio=%.2f", alpSize, plainSize, float64(alpSize)/float64(plainSize))
+	if alpSize >= plainSize {
+		t.Fatalf("ALP did not shrink decimal float column: alp=%d plain=%d", alpSize, plainSize)
 	}
 }
 
@@ -30,7 +103,7 @@ func BenchmarkStorage_OpenCold(b *testing.B) {
 	tmp := b.TempDir()
 	path := filepath.Join(tmp, "seg.dsv4")
 	page := makeBenchSegmentBatch(benchPageRows)
-	if err := WriteSegment(path, []types.Batch{page, page, page, page}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{page, page, page, page}, nil); err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
@@ -109,6 +182,7 @@ func BenchmarkStorage_LoadDictHist(b *testing.B) {
 	defer seg.Close()
 	b.ReportAllocs()
 	for b.Loop() {
+		seg.containerOnce = sync.Once{}
 		seg.dictHistsOnce = sync.Once{}
 		if _, err := seg.DictHistograms(); err != nil {
 			b.Fatal(err)
@@ -121,6 +195,7 @@ func BenchmarkStorage_LoadIntFilter(b *testing.B) {
 	defer seg.Close()
 	b.ReportAllocs()
 	for b.Loop() {
+		seg.containerOnce = sync.Once{}
 		seg.intFiltersOnce = sync.Once{}
 		if _, err := seg.IntFilterSet(); err != nil {
 			b.Fatal(err)
@@ -133,6 +208,7 @@ func BenchmarkStorage_LoadNumericSums(b *testing.B) {
 	defer seg.Close()
 	b.ReportAllocs()
 	for b.Loop() {
+		seg.containerOnce = sync.Once{}
 		seg.numSumsOnce = sync.Once{}
 		if _, err := seg.NumericSums(); err != nil {
 			b.Fatal(err)
@@ -171,7 +247,7 @@ func openBenchSegment(b *testing.B, pages int) *Segment {
 	for i := range pages {
 		all[i] = batch
 	}
-	if err := WriteSegment(path, all); err != nil {
+	if _, err := WriteSegment(path, all, nil); err != nil {
 		b.Fatal(err)
 	}
 	seg, err := OpenSegment(path)
@@ -179,6 +255,137 @@ func openBenchSegment(b *testing.B, pages int) *Segment {
 		b.Fatal(err)
 	}
 	return seg
+}
+
+func runWriteShapeBench(b *testing.B, page types.Batch) {
+	b.Helper()
+	pages := []types.Batch{page, page, page, page}
+	b.ReportAllocs()
+	for b.Loop() {
+		tmp := b.TempDir()
+		path := filepath.Join(tmp, "seg.dsv4")
+		if _, err := WriteSegment(path, pages, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func makeInt64Batch(name string, rows int, fill func(i int) int64) types.Batch {
+	v := types.NewVec(types.VecInt64, rows)
+	xs := v.I64()
+	for i := range rows {
+		xs[i] = fill(i)
+	}
+	batch, err := types.NewBatch([]types.Column{{Name: name, Type: types.Int64, V: v}})
+	if err != nil {
+		panic(err)
+	}
+	return batch
+}
+
+func makeInt64RandomBatch(rows int) types.Batch {
+	// LCG so the test stays deterministic without importing math/rand.
+	state := uint64(0x9E3779B97F4A7C15)
+	return makeInt64Batch("x", rows, func(int) int64 {
+		state = state*6364136223846793005 + 1442695040888963407
+		return int64(state)
+	})
+}
+
+func makeInt64MonotonicBatch(rows int) types.Batch {
+	return makeInt64Batch("x", rows, func(i int) int64 { return int64(i) })
+}
+
+func makeInt64ConstantBatch(rows int) types.Batch {
+	return makeInt64Batch("x", rows, func(int) int64 { return 42 })
+}
+
+func makeInt64SparseNullsBatch(rows int) types.Batch {
+	v := types.NewVec(types.VecInt64, rows)
+	v.Valid = types.NewValidity(rows)
+	xs := v.I64()
+	for i := range rows {
+		xs[i] = int64(i % 256)
+		if i%10 == 0 {
+			v.Valid.SetInvalid(i)
+		}
+	}
+	batch, err := types.NewBatch([]types.Column{{Name: "x", Type: types.Int64, V: v}})
+	if err != nil {
+		panic(err)
+	}
+	return batch
+}
+
+func makeTextBatch(rows int, fill func(i int) string) types.Batch {
+	v := types.NewVarVec(types.VecText, rows, 0)
+	vb := v.Var()
+	for i := range rows {
+		vb.AppendString(i, fill(i))
+	}
+	batch, err := types.NewBatch([]types.Column{{Name: "s", Type: types.Text, V: v}})
+	if err != nil {
+		panic(err)
+	}
+	return batch
+}
+
+func makeTextLowCardBatch(rows int) types.Batch {
+	labels := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
+	return makeTextBatch(rows, func(i int) string { return labels[i%len(labels)] })
+}
+
+func makeTextHighCardBatch(rows int) types.Batch {
+	// 8192 distinct strings cycled across rows. Exceeds DictMaxValues (256)
+	// so Dictionary codec rejects and falls through to plain varbytes.
+	const distinct = 8192
+	cache := make([]string, distinct)
+	for i := range distinct {
+		cache[i] = fmt.Sprintf("v%07d", i)
+	}
+	return makeTextBatch(rows, func(i int) string { return cache[i%distinct] })
+}
+
+// makeFloat64DecimalBatch produces ALP-friendly prices like 12.34 across [0, 1000).
+// Two decimal places fit cleanly at e=2 with a small mantissa range, exercising ALP.
+func makeFloat64DecimalBatch(rows int) types.Batch {
+	v := types.NewVec(types.VecFloat64, rows)
+	xs := v.F64()
+	for i := range rows {
+		cents := int64((i * 7919) % 100000)
+		xs[i] = float64(cents) / 100.0
+	}
+	batch, err := types.NewBatch([]types.Column{{Name: "price", Type: types.Float64, V: v}})
+	if err != nil {
+		panic(err)
+	}
+	return batch
+}
+
+// makeFloat64PlainBatch produces noisy float64 from a uint64 LCG bit-cast. ALP
+// must reject these (no exponent makes them round-trip) and fall through to plain.
+func makeFloat64PlainBatch(rows int) types.Batch {
+	state := uint64(0x9E3779B97F4A7C15)
+	v := types.NewVec(types.VecFloat64, rows)
+	xs := v.F64()
+	for i := range rows {
+		state = state*6364136223846793005 + 1442695040888963407
+		bits := (state & 0x000FFFFFFFFFFFFF) | 0x4000000000000000
+		xs[i] = math.Float64frombits(bits)
+	}
+	batch, err := types.NewBatch([]types.Column{{Name: "x", Type: types.Float64, V: v}})
+	if err != nil {
+		panic(err)
+	}
+	return batch
+}
+
+func makeTextLongBatch(rows int) types.Batch {
+	// Each value > StringViewInlineMax (12 bytes) so SetView takes the long path.
+	const padding = "long_string_payload_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+	return makeTextBatch(rows, func(i int) string {
+		return fmt.Sprintf("%s_%d", padding, i)
+	})
 }
 
 func makeBenchSegmentBatch(rows int) types.Batch {

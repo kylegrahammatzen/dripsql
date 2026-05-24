@@ -17,29 +17,32 @@ func init() {
 
 func (sequenceCodec) Encoding() types.Encoding { return types.EncodingSequence }
 
-func (sequenceCodec) Estimate(v types.Vec) (int, bool) {
+func (c sequenceCodec) sequenceFits(v types.Vec, ctx *EncodeContext) bool {
 	if v.Kind.FixedWidth() != 8 || !v.Kind.IsFORPackable() {
-		return 0, false
+		return false
 	}
 	rows := int(v.Len)
 	if rows < 2 {
-		return 0, false
+		return false
+	}
+	if ctx != nil && ctx.Facts != nil && ctx.Facts.Int != nil {
+		return ctx.Facts.Int.SequenceOK
 	}
 	vals := v.I64()
 	step := vals[1] - vals[0]
 	for i := 2; i < rows; i++ {
 		if vals[i]-vals[i-1] != step {
-			return 0, false
+			return false
 		}
 	}
-	return 16, true
+	return true
 }
 
-func (c sequenceCodec) Encode(v types.Vec, scratch []byte) ([]byte, error) {
-	_, ok := c.Estimate(v)
-	if !ok {
-		return nil, fmt.Errorf("sequence encode: rows do not form an arithmetic progression")
+func (c sequenceCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+	if !c.sequenceFits(v, ctx) {
+		return nil, ErrSkip
 	}
+	scratch := ctxTrial(ctx)
 	if cap(scratch) < 16 {
 		scratch = make([]byte, 16)
 	} else {

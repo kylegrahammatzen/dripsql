@@ -40,19 +40,12 @@ func init() {
 
 func (c *compressedTextCodec) Encoding() types.Encoding { return c.enc }
 
-func (c *compressedTextCodec) Estimate(v types.Vec) (int, bool) {
+func (c *compressedTextCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !v.Kind.IsVarBytes() {
-		return 0, false
-	}
-	return 4 + varbytesWireSize(v), true
-}
-
-func (c *compressedTextCodec) Encode(v types.Vec, scratch []byte) ([]byte, error) {
-	if !v.Kind.IsVarBytes() {
-		return nil, fmt.Errorf("%v encode: kind %v not varbytes", c.enc, v.Kind)
+		return nil, ErrSkip
 	}
 	plainSize := varbytesWireSize(v)
-	plain := scratch
+	plain := ctxTrial(ctx)
 	if cap(plain) < plainSize {
 		plain = make([]byte, plainSize)
 	} else {

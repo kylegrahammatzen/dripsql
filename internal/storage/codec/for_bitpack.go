@@ -21,39 +21,44 @@ func init() {
 
 func (forBitpackCodec) Encoding() types.Encoding { return types.EncodingFORBitPack }
 
-func (c forBitpackCodec) Estimate(v types.Vec) (int, bool) {
+func (c forBitpackCodec) forFits(v types.Vec, ctx *EncodeContext) (base int64, width int, ok bool) {
 	if !v.Kind.IsFORPackable() {
-		return 0, false
+		return 0, 0, false
 	}
 	rows := int(v.Len)
 	if rows == 0 {
-		return 0, false
+		return 0, 0, false
 	}
-	base, width, ok := forParams(v)
+	if ctx != nil && ctx.Facts != nil && ctx.Facts.Int != nil {
+		f := ctx.Facts.Int
+		if f.ForWidth == 0 {
+			return 0, 0, false
+		}
+		storageBits := int(v.Kind.FixedWidth()) * 8
+		if f.ForWidth >= storageBits {
+			return 0, 0, false
+		}
+		return f.ForBase, f.ForWidth, true
+	}
+	base, width, ok = forParams(v)
 	if !ok {
-		return 0, false
+		return 0, 0, false
 	}
-	_ = base
 	storageBits := int(v.Kind.FixedWidth()) * 8
 	if width >= storageBits {
-		return 0, false
+		return 0, 0, false
 	}
-	return forHeaderSize + PackedSize(rows, width), true
+	return base, width, true
 }
 
-func (c forBitpackCodec) Encode(v types.Vec, scratch []byte) ([]byte, error) {
-	if !v.Kind.IsFORPackable() {
-		return nil, fmt.Errorf("for+bitpack encode: kind %v not FOR-packable", v.Kind)
+func (c forBitpackCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+	base, width, ok := c.forFits(v, ctx)
+	if !ok {
+		return nil, ErrSkip
 	}
 	rows := int(v.Len)
-	if rows == 0 {
-		return nil, fmt.Errorf("for+bitpack encode: zero rows")
-	}
-	base, width, ok := forParams(v)
-	if !ok {
-		return nil, fmt.Errorf("for+bitpack encode: width 0 or out of range")
-	}
 	n := forHeaderSize + PackedSize(rows, width)
+	scratch := ctxTrial(ctx)
 	if cap(scratch) < n {
 		scratch = make([]byte, n)
 	} else {
@@ -61,7 +66,7 @@ func (c forBitpackCodec) Encode(v types.Vec, scratch []byte) ([]byte, error) {
 	}
 	binary.LittleEndian.PutUint64(scratch[0:8], uint64(base))
 	scratch[8] = byte(width)
-	residuals := make([]uint64, rows)
+	residuals := ctxU64s(ctx, rows)
 	readFORValues(v, residuals)
 	for i := range residuals {
 		residuals[i] -= uint64(base)

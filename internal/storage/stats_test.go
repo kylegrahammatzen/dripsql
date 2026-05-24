@@ -55,14 +55,26 @@ func TestFloatStats_WireRoundTrip(t *testing.T) {
 	for _, v := range []float64{1.5, math.NaN(), -3.25, 100.0} {
 		s.Update(v)
 	}
-	if s.Min != -3.25 || s.Max != 100.0 || !s.HasNonNull {
+	if s.Min != -3.25 || s.Max != 100.0 || !s.HasFinite || s.NaNCount != 1 {
 		t.Fatalf("Update got %+v", s)
 	}
 	var buf [StatsWireSize]byte
 	s.MarshalWire(buf[:])
 	got := UnmarshalFloatStats(buf[:], true)
-	if got != s {
-		t.Fatalf("round-trip got %+v want %+v", got, s)
+	if got.Min != s.Min || got.Max != s.Max || got.HasFinite != s.HasFinite {
+		t.Fatalf("round-trip got %+v want %+v (Min/Max/HasFinite)", got, s)
+	}
+}
+
+func TestFloatStats_AllNaN(t *testing.T) {
+	var s FloatStats
+	s.Update(math.NaN())
+	s.Update(math.NaN())
+	if s.HasFinite {
+		t.Fatal("all-NaN column should not be marked HasFinite")
+	}
+	if s.NaNCount != 2 {
+		t.Fatalf("NaNCount = %d, want 2", s.NaNCount)
 	}
 }
 

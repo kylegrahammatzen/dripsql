@@ -1,11 +1,11 @@
-// Per-operator wall-time + row-count counters for EXPLAIN ANALYZE. timingOperator
-// wraps any Operator; BuildOperatorAnalyzed walks the Rel tree and returns the wrapper
-// list in pre-order so callers can stitch counters back onto Rel.String output.
+// Per-operator wall-time and row-count counters for EXPLAIN ANALYZE.
+// BuildOperatorAnalyzed wraps each Operator and returns a tree-rooted TimingStats.
 package exec
 
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
@@ -13,10 +13,28 @@ import (
 )
 
 type TimingStats struct {
-	Label string
-	Wall  time.Duration
-	Rows  int64
-	Calls int64
+	Label    string
+	Wall     time.Duration
+	Rows     int64
+	Calls    int64
+	Children []*TimingStats
+}
+
+func (t *TimingStats) Tree() string {
+	if t == nil {
+		return ""
+	}
+	var sb strings.Builder
+	t.write(&sb, 0)
+	return sb.String()
+}
+
+func (t *TimingStats) write(sb *strings.Builder, depth int) {
+	indent := strings.Repeat("  ", depth)
+	fmt.Fprintf(sb, "%s%-22s wall=%s rows=%d calls=%d\n", indent, t.Label, t.Wall, t.Rows, t.Calls)
+	for _, c := range t.Children {
+		c.write(sb, depth+1)
+	}
 }
 
 type timingOperator struct {
@@ -42,9 +60,9 @@ func (t *timingOperator) Next() (types.Batch, bool, error) {
 	return batch, ok, err
 }
 
-// BuildOperatorAnalyzed mirrors BuildOperator but wraps each constructed operator with a
-// timingOperator. Returned stats are in pre-order matching Rel.String's depth-first walk.
-func BuildOperatorAnalyzed(plan *sql.Plan, segments SegmentsFn) (Operator, []*TimingStats, error) {
+// BuildOperatorAnalyzed wraps each constructed Operator with a timingOperator and
+// returns the root of the parent-child stats tree mirroring the Rel tree.
+func BuildOperatorAnalyzed(plan *sql.Plan, segments SegmentsFn) (Operator, *TimingStats, error) {
 	if plan == nil {
 		return nil, nil, fmt.Errorf("BuildOperatorAnalyzed: nil plan")
 	}
@@ -55,93 +73,94 @@ func BuildOperatorAnalyzed(plan *sql.Plan, segments SegmentsFn) (Operator, []*Ti
 		op, err := BuildOperator(plan, segments)
 		return op, nil, err
 	}
-	var stats []*TimingStats
-	op, err := buildRelAnalyzed(plan.Rel, segments, &stats)
-	return op, stats, err
+	return buildRelAnalyzed(plan.Rel, segments)
 }
 
-func buildRelAnalyzed(rel *sql.Rel, segments SegmentsFn, stats *[]*TimingStats) (Operator, error) {
+func buildRelAnalyzed(rel *sql.Rel, segments SegmentsFn) (Operator, *TimingStats, error) {
 	if rel == nil {
-		return nil, fmt.Errorf("buildRelAnalyzed: nil rel")
+		return nil, nil, fmt.Errorf("buildRelAnalyzed: nil rel")
 	}
 	st := &TimingStats{Label: relTimingLabel(rel)}
-	*stats = append(*stats, st)
 	switch rel.Op {
 	case sql.RelScan:
-		op, err := buildScan(rel, segments, nil)
+		op, err := buildScan(rel, segments, nil, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return &timingOperator{inner: op, stats: st}, nil
+		return &timingOperator{inner: op, stats: st}, st, nil
 	case sql.RelProject:
 		if err := checkProjectionOps(rel.Projection); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		source, err := buildRelAnalyzed(rel.Inputs[0], segments, stats)
+		source, child, err := buildRelAnalyzed(rel.Inputs[0], segments)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return &timingOperator{inner: &ProjectOp{Source: source, Outputs: rel.Projection}, stats: st}, nil
+		st.Children = append(st.Children, child)
+		return &timingOperator{inner: &ProjectOp{Source: source, Outputs: rel.Projection}, stats: st}, st, nil
 	case sql.RelLimit:
-		source, err := buildRelAnalyzed(rel.Inputs[0], segments, stats)
+		source, child, err := buildRelAnalyzed(rel.Inputs[0], segments)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		st.Children = append(st.Children, child)
 		n := rel.Limit
 		if n < 0 {
 			n = -1
 		}
-		return &timingOperator{inner: &LimitOp{Source: source, N: n, Offset: rel.Offset}, stats: st}, nil
+		return &timingOperator{inner: &LimitOp{Source: source, N: n, Offset: rel.Offset}, stats: st}, st, nil
 	case sql.RelAggregate:
 		for _, expr := range rel.GroupBy {
 			if err := checkExecExpr(expr); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		if rel.Having != nil {
 			if err := checkExecExpr(*rel.Having); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
-		source, err := buildRelAnalyzed(rel.Inputs[0], segments, stats)
+		source, child, err := buildRelAnalyzed(rel.Inputs[0], segments)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		st.Children = append(st.Children, child)
 		return &timingOperator{inner: &AggregateOp{
 			Source:     source,
 			GroupBy:    rel.GroupBy,
 			Aggregates: rel.Aggregates,
 			Hidden:     rel.Hidden,
 			Having:     rel.Having,
-		}, stats: st}, nil
+		}, stats: st}, st, nil
 	case sql.RelFilter:
 		if err := checkExecExpr(rel.Predicate); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		source, err := buildRelAnalyzed(rel.Inputs[0], segments, stats)
+		source, child, err := buildRelAnalyzed(rel.Inputs[0], segments)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return &timingOperator{inner: &FilterOp{Source: source, Predicate: rel.Predicate}, stats: st}, nil
+		st.Children = append(st.Children, child)
+		return &timingOperator{inner: &FilterOp{Source: source, Predicate: rel.Predicate}, stats: st}, st, nil
 	case sql.RelSort:
 		for _, key := range rel.SortKeys {
 			if err := checkExecExpr(key.Expr); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
-		source, err := buildSortInput(rel, segments)
+		source, err := buildSortInput(rel, segments, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return &timingOperator{inner: &SortOp{Source: source, Keys: rel.SortKeys, K: rel.K, Offset: rel.Offset}, stats: st}, nil
+		return &timingOperator{inner: &SortOp{Source: source, Keys: rel.SortKeys, K: rel.K, Offset: rel.Offset}, stats: st}, st, nil
 	case sql.RelJoin:
 		op, err := buildRel(rel, segments)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return &timingOperator{inner: op, stats: st}, nil
+		return &timingOperator{inner: op, stats: st}, st, nil
 	}
-	return nil, fmt.Errorf("buildRelAnalyzed: unsupported rel op %v", rel.Op)
+	return nil, nil, fmt.Errorf("buildRelAnalyzed: unsupported rel op %v", rel.Op)
 }
 
 func relTimingLabel(rel *sql.Rel) string {

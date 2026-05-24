@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
@@ -17,16 +19,47 @@ import (
 )
 
 type DB struct {
-	root      string
-	mu        sync.Mutex
-	types     map[string]typeEntry
-	tables    map[string]tableEntry
-	version   sql.SchemaVersion
-	plans     *sql.PlanCache
-	manifests map[string]*storage.Manifest
-	segCount  map[string]uint64
-	segCache  map[segCacheKey]*storage.Segment
-	closed    bool
+	root          string
+	mu            sync.Mutex
+	types         map[string]typeEntry
+	tables        map[string]tableEntry
+	version       sql.SchemaVersion
+	plans         *sql.PlanCache
+	manifests     map[string]*storage.Manifest
+	segCount      map[string]uint64
+	segCache      map[segCacheKey]*list.Element
+	segLRU        *list.List
+	closed        bool
+	lastWriteSpan atomic.Pointer[storage.Span]
+	wal           *storage.WAL
+	nextTxnID     uint64
+	nextCommitTs atomic.Uint64
+	pinnedReadTs map[uint64]int
+	opts         OpenOpts
+}
+
+type segCacheEntry struct {
+	key segCacheKey
+	seg *storage.Segment
+}
+
+// segCacheLimit caps the number of open segment file handles. Default of 256 keeps
+// us well below the Windows default-handle ceiling without thrashing on typical
+// workloads. Tunable later if we hit a working set that doesn't fit.
+const segCacheLimit = 256
+
+// Returns the most recent statement's write-phase span tree, or nil. The
+// pointer is replaced atomically. The tree it points to is never mutated
+// after publish, so concurrent readers are safe.
+func (db *DB) LastWriteSpan() *storage.Span {
+	return db.lastWriteSpan.Load()
+}
+
+func (db *DB) publishWriteSpan(s *storage.Span) {
+	if s == nil {
+		return
+	}
+	db.lastWriteSpan.Store(s)
 }
 
 type segCacheKey struct {
@@ -44,7 +77,16 @@ type Rows struct {
 	Values  [][]any
 }
 
+type OpenOpts struct {
+	AutoRetention bool
+	RetentionLag  uint64
+}
+
 func Open(path string) (*DB, error) {
+	return OpenWith(path, OpenOpts{})
+}
+
+func OpenWith(path string, opts OpenOpts) (*DB, error) {
 	if path == "" {
 		return nil, fmt.Errorf("engine: database path is required")
 	}
@@ -63,13 +105,26 @@ func Open(path string) (*DB, error) {
 		plans:     sql.NewPlanCache(256),
 		manifests: make(map[string]*storage.Manifest),
 		segCount:  make(map[string]uint64),
-		segCache:  make(map[segCacheKey]*storage.Segment),
+		segCache:     make(map[segCacheKey]*list.Element),
+		segLRU:       list.New(),
+		pinnedReadTs: make(map[uint64]int),
+		opts:         opts,
 	}
+	var maxCommitTs uint64
 	for name := range tablesByName {
-		if _, err := db.manifestFor(name); err != nil {
+		m, err := db.manifestFor(name)
+		if err != nil {
 			db.Close()
 			return nil, err
 		}
+		if t := m.MaxCommitTs(); t > maxCommitTs {
+			maxCommitTs = t
+		}
+	}
+	db.nextCommitTs.Store(maxCommitTs)
+	if err := db.openWAL(); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return db, nil
 }
@@ -82,18 +137,25 @@ func (db *DB) Close() error {
 	}
 	db.closed = true
 	var firstErr error
-	for _, s := range db.segCache {
-		if err := s.Close(); err != nil && firstErr == nil {
+	for e := db.segLRU.Front(); e != nil; e = e.Next() {
+		if err := e.Value.(*segCacheEntry).seg.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	db.segCache = nil
+	db.segLRU = nil
 	for _, m := range db.manifests {
 		if err := m.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	db.manifests = nil
+	if db.wal != nil {
+		if err := db.wal.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		db.wal = nil
+	}
 	return firstErr
 }
 
@@ -313,11 +375,11 @@ func (db *DB) execStmt(ctx context.Context, stmt sql.Stmt) (int64, error) {
 		}
 		return 0, db.registerTable(spec)
 	case sql.PlanInsert:
-		return db.insert(ctx, plan)
+		return db.insert(ctx, plan, autoCommitTarget{db})
 	case sql.PlanDelete:
-		return db.delete(ctx, plan)
+		return db.delete(ctx, plan, autoCommitTarget{db})
 	case sql.PlanUpdate:
-		return db.update(ctx, plan)
+		return db.update(ctx, plan, autoCommitTarget{db})
 	}
 	return 0, fmt.Errorf("engine: unsupported plan kind %v", plan.Kind)
 }
@@ -343,6 +405,31 @@ func (db *DB) Query(ctx context.Context, sqlText string) (*Rows, error) {
 		return nil, err
 	}
 	return db.runQuery(ctx, plan)
+}
+
+func (db *DB) QueryAt(ctx context.Context, sqlText string, readTs uint64) (*Rows, error) {
+	if db == nil {
+		return nil, fmt.Errorf("engine: nil DB")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if db.closed {
+		return nil, fmt.Errorf("engine: database is closed")
+	}
+	plan, err := db.planForQuery(sqlText)
+	if err != nil {
+		return nil, err
+	}
+	return db.runQueryWith(ctx, plan, func(d sql.BoundTableDef) ([]*storage.Segment, error) {
+		ts := readTs
+		if d.AsOf != 0 {
+			ts = d.AsOf
+		}
+		return db.openSegmentsAt(d.Name, ts)
+	})
 }
 
 // planForQuery resolves a SELECT into a bound *Plan. Hits the plan cache before parsing so

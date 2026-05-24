@@ -3,9 +3,11 @@
 package storage
 
 import (
+	"encoding/binary"
 	"fmt"
 	"strings"
 
+	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
@@ -423,7 +425,21 @@ func (b boundEqBytes) PruneSegment(seg *Segment) bool {
 	if !ok {
 		return false
 	}
-	return c.Rows == 0
+	if c.Rows == 0 {
+		return true
+	}
+	hists, err := seg.DictHistograms()
+	if err != nil || hists == nil {
+		return false
+	}
+	hist, ok := hists[types.NormalizeName(b.column)]
+	if !ok {
+		return false
+	}
+	if _, present := hist[string(b.value)]; present {
+		return false
+	}
+	return true
 }
 
 func (b boundEqBytes) PrunePage(seg *Segment, pageIdx int) bool {
@@ -438,7 +454,19 @@ func (b boundEqBytes) PrunePage(seg *Segment, pageIdx int) bool {
 	if page.Flags&PageFlagAllNull != 0 {
 		return true
 	}
-	return false
+	blooms, err := seg.VarBlooms()
+	if err != nil || blooms == nil {
+		return false
+	}
+	vb, ok := blooms[types.NormalizeName(b.column)]
+	if !ok || vb == nil || pageIdx >= len(vb.Pages) {
+		return false
+	}
+	pb := vb.Pages[pageIdx]
+	if pb == nil {
+		return false
+	}
+	return !pb.contains(hashBytesFNV(b.value))
 }
 
 type boundIsNull struct{ column string }
@@ -556,13 +584,476 @@ func (b boundNot) Eval(batch types.Batch, sel *types.SelectionMask) {
 }
 
 func (b boundNot) PruneSegment(seg *Segment) bool {
-	// child Prune means no rows match it, which says nothing about NOT's matches.
-	_ = seg
-	return false
+	return childAlwaysMatchesSegment(b.child, seg)
 }
 
 func (b boundNot) PrunePage(seg *Segment, pageIdx int) bool {
-	_ = seg
-	_ = pageIdx
+	return childAlwaysMatchesPage(b.child, seg, pageIdx)
+}
+
+// childAlwaysMatchesSegment returns true when child is guaranteed to select every
+// row in the segment, which lets NOT(child) prune. Sound but conservative: any
+// undetermined case returns false.
+func childAlwaysMatchesSegment(child BoundPredicate, seg *Segment) bool {
+	switch c := child.(type) {
+	case boundIsNull:
+		col, ok := findSegmentColumn(seg, c.column)
+		if !ok || col.Rows == 0 {
+			return false
+		}
+		return col.NullCount == col.Rows
+	case boundEqInt64:
+		col, ok := findSegmentColumn(seg, c.column)
+		if !ok || col.NullCount != 0 {
+			return false
+		}
+		stats, present := numericStatsFromCol(col)
+		if !present || !stats.HasNonNull {
+			return false
+		}
+		return stats.Min == c.value && stats.Max == c.value
+	case boundLtInt64:
+		col, ok := findSegmentColumn(seg, c.column)
+		if !ok || col.NullCount != 0 {
+			return false
+		}
+		stats, present := numericStatsFromCol(col)
+		if !present || !stats.HasNonNull {
+			return false
+		}
+		return stats.Max < c.value
+	case boundGtInt64:
+		col, ok := findSegmentColumn(seg, c.column)
+		if !ok || col.NullCount != 0 {
+			return false
+		}
+		stats, present := numericStatsFromCol(col)
+		if !present || !stats.HasNonNull {
+			return false
+		}
+		return stats.Min > c.value
+	}
 	return false
+}
+
+func childAlwaysMatchesPage(child BoundPredicate, seg *Segment, pageIdx int) bool {
+	switch c := child.(type) {
+	case boundIsNull:
+		col, ok := findSegmentColumn(seg, c.column)
+		if !ok || pageIdx < 0 || pageIdx >= len(col.Pages) {
+			return false
+		}
+		p := col.Pages[pageIdx]
+		return p.Rows > 0 && p.Flags&PageFlagAllNull != 0
+	case boundEqInt64:
+		col, ok := findSegmentColumn(seg, c.column)
+		if !ok || pageIdx < 0 || pageIdx >= len(col.Pages) {
+			return false
+		}
+		if col.Pages[pageIdx].NullCount != 0 {
+			return false
+		}
+		min, max, ok := pageMinMaxInt(col, pageIdx)
+		if !ok {
+			return false
+		}
+		return min == c.value && max == c.value
+	case boundLtInt64:
+		col, ok := findSegmentColumn(seg, c.column)
+		if !ok || pageIdx < 0 || pageIdx >= len(col.Pages) {
+			return false
+		}
+		if col.Pages[pageIdx].NullCount != 0 {
+			return false
+		}
+		_, max, ok := pageMinMaxInt(col, pageIdx)
+		if !ok {
+			return false
+		}
+		return max < c.value
+	case boundGtInt64:
+		col, ok := findSegmentColumn(seg, c.column)
+		if !ok || pageIdx < 0 || pageIdx >= len(col.Pages) {
+			return false
+		}
+		if col.Pages[pageIdx].NullCount != 0 {
+			return false
+		}
+		min, _, ok := pageMinMaxInt(col, pageIdx)
+		if !ok {
+			return false
+		}
+		return min > c.value
+	}
+	return false
+}
+type EncodedEvaluator interface {
+	EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (handled bool, scratchOut []byte, err error)
+}
+
+func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+	colIdx, ok := findSegmentColumnIdx(seg, b.column)
+	if !ok {
+		return false, scratch, nil
+	}
+	page := seg.Cols[colIdx].Pages[pageIdx]
+	enc, ok := types.EncodingFromWire(page.Encoding)
+	if !ok || enc != types.EncodingDictionary {
+		return false, scratch, nil
+	}
+	rows := int(page.Rows)
+	ensureMaskSize(sel, rows)
+	if page.Flags&PageFlagAllNull != 0 {
+		return true, scratch, nil
+	}
+	payload, valid, allNull, newScratch, err := seg.ReadPagePayload(colIdx, pageIdx, scratch)
+	if err != nil {
+		return false, newScratch, err
+	}
+	if allNull {
+		return true, newScratch, nil
+	}
+	code, indices, found, err := resolveDictCode(payload, rows, b.value)
+	if err != nil {
+		return false, newScratch, err
+	}
+	if !found {
+		return true, newScratch, nil
+	}
+	narrowDictEq(indices, code, valid, sel)
+	return true, newScratch, nil
+}
+
+func (b boundEqInt64) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+	colIdx, ok := findSegmentColumnIdx(seg, b.column)
+	if !ok {
+		return false, scratch, nil
+	}
+	page := seg.Cols[colIdx].Pages[pageIdx]
+	enc, ok := types.EncodingFromWire(page.Encoding)
+	if !ok {
+		return false, scratch, nil
+	}
+	switch enc {
+	case types.EncodingFORBitPack:
+		return evalEncodedEqFOR(seg, colIdx, pageIdx, sel, scratch, b.value)
+	case types.EncodingDeltaBitPack:
+		return evalEncodedEqDelta(seg, colIdx, pageIdx, sel, scratch, b.value)
+	}
+	return false, scratch, nil
+}
+
+func evalEncodedEqFOR(seg *Segment, colIdx, pageIdx int, sel *types.SelectionMask, scratch []byte, target int64) (bool, []byte, error) {
+	page := seg.Cols[colIdx].Pages[pageIdx]
+	rows := int(page.Rows)
+	ensureMaskSize(sel, rows)
+	if page.Flags&PageFlagAllNull != 0 {
+		return true, scratch, nil
+	}
+	payload, valid, allNull, newScratch, err := seg.ReadPagePayload(colIdx, pageIdx, scratch)
+	if err != nil {
+		return false, newScratch, err
+	}
+	if allNull {
+		return true, newScratch, nil
+	}
+	const forHeaderSize = 9
+	if len(payload) < forHeaderSize {
+		return false, newScratch, fmt.Errorf("EvalEncoded FOR: header truncated")
+	}
+	base := int64(binary.LittleEndian.Uint64(payload[0:8]))
+	width := int(payload[8])
+	if width < 1 || width > 64 {
+		return false, newScratch, fmt.Errorf("EvalEncoded FOR: width %d out of range", width)
+	}
+	residualSigned := target - base
+	if residualSigned < 0 {
+		sel.Clear()
+		return true, newScratch, nil
+	}
+	residual := uint64(residualSigned)
+	if width < 64 && residual >= (uint64(1)<<uint(width)) {
+		sel.Clear()
+		return true, newScratch, nil
+	}
+	residuals := make([]uint64, rows)
+	codec.Unpack(width, payload[forHeaderSize:], rows, residuals)
+	narrowFOREq(residuals, residual, valid, sel)
+	return true, newScratch, nil
+}
+
+func evalEncodedEqDelta(seg *Segment, colIdx, pageIdx int, sel *types.SelectionMask, scratch []byte, target int64) (bool, []byte, error) {
+	page := seg.Cols[colIdx].Pages[pageIdx]
+	rows := int(page.Rows)
+	ensureMaskSize(sel, rows)
+	if page.Flags&PageFlagAllNull != 0 {
+		return true, scratch, nil
+	}
+	payload, valid, allNull, newScratch, err := seg.ReadPagePayload(colIdx, pageIdx, scratch)
+	if err != nil {
+		return false, newScratch, err
+	}
+	if allNull {
+		return true, newScratch, nil
+	}
+	const deltaHeaderSize = 17
+	if len(payload) < deltaHeaderSize {
+		return false, newScratch, fmt.Errorf("EvalEncoded delta: header truncated")
+	}
+	first := int64(binary.LittleEndian.Uint64(payload[0:8]))
+	base := int64(binary.LittleEndian.Uint64(payload[8:16]))
+	width := int(payload[16])
+	if width < 1 || width > 64 {
+		return false, newScratch, fmt.Errorf("EvalEncoded delta: width %d out of range", width)
+	}
+	residuals := make([]uint64, rows-1)
+	codec.Unpack(width, payload[deltaHeaderSize:], rows-1, residuals)
+	narrowDeltaEq(first, base, residuals, target, valid, sel)
+	return true, newScratch, nil
+}
+
+func narrowDeltaEq(first, base int64, residuals []uint64, target int64, valid types.Validity, sel *types.SelectionMask) {
+	sel.Clear()
+	cur := first
+	if cur == target {
+		sel.Set(0)
+	}
+	for i, r := range residuals {
+		cur += int64(r) + base
+		if cur == target {
+			sel.Set(i + 1)
+		}
+	}
+	if valid != nil {
+		applyValidity(valid, sel, len(residuals)+1)
+	}
+}
+
+func narrowFOREq(residuals []uint64, target uint64, valid types.Validity, sel *types.SelectionMask) {
+	sel.Clear()
+	for i, r := range residuals {
+		if r == target {
+			sel.Set(i)
+		}
+	}
+	if valid != nil {
+		applyValidity(valid, sel, len(residuals))
+	}
+}
+
+func (b boundLtInt64) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+	return evalEncodedFORRange(seg, pageIdx, sel, scratch, b.column, b.value, forRangeLT)
+}
+
+func (b boundGtInt64) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+	return evalEncodedFORRange(seg, pageIdx, sel, scratch, b.column, b.value, forRangeGT)
+}
+
+type forRangeOp uint8
+
+const (
+	forRangeLT forRangeOp = iota
+	forRangeGT
+)
+
+func evalEncodedFORRange(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte, column string, limit int64, op forRangeOp) (bool, []byte, error) {
+	colIdx, ok := findSegmentColumnIdx(seg, column)
+	if !ok {
+		return false, scratch, nil
+	}
+	page := seg.Cols[colIdx].Pages[pageIdx]
+	enc, ok := types.EncodingFromWire(page.Encoding)
+	if !ok || enc != types.EncodingFORBitPack {
+		return false, scratch, nil
+	}
+	rows := int(page.Rows)
+	ensureMaskSize(sel, rows)
+	if page.Flags&PageFlagAllNull != 0 {
+		sel.Clear()
+		return true, scratch, nil
+	}
+	payload, valid, allNull, newScratch, err := seg.ReadPagePayload(colIdx, pageIdx, scratch)
+	if err != nil {
+		return false, newScratch, err
+	}
+	if allNull {
+		sel.Clear()
+		return true, newScratch, nil
+	}
+	const forHeaderSize = 9
+	if len(payload) < forHeaderSize {
+		return false, newScratch, fmt.Errorf("EvalEncoded FOR range: header truncated")
+	}
+	base := int64(binary.LittleEndian.Uint64(payload[0:8]))
+	width := int(payload[8])
+	if width < 1 || width > 64 {
+		return false, newScratch, fmt.Errorf("EvalEncoded FOR range: width %d out of range", width)
+	}
+	threshold := limit - base
+	var maxResidual uint64
+	if width >= 64 {
+		maxResidual = ^uint64(0)
+	} else {
+		maxResidual = (uint64(1) << uint(width)) - 1
+	}
+	switch op {
+	case forRangeLT:
+		if threshold <= 0 {
+			sel.Clear()
+			return true, newScratch, nil
+		}
+		if uint64(threshold) > maxResidual {
+			sel.FillAll()
+			if valid != nil {
+				applyValidity(valid, sel, rows)
+			}
+			return true, newScratch, nil
+		}
+		residuals := make([]uint64, rows)
+		codec.Unpack(width, payload[forHeaderSize:], rows, residuals)
+		narrowFORLT(residuals, uint64(threshold), valid, sel)
+		return true, newScratch, nil
+	case forRangeGT:
+		if threshold < 0 {
+			sel.FillAll()
+			if valid != nil {
+				applyValidity(valid, sel, rows)
+			}
+			return true, newScratch, nil
+		}
+		if uint64(threshold) >= maxResidual {
+			sel.Clear()
+			return true, newScratch, nil
+		}
+		residuals := make([]uint64, rows)
+		codec.Unpack(width, payload[forHeaderSize:], rows, residuals)
+		narrowFORGT(residuals, uint64(threshold), valid, sel)
+		return true, newScratch, nil
+	}
+	return false, newScratch, nil
+}
+
+func narrowFORLT(residuals []uint64, threshold uint64, valid types.Validity, sel *types.SelectionMask) {
+	sel.Clear()
+	for i, r := range residuals {
+		if r < threshold {
+			sel.Set(i)
+		}
+	}
+	if valid != nil {
+		applyValidity(valid, sel, len(residuals))
+	}
+}
+
+func narrowFORGT(residuals []uint64, threshold uint64, valid types.Validity, sel *types.SelectionMask) {
+	sel.Clear()
+	for i, r := range residuals {
+		if r > threshold {
+			sel.Set(i)
+		}
+	}
+	if valid != nil {
+		applyValidity(valid, sel, len(residuals))
+	}
+}
+
+func findSegmentColumnIdx(seg *Segment, name string) (int, bool) {
+	for i := range seg.Cols {
+		if equalFoldFast(seg.Cols[i].Name, name) {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
+func equalFoldFast(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range len(a) {
+		ca, cb := a[i], b[i]
+		if ca == cb {
+			continue
+		}
+		if 'A' <= ca && ca <= 'Z' {
+			ca += 32
+		}
+		if 'A' <= cb && cb <= 'Z' {
+			cb += 32
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveDictCode walks a dictionary-encoded payload, finds the entry that matches lit, and
+// returns its u8 code plus the indices slice. Layout matches codec/dictionary.go:
+// [u16 LE dictCount][u32 LE len + bytes per entry][u8 indices x rows].
+func resolveDictCode(payload []byte, rows int, lit []byte) (code uint8, indices []byte, found bool, err error) {
+	const dictHeaderSize = 2
+	if len(payload) < dictHeaderSize {
+		return 0, nil, false, fmt.Errorf("EvalEncoded dict: header truncated")
+	}
+	dictCount := int(binary.LittleEndian.Uint16(payload[0:2]))
+	if dictCount == 0 || dictCount > 256 {
+		return 0, nil, false, fmt.Errorf("EvalEncoded dict: dictCount %d out of range", dictCount)
+	}
+	pos := dictHeaderSize
+	for i := range dictCount {
+		if pos+4 > len(payload) {
+			return 0, nil, false, fmt.Errorf("EvalEncoded dict: entry %d length truncated", i)
+		}
+		length := int(binary.LittleEndian.Uint32(payload[pos : pos+4]))
+		pos += 4
+		if pos+length > len(payload) {
+			return 0, nil, false, fmt.Errorf("EvalEncoded dict: entry %d bytes truncated", i)
+		}
+		if !found && length == len(lit) && bytesEqual(payload[pos:pos+length], lit) {
+			code = uint8(i)
+			found = true
+		}
+		pos += length
+	}
+	if pos+rows != len(payload) {
+		return 0, nil, false, fmt.Errorf("EvalEncoded dict: indices payload mismatch")
+	}
+	indices = payload[pos : pos+rows]
+	return code, indices, found, nil
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range len(a) {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// narrowDictEq sets sel[i] when indices[i] == code, gated by validity. The indices are
+// uint8 per row; the inner loop is a byte compare so 8 rows fit in a SIMDable lane.
+func narrowDictEq(indices []byte, code uint8, valid types.Validity, sel *types.SelectionMask) {
+	sel.Clear()
+	rows := len(indices)
+	for i := range rows {
+		if indices[i] == code {
+			sel.Set(i)
+		}
+	}
+	if valid != nil {
+		applyValidity(valid, sel, rows)
+	}
+}
+
+func applyValidity(valid types.Validity, sel *types.SelectionMask, rows int) {
+	for i := range rows {
+		if !valid.IsValid(i) {
+			sel.Unset(i)
+		}
+	}
 }

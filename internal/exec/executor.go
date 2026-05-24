@@ -4,6 +4,7 @@
 package exec
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 
@@ -21,36 +22,344 @@ func BuildOperator(plan *sql.Plan, segments SegmentsFn) (Operator, error) {
 	if segments == nil {
 		return nil, fmt.Errorf("BuildOperator: nil SegmentsFn")
 	}
+	return buildPlan(plan, segments, nil)
+}
+
+func buildPlan(plan *sql.Plan, segments SegmentsFn, outer *correlatedOuter) (Operator, error) {
 	switch plan.Kind {
 	case sql.PlanQuery:
 		if plan.Rel == nil {
 			return nil, fmt.Errorf("BuildOperator: query plan missing Rel")
 		}
-		return buildRel(plan.Rel, segments)
+		if outer == nil {
+			outer = newCorrelatedOuter()
+		}
+		if err := materializeSubqueries(plan.Rel, segments); err != nil {
+			return nil, err
+		}
+		return buildRelWithOuter(plan.Rel, segments, outer)
 	case sql.PlanExplain:
 		return nil, fmt.Errorf("BuildOperator: EXPLAIN execution belongs to the engine layer")
 	}
 	return nil, fmt.Errorf("BuildOperator: unsupported plan kind %v", plan.Kind)
 }
 
+func materializeSubqueries(rel *sql.Rel, segments SegmentsFn) error {
+	if rel == nil {
+		return nil
+	}
+	for _, in := range rel.Inputs {
+		if err := materializeSubqueries(in, segments); err != nil {
+			return err
+		}
+	}
+	if rel.Where != nil {
+		out, err := materializeSubqueriesExpr(*rel.Where, segments)
+		if err != nil {
+			return err
+		}
+		rel.Where = &out
+	}
+	predOut, err := materializeSubqueriesExpr(rel.Predicate, segments)
+	if err != nil {
+		return err
+	}
+	rel.Predicate = predOut
+	for i := range rel.Projection {
+		out, err := materializeSubqueriesExpr(rel.Projection[i].Expr, segments)
+		if err != nil {
+			return err
+		}
+		rel.Projection[i].Expr = out
+	}
+	for i := range rel.Outputs {
+		out, err := materializeSubqueriesExpr(rel.Outputs[i].Expr, segments)
+		if err != nil {
+			return err
+		}
+		rel.Outputs[i].Expr = out
+	}
+	if rel.Having != nil {
+		out, err := materializeSubqueriesExpr(*rel.Having, segments)
+		if err != nil {
+			return err
+		}
+		rel.Having = &out
+	}
+	return nil
+}
+
+func materializeSubqueriesExpr(expr sql.BoundExpr, segments SegmentsFn) (sql.BoundExpr, error) {
+	switch expr.Op {
+	case sql.ExprSubquery:
+		if expr.SubPlan == nil || expr.SubPlan.Rel == nil {
+			return sql.BoundExpr{}, fmt.Errorf("subquery materialize: empty subplan")
+		}
+		if len(expr.SubPlan.OuterRefs) > 0 {
+			// Correlated: leave the node in place; the row-by-row evaluator builds and
+			// drains the inner plan against the bound outer row per call.
+			if err := materializeSubqueries(expr.SubPlan.Rel, segments); err != nil {
+				return sql.BoundExpr{}, err
+			}
+			return expr, nil
+		}
+		if err := materializeSubqueries(expr.SubPlan.Rel, segments); err != nil {
+			return sql.BoundExpr{}, err
+		}
+		op, err := buildRel(expr.SubPlan.Rel, segments)
+		if err != nil {
+			return sql.BoundExpr{}, fmt.Errorf("subquery build: %w", err)
+		}
+		val, err := drainScalar(op)
+		if err != nil {
+			return sql.BoundExpr{}, fmt.Errorf("subquery drain: %w", err)
+		}
+		return sql.BoundExpr{Op: sql.ExprLiteral, Type: expr.Type, Literal: val}, nil
+	case sql.ExprInSubquery:
+		if expr.SubPlan == nil || expr.SubPlan.Rel == nil {
+			return sql.BoundExpr{}, fmt.Errorf("IN subquery materialize: empty subplan")
+		}
+		if len(expr.SubPlan.OuterRefs) > 0 {
+			if err := materializeSubqueries(expr.SubPlan.Rel, segments); err != nil {
+				return sql.BoundExpr{}, err
+			}
+			out, err := materializeSubqueriesExpr(expr.Args[0], segments)
+			if err != nil {
+				return sql.BoundExpr{}, err
+			}
+			expr.Args[0] = out
+			return expr, nil
+		}
+		if err := materializeSubqueries(expr.SubPlan.Rel, segments); err != nil {
+			return sql.BoundExpr{}, err
+		}
+		op, err := buildRel(expr.SubPlan.Rel, segments)
+		if err != nil {
+			return sql.BoundExpr{}, fmt.Errorf("IN subquery build: %w", err)
+		}
+		vals, err := drainValues(op)
+		if err != nil {
+			return sql.BoundExpr{}, fmt.Errorf("IN subquery drain: %w", err)
+		}
+		target := expr.Args[0]
+		out, err := materializeSubqueriesExpr(target, segments)
+		if err != nil {
+			return sql.BoundExpr{}, err
+		}
+		args := make([]sql.BoundExpr, 0, len(vals)+1)
+		args = append(args, out)
+		for _, v := range vals {
+			args = append(args, sql.BoundExpr{Op: sql.ExprLiteral, Type: out.Type, Literal: v})
+		}
+		return sql.BoundExpr{Op: sql.ExprIn, Type: expr.Type, Args: args, Not: expr.Not}, nil
+	case sql.ExprExists:
+		if expr.SubPlan == nil || expr.SubPlan.Rel == nil {
+			return sql.BoundExpr{}, fmt.Errorf("EXISTS subquery materialize: empty subplan")
+		}
+		if len(expr.SubPlan.OuterRefs) > 0 {
+			if err := materializeSubqueries(expr.SubPlan.Rel, segments); err != nil {
+				return sql.BoundExpr{}, err
+			}
+			return expr, nil
+		}
+		if err := materializeSubqueries(expr.SubPlan.Rel, segments); err != nil {
+			return sql.BoundExpr{}, err
+		}
+		op, err := buildRel(expr.SubPlan.Rel, segments)
+		if err != nil {
+			return sql.BoundExpr{}, fmt.Errorf("EXISTS subquery build: %w", err)
+		}
+		any, err := drainAny(op)
+		if err != nil {
+			return sql.BoundExpr{}, fmt.Errorf("EXISTS subquery drain: %w", err)
+		}
+		result := any
+		if expr.Not {
+			result = !any
+		}
+		return sql.BoundExpr{Op: sql.ExprLiteral, Type: expr.Type, Literal: result}, nil
+	}
+	for i := range expr.Args {
+		out, err := materializeSubqueriesExpr(expr.Args[i], segments)
+		if err != nil {
+			return sql.BoundExpr{}, err
+		}
+		expr.Args[i] = out
+	}
+	return expr, nil
+}
+
+func drainValues(op Operator) ([]any, error) {
+	ctx := context.Background()
+	if err := op.Open(ctx); err != nil {
+		return nil, err
+	}
+	defer op.Close()
+	var out []any
+	for {
+		batch, ok, err := op.Next()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		if len(batch.Columns) != 1 {
+			return nil, fmt.Errorf("IN subquery must return one column, got %d", len(batch.Columns))
+		}
+		col := &batch.Columns[0]
+		iter := batch.Sel
+		if iter == nil {
+			for row := 0; row < batch.Len; row++ {
+				v, verr := col.ValueAt(row)
+				if verr != nil {
+					return nil, verr
+				}
+				out = append(out, v)
+			}
+			continue
+		}
+		var iterErr error
+		iter.IterSet(func(row int) {
+			if iterErr != nil {
+				return
+			}
+			v, verr := col.ValueAt(row)
+			if verr != nil {
+				iterErr = verr
+				return
+			}
+			out = append(out, v)
+		})
+		if iterErr != nil {
+			return nil, iterErr
+		}
+	}
+	return out, nil
+}
+
+func drainAny(op Operator) (bool, error) {
+	ctx := context.Background()
+	if err := op.Open(ctx); err != nil {
+		return false, err
+	}
+	defer op.Close()
+	for {
+		batch, ok, err := op.Next()
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, nil
+		}
+		if batch.VisibleLen() > 0 {
+			return true, nil
+		}
+	}
+}
+
+func drainScalar(op Operator) (any, error) {
+	ctx := context.Background()
+	if err := op.Open(ctx); err != nil {
+		return nil, err
+	}
+	defer op.Close()
+	var captured any
+	rows := 0
+	for {
+		batch, ok, err := op.Next()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+		visible := batch.VisibleLen()
+		if visible == 0 {
+			continue
+		}
+		if len(batch.Columns) != 1 {
+			return nil, fmt.Errorf("scalar subquery must return one column, got %d", len(batch.Columns))
+		}
+		col := &batch.Columns[0]
+		iter := batch.Sel
+		if iter == nil {
+			for row := 0; row < batch.Len; row++ {
+				rows++
+				if rows > 1 {
+					return nil, fmt.Errorf("scalar subquery returned more than one row")
+				}
+				v, verr := col.ValueAt(row)
+				if verr != nil {
+					return nil, verr
+				}
+				captured = v
+			}
+			continue
+		}
+		var iterErr error
+		iter.IterSet(func(row int) {
+			if iterErr != nil {
+				return
+			}
+			rows++
+			if rows > 1 {
+				iterErr = fmt.Errorf("scalar subquery returned more than one row")
+				return
+			}
+			v, verr := col.ValueAt(row)
+			if verr != nil {
+				iterErr = verr
+				return
+			}
+			captured = v
+		})
+		if iterErr != nil {
+			return nil, iterErr
+		}
+	}
+	return captured, nil
+}
+
 func buildRel(rel *sql.Rel, segments SegmentsFn) (Operator, error) {
+	return buildRelWithOuter(rel, segments, nil)
+}
+
+func buildRelWithOuter(rel *sql.Rel, segments SegmentsFn, outer *correlatedOuter) (Operator, error) {
 	if rel == nil {
 		return nil, fmt.Errorf("buildRel: nil rel")
 	}
 	switch rel.Op {
 	case sql.RelScan:
-		return buildScan(rel, segments, nil)
+		return buildScan(rel, segments, nil, outer)
+	case sql.RelCTE:
+		if len(rel.Inputs) != 1 || rel.Inputs[0] == nil {
+			return nil, fmt.Errorf("BuildOperator: RelCTE missing inner rel")
+		}
+		return buildRelWithOuter(rel.Inputs[0], segments, outer)
+	case sql.RelWindow:
+		if len(rel.Inputs) != 1 || rel.Inputs[0] == nil {
+			return nil, fmt.Errorf("BuildOperator: RelWindow missing inner rel")
+		}
+		source, err := buildRelWithOuter(rel.Inputs[0], segments, outer)
+		if err != nil {
+			return nil, err
+		}
+		return &WindowOp{Source: source, Funcs: rel.WindowFuncs}, nil
 	case sql.RelProject:
 		if err := checkProjectionOps(rel.Projection); err != nil {
 			return nil, err
 		}
-		source, err := buildRel(rel.Inputs[0], segments)
+		source, err := buildRelWithOuter(rel.Inputs[0], segments, outer)
 		if err != nil {
 			return nil, err
 		}
-		return &ProjectOp{Source: source, Outputs: rel.Projection}, nil
+		if isIdentityProject(rel) {
+			return source, nil
+		}
+		return &ProjectOp{Source: source, Outputs: rel.Projection, outer: outer, subBuild: makeSubBuilder(segments, outer)}, nil
 	case sql.RelLimit:
-		source, err := buildRel(rel.Inputs[0], segments)
+		source, err := buildRelWithOuter(rel.Inputs[0], segments, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -70,7 +379,7 @@ func buildRel(rel *sql.Rel, segments SegmentsFn) (Operator, error) {
 				return nil, err
 			}
 		}
-		source, err := buildRel(rel.Inputs[0], segments)
+		source, err := buildRelWithOuter(rel.Inputs[0], segments, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -85,11 +394,11 @@ func buildRel(rel *sql.Rel, segments SegmentsFn) (Operator, error) {
 		if err := checkExecExpr(rel.Predicate); err != nil {
 			return nil, err
 		}
-		source, err := buildRel(rel.Inputs[0], segments)
+		source, err := buildRelWithOuter(rel.Inputs[0], segments, outer)
 		if err != nil {
 			return nil, err
 		}
-		return &FilterOp{Source: source, Predicate: rel.Predicate}, nil
+		return &FilterOp{Source: source, Predicate: rel.Predicate, outer: outer, subBuild: makeSubBuilder(segments, outer)}, nil
 	case sql.RelJoin:
 		if len(rel.JoinKeys) == 0 {
 			return nil, fmt.Errorf("BuildOperator: join missing keys")
@@ -106,11 +415,11 @@ func buildRel(rel *sql.Rel, segments SegmentsFn) (Operator, error) {
 			leftKeys[i] = k.Left
 			rightKeys[i] = k.Right
 		}
-		left, err := buildRel(rel.Inputs[0], segments)
+		left, err := buildRelWithOuter(rel.Inputs[0], segments, outer)
 		if err != nil {
 			return nil, err
 		}
-		right, err := buildRel(rel.Inputs[1], segments)
+		right, err := buildRelWithOuter(rel.Inputs[1], segments, outer)
 		if err != nil {
 			return nil, err
 		}
@@ -129,13 +438,40 @@ func buildRel(rel *sql.Rel, segments SegmentsFn) (Operator, error) {
 				return nil, err
 			}
 		}
-		source, err := buildSortInput(rel, segments)
+		source, err := buildSortInput(rel, segments, outer)
 		if err != nil {
 			return nil, err
 		}
 		return &SortOp{Source: source, Keys: rel.SortKeys, K: rel.K, Offset: rel.Offset}, nil
 	}
 	return nil, fmt.Errorf("BuildOperator: unsupported rel op %v", rel.Op)
+}
+
+func isIdentityProject(rel *sql.Rel) bool {
+	child := rel.Inputs[0]
+	if len(rel.Projection) != len(child.Outputs) {
+		return false
+	}
+	for i, out := range rel.Projection {
+		if out.Expr.Op != sql.ExprColumn {
+			return false
+		}
+		ck := child.Outputs[i]
+		if ck.Expr.Op != sql.ExprColumn {
+			return false
+		}
+		if !sameFoldName(out.Expr.Column, ck.Expr.Column) {
+			return false
+		}
+		if out.Alias != "" && !sameFoldName(out.Alias, ck.Alias) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameFoldName(a, b string) bool {
+	return types.NormalizeName(a) == types.NormalizeName(b)
 }
 
 // checkProjectionOps rejects expressions the row-by-row eval has not implemented yet.
@@ -169,7 +505,7 @@ func walkUnsupported(expr sql.BoundExpr) error {
 
 // buildSortInput detects RelSort directly over RelScan with a single int-like column
 // SortKey and K > 0, and pushes top-K into ScanOpts. SortOp stays above for correctness.
-func buildSortInput(sortRel *sql.Rel, segments SegmentsFn) (Operator, error) {
+func buildSortInput(sortRel *sql.Rel, segments SegmentsFn, outer *correlatedOuter) (Operator, error) {
 	child := sortRel.Inputs[0]
 	if child.Op == sql.RelScan && child.Where == nil && sortRel.K > 0 && len(sortRel.SortKeys) == 1 {
 		key := sortRel.SortKeys[0]
@@ -181,11 +517,11 @@ func buildSortInput(sortRel *sql.Rel, segments SegmentsFn) (Operator, error) {
 					Desc:   key.Desc,
 					K:      sortRel.K,
 					Offset: sortRel.Offset,
-				})
+				}, outer)
 			}
 		}
 	}
-	return buildRel(child, segments)
+	return buildRelWithOuter(child, segments, outer)
 }
 
 func scanColumnName(scan *sql.Rel, id sql.ColumnID) string {
@@ -224,7 +560,7 @@ func scanColumnNames(rel *sql.Rel) ([]string, error) {
 	return names, nil
 }
 
-func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown) (Operator, error) {
+func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, outer *correlatedOuter) (Operator, error) {
 	if rel.Where != nil {
 		if err := checkExecExpr(*rel.Where); err != nil {
 			return nil, err
@@ -266,7 +602,7 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown) (O
 	}
 	var op Operator = &ScanOp{Opts: opts, ColumnAlias: rel.Alias, Parallelism: parallelism}
 	if residual != nil {
-		op = &FilterOp{Source: op, Predicate: *residual}
+		op = &FilterOp{Source: op, Predicate: *residual, outer: outer, subBuild: makeSubBuilder(segments, outer)}
 	}
 	return op, nil
 }

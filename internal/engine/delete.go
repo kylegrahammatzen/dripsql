@@ -14,7 +14,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-func (db *DB) delete(ctx context.Context, plan *sql.Plan) (int64, error) {
+func (db *DB) delete(ctx context.Context, plan *sql.Plan, target commitTarget) (int64, error) {
 	def := plan.Table
 	m, err := db.manifestFor(def.Name)
 	if err != nil {
@@ -36,7 +36,7 @@ func (db *DB) delete(ctx context.Context, plan *sql.Plan) (int64, error) {
 			dvUpdates = append(dvUpdates, *dvUpdate)
 		}
 	}
-	if err := m.Commit(nil, dvUpdates); err != nil {
+	if err := target.commit(def.Name, nil, dvUpdates); err != nil {
 		return deleted, err
 	}
 	return deleted, nil

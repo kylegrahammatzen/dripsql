@@ -14,6 +14,9 @@ type FilterOp struct {
 	Source    Operator
 	Predicate sql.BoundExpr
 
+	outer    *correlatedOuter
+	subBuild func(*sql.Plan) (Operator, error)
+
 	state operatorState
 }
 
@@ -44,7 +47,7 @@ func (f *FilterOp) Next() (types.Batch, bool, error) {
 			return batch, ok, err
 		}
 		in := selectionForBatch(batch)
-		res, err := filterPredicate(batch, in, f.Predicate, nil)
+		res, err := filterPredicate(batch, in, f.Predicate, nil, f.outer, f.subBuild)
 		if err != nil {
 			return types.Batch{}, false, err
 		}
@@ -60,14 +63,14 @@ func (f *FilterOp) Next() (types.Batch, bool, error) {
 // left's output mask (instead of the original input) so a selective left predicate skips
 // rows on the right; OR keeps both children on the same input and unions the results.
 // A non-nil scratch mask is reused in place by leaves so a chain of ANDs needs only one alloc.
-func filterPredicate(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (filterResult, error) {
+func filterPredicate(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
 	switch pred.Op {
 	case sql.ExprAnd:
-		return filterAnd(batch, sel, pred, scratch)
+		return filterAnd(batch, sel, pred, scratch, outer, subBuild)
 	case sql.ExprOr:
-		return filterOr(batch, sel, pred, scratch)
+		return filterOr(batch, sel, pred, scratch, outer, subBuild)
 	case sql.ExprNot:
-		return filterNotPred(batch, sel, pred, scratch)
+		return filterNotPred(batch, sel, pred, scratch, outer, subBuild)
 	}
 	out, count, ok, err := tryFilterLeaf(batch, sel, pred, scratch)
 	if err != nil {
@@ -76,36 +79,36 @@ func filterPredicate(batch types.Batch, sel types.SelectionMask, pred sql.BoundE
 	if ok {
 		return filterResult{sel: out, count: count}, nil
 	}
-	out, count, err = filterRowByRow(batch, sel, pred, scratch)
+	out, count, err = filterRowByRow(batch, sel, pred, scratch, outer, subBuild)
 	if err != nil {
 		return filterResult{}, err
 	}
 	return filterResult{sel: out, count: count}, nil
 }
 
-func filterAnd(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (filterResult, error) {
+func filterAnd(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
 	if len(pred.Args) != 2 {
 		return filterResult{}, fmt.Errorf("filter: AND expects 2 args, got %d", len(pred.Args))
 	}
-	left, err := filterPredicate(batch, sel, pred.Args[0], scratch)
+	left, err := filterPredicate(batch, sel, pred.Args[0], scratch, outer, subBuild)
 	if err != nil {
 		return filterResult{}, err
 	}
 	if left.count == 0 {
 		return left, nil
 	}
-	return filterPredicate(batch, left.sel, pred.Args[1], &left.sel)
+	return filterPredicate(batch, left.sel, pred.Args[1], &left.sel, outer, subBuild)
 }
 
-func filterOr(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (filterResult, error) {
+func filterOr(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
 	if len(pred.Args) != 2 {
 		return filterResult{}, fmt.Errorf("filter: OR expects 2 args, got %d", len(pred.Args))
 	}
-	left, err := filterPredicate(batch, sel, pred.Args[0], scratch)
+	left, err := filterPredicate(batch, sel, pred.Args[0], scratch, outer, subBuild)
 	if err != nil {
 		return filterResult{}, err
 	}
-	right, err := filterPredicate(batch, sel, pred.Args[1], nil)
+	right, err := filterPredicate(batch, sel, pred.Args[1], nil, outer, subBuild)
 	if err != nil {
 		return filterResult{}, err
 	}
@@ -113,11 +116,11 @@ func filterOr(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, sc
 	return filterResult{sel: left.sel, count: count}, nil
 }
 
-func filterNotPred(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (filterResult, error) {
+func filterNotPred(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
 	if len(pred.Args) != 1 {
 		return filterResult{}, fmt.Errorf("filter: NOT expects 1 arg, got %d", len(pred.Args))
 	}
-	child, err := filterPredicate(batch, sel, pred.Args[0], scratch)
+	child, err := filterPredicate(batch, sel, pred.Args[0], scratch, outer, subBuild)
 	if err != nil {
 		return filterResult{}, err
 	}
@@ -255,8 +258,8 @@ func ensureOutMask(scratch *types.SelectionMask, rows int) types.SelectionMask {
 	return types.NewSelectionMask(rows)
 }
 
-func filterRowByRow(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (types.SelectionMask, int, error) {
-	ctx := newEvalCtx(batch)
+func filterRowByRow(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (types.SelectionMask, int, error) {
+	ctx := newEvalCtxWith(batch, outer, subBuild)
 	out := ensureOutMask(scratch, batch.Len)
 	out.Clear()
 	var count int
@@ -322,7 +325,7 @@ func EvalPredicate(batch types.Batch, where sql.BoundExpr) (types.SelectionMask,
 		return types.SelectionMask{}, err
 	}
 	in := selectionForBatch(batch)
-	res, err := filterPredicate(batch, in, where, nil)
+	res, err := filterPredicate(batch, in, where, nil, nil, nil)
 	if err != nil {
 		return types.SelectionMask{}, err
 	}

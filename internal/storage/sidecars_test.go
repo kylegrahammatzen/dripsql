@@ -1,13 +1,11 @@
-// Binary Fuse filter correctness + prune path: filter reports presence for every inserted
-// key, rejects keys absent from the segment, and boundEqInt64.PruneSegment uses it when
-// the value lies inside column min/max but is not in the segment.
+// Bloom filter correctness and the boundEqInt64.PruneSegment fast path.
+// Filter reports presence for every inserted key and rejects absent keys.
 package storage
 
 import (
 	"path/filepath"
 	"testing"
 
-	"github.com/FastFilter/xorfilter"
 	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
@@ -16,14 +14,10 @@ func TestIntFilter_NoFalseNegatives(t *testing.T) {
 	for i := range 1000 {
 		keys = append(keys, uint64(i)*7)
 	}
-	fuse, err := xorfilter.PopulateBinaryFuse8(keys)
-	if err != nil {
-		t.Fatalf("populate: %v", err)
-	}
-	f := &IntFilter{fuse: fuse}
+	f := &IntFilter{bloom: newBloomFilter(keys)}
 	for _, k := range keys {
 		if !f.Contains(int64(k)) {
-			t.Fatalf("Binary Fuse missed inserted key %d", k)
+			t.Fatalf("bloom filter missed inserted key %d", k)
 		}
 	}
 }
@@ -41,7 +35,7 @@ func TestBoundEqInt64_PruneSegment_UsesIntFilterWhenInRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteSegment(path, []types.Batch{batch}); err != nil {
+	if _, err := WriteSegment(path, []types.Batch{batch}, nil); err != nil {
 		t.Fatal(err)
 	}
 	seg, err := OpenSegment(path)

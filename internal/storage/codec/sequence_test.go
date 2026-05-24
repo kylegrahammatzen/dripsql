@@ -34,7 +34,7 @@ func TestSequence_EstimateRejects(t *testing.T) {
 		{"nonArithmetic", nonArith},
 	}
 	for _, tc := range cases {
-		if _, ok := (sequenceCodec{}).Estimate(tc.v); ok {
+		if _, ok := Estimate(sequenceCodec{}, tc.v); ok {
 			t.Fatalf("%s: Estimate must reject", tc.name)
 		}
 	}
@@ -98,7 +98,7 @@ func TestSequence_EstimateMatchesEncode(t *testing.T) {
 	for i := range src.I64() {
 		src.I64()[i] = int64(i) * -3
 	}
-	est, ok := sequenceCodec{}.Estimate(src)
+	est, ok := Estimate(sequenceCodec{}, src)
 	if !ok {
 		t.Fatal("arithmetic rows must Estimate")
 	}

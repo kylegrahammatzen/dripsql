@@ -43,13 +43,50 @@ func (p *parser) parsePredicateNot() (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
+		next, perr := p.peek()
+		if perr != nil {
+			return nil, perr
+		}
+		if next.typ == tokIdent && !next.quoted && next.lit == "exists" {
+			_, _ = p.next()
+			inner, err := p.parseExistsTail()
+			if err != nil {
+				return nil, err
+			}
+			return &ExistsExpr{Query: inner, Not: true}, nil
+		}
 		expr, err := p.parsePredicateNot()
 		if err != nil {
 			return nil, err
 		}
 		return &NotExpr{Expr: expr}, nil
 	}
+	if next, err := p.peek(); err == nil && next.typ == tokIdent && !next.quoted && next.lit == "exists" {
+		_, _ = p.next()
+		inner, err := p.parseExistsTail()
+		if err != nil {
+			return nil, err
+		}
+		return &ExistsExpr{Query: inner}, nil
+	}
 	return p.parsePredicatePrimary()
+}
+
+func (p *parser) parseExistsTail() (*SelectStmt, error) {
+	if _, err := p.expect(tokLParen); err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("select"); err != nil {
+		return nil, err
+	}
+	inner, err := p.parseSelect()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(tokRParen); err != nil {
+		return nil, err
+	}
+	return inner, nil
 }
 
 func (p *parser) parsePredicatePrimary() (Expr, error) {

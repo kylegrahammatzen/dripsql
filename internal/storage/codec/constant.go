@@ -1,5 +1,5 @@
-// Constant codec: one value on disk regardless of row count.
-// Estimate returns false when rows differ so cascade selection naturally skips it.
+// Constant codec stores one value on disk regardless of row count.
+// Returns ErrSkip when rows differ so cascade selection naturally skips it.
 package codec
 
 import (
@@ -18,13 +18,19 @@ func init() {
 
 func (constantCodec) Encoding() types.Encoding { return types.EncodingConstant }
 
-func (constantCodec) Estimate(v types.Vec) (int, bool) {
+func (constantCodec) constantSize(v types.Vec, ctx *EncodeContext) (int, bool) {
 	w := v.Kind.FixedWidth()
 	if w == 0 {
 		return 0, false
 	}
 	if int(v.Len) == 0 {
 		return 0, true
+	}
+	if ctx != nil && ctx.Facts != nil && ctx.Facts.Int != nil {
+		if !ctx.Facts.Int.ConstantOK {
+			return 0, false
+		}
+		return constantValueSize(v), true
 	}
 	if !constantAllEqual(v) {
 		return 0, false
@@ -83,11 +89,12 @@ func constantValueSize(v types.Vec) int {
 	return 0
 }
 
-func (c constantCodec) Encode(v types.Vec, scratch []byte) ([]byte, error) {
-	n, ok := c.Estimate(v)
+func (c constantCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+	n, ok := c.constantSize(v, ctx)
 	if !ok {
-		return nil, fmt.Errorf("constant encode: kind %v not supported or rows not all equal", v.Kind)
+		return nil, ErrSkip
 	}
+	scratch := ctxTrial(ctx)
 	if cap(scratch) < n {
 		scratch = make([]byte, n)
 	} else {

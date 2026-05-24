@@ -86,7 +86,7 @@ func TestFORBitpack_EstimateRejectsConstant(t *testing.T) {
 	for i := range src.I64() {
 		src.I64()[i] = 42
 	}
-	if _, ok := (forBitpackCodec{}).Estimate(src); ok {
+	if _, ok := Estimate(forBitpackCodec{}, src); ok {
 		t.Fatal("Estimate must reject constant column (width=0)")
 	}
 }
@@ -100,7 +100,7 @@ func TestFORBitpack_EstimateRejectsWidthExceedsStorage(t *testing.T) {
 			src.I16()[i] = 30000
 		}
 	}
-	if _, ok := (forBitpackCodec{}).Estimate(src); ok {
+	if _, ok := Estimate(forBitpackCodec{}, src); ok {
 		t.Fatal("Estimate must reject when residual width >= storage width")
 	}
 }
@@ -113,7 +113,7 @@ func TestFORBitpack_EstimateRejectsNonFORKinds(t *testing.T) {
 		} else {
 			v = types.NewVec(kind, 4)
 		}
-		if _, ok := (forBitpackCodec{}).Estimate(v); ok {
+		if _, ok := Estimate(forBitpackCodec{}, v); ok {
 			t.Fatalf("Estimate must reject %v", kind)
 		}
 	}
@@ -144,7 +144,7 @@ func TestFORBitpack_EstimateMatchesEncode(t *testing.T) {
 	for i := range src.I64() {
 		src.I64()[i] = int64(i) * 13
 	}
-	est, ok := forBitpackCodec{}.Estimate(src)
+	est, ok := Estimate(forBitpackCodec{}, src)
 	if !ok {
 		t.Fatal("Estimate must accept arithmetic series")
 	}
