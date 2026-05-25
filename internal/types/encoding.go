@@ -1,8 +1,6 @@
-// Encoding tags a Vec with its physical buffer layout.
-// One encodingTable drives String, Wire, and EncodingFromWire so the wire mapping has a single source of truth.
+// Encoding tags a Vec with its physical buffer layout where the wire byte equals the iota value.
+// EncodingAuto is a binder sentinel rejected at the wire boundary.
 package types
-
-import "fmt"
 
 type Encoding uint8
 
@@ -22,83 +20,84 @@ const (
 	EncodingPcodec
 )
 
-type encodingInfo struct {
-	name string
-	wire uint8
-}
-
-var encodingTable = [...]encodingInfo{
-	EncodingAuto:         {"auto", 0},
-	EncodingFlat:         {"flat", 1},
-	EncodingDictionary:   {"dictionary", 2},
-	EncodingConstant:     {"constant", 3},
-	EncodingSequence:     {"sequence", 4},
-	EncodingFORBitPack:   {"for+bitpack", 5},
-	EncodingDeltaBitPack: {"delta+bitpack", 6},
-	EncodingFlate:        {"flate", 7},
-	EncodingZstd:         {"zstd", 8},
-	EncodingALP:          {"alp", 9},
-	EncodingALPRD:        {"alp-rd", 10},
-	EncodingFSST:         {"fsst", 11},
-	EncodingPcodec:       {"pcodec", 12},
-}
+const encodingMax = EncodingPcodec
 
 func (e Encoding) String() string {
-	if int(e) < len(encodingTable) {
-		return encodingTable[e].name
+	switch e {
+	case EncodingAuto:
+		return "auto"
+	case EncodingFlat:
+		return "flat"
+	case EncodingDictionary:
+		return "dictionary"
+	case EncodingConstant:
+		return "constant"
+	case EncodingSequence:
+		return "sequence"
+	case EncodingFORBitPack:
+		return "for+bitpack"
+	case EncodingDeltaBitPack:
+		return "delta+bitpack"
+	case EncodingFlate:
+		return "flate"
+	case EncodingZstd:
+		return "zstd"
+	case EncodingALP:
+		return "alp"
+	case EncodingALPRD:
+		return "alp-rd"
+	case EncodingFSST:
+		return "fsst"
+	case EncodingPcodec:
+		return "pcodec"
 	}
-	return fmt.Sprintf("encoding(%d)", e)
+	return "encoding(?)"
 }
 
 func (e Encoding) Wire() uint8 {
 	if e == EncodingAuto {
 		panic("EncodingAuto is a hint sentinel and cannot be encoded to wire")
 	}
-	if int(e) >= len(encodingTable) {
-		panic(fmt.Sprintf("unknown encoding %d cannot be encoded to wire", e))
+	if e > encodingMax {
+		panic("unknown encoding cannot be encoded to wire")
 	}
-	return encodingTable[e].wire
+	return uint8(e)
 }
-
-var wireToEncoding = func() [256]Encoding {
-	var m [256]Encoding
-	for i, info := range encodingTable {
-		if Encoding(i) == EncodingAuto {
-			continue
-		}
-		m[info.wire] = Encoding(i)
-	}
-	return m
-}()
 
 func EncodingFromWire(b uint8) (Encoding, bool) {
-	if b == 0 {
+	if b == 0 || Encoding(b) > encodingMax {
 		return EncodingAuto, false
 	}
-	e := wireToEncoding[b]
-	if e == EncodingAuto {
-		return EncodingAuto, false
-	}
-	return e, true
+	return Encoding(b), true
 }
 
-// "auto" is rejected so DDL cannot smuggle the sentinel onto the wire. "plain" is
-// accepted as an alias for the internal "flat" name.
+// "auto" is rejected so DDL cannot smuggle the sentinel onto the wire and "plain" aliases "flat".
 func EncodingFromName(name string) (Encoding, bool) {
-	if name == "" {
-		return EncodingAuto, false
-	}
-	want := NormalizeName(name)
-	if want == "plain" {
+	switch NormalizeName(name) {
+	case "plain", "flat":
 		return EncodingFlat, true
-	}
-	for i, info := range encodingTable {
-		if Encoding(i) == EncodingAuto {
-			continue
-		}
-		if info.name == want {
-			return Encoding(i), true
-		}
+	case "dictionary":
+		return EncodingDictionary, true
+	case "constant":
+		return EncodingConstant, true
+	case "sequence":
+		return EncodingSequence, true
+	case "for+bitpack":
+		return EncodingFORBitPack, true
+	case "delta+bitpack":
+		return EncodingDeltaBitPack, true
+	case "flate":
+		return EncodingFlate, true
+	case "zstd":
+		return EncodingZstd, true
+	case "alp":
+		return EncodingALP, true
+	case "alp-rd":
+		return EncodingALPRD, true
+	case "fsst":
+		return EncodingFSST, true
+	case "pcodec":
+		return EncodingPcodec, true
 	}
 	return EncodingAuto, false
 }

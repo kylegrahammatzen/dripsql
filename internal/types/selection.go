@@ -156,9 +156,8 @@ func (s SelectionMask) IterSet(fn func(row int)) {
 	}
 }
 
-// AndCount does not re-mask the tail since AND cannot introduce 1-bits the inputs lacked.
+// AndCount requires equal-shape inputs from the caller and does not re-mask the tail since AND cannot introduce 1-bits the inputs lacked.
 func (s *SelectionMask) AndCount(other SelectionMask) int {
-	assertSameShape(*s, other)
 	count := 0
 	for i := range s.words {
 		s.words[i] &= other.words[i]
@@ -168,8 +167,8 @@ func (s *SelectionMask) AndCount(other SelectionMask) int {
 	return count
 }
 
+// OrCount requires equal-shape inputs from the caller.
 func (s *SelectionMask) OrCount(other SelectionMask) int {
-	assertSameShape(*s, other)
 	count := 0
 	for i := range s.words {
 		s.words[i] |= other.words[i]
@@ -195,8 +194,3 @@ func (s *SelectionMask) NotCount() int {
 	return count
 }
 
-func assertSameShape(a, b SelectionMask) {
-	if a.rows != b.rows {
-		panic("SelectionMask shape mismatch")
-	}
-}

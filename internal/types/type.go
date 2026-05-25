@@ -1,5 +1,5 @@
 // Type is the SQL-side data type referenced by parser, binder, and exec.
-// One sqlKindTable drives Parse, String, and the VecKindOf mapping to physical kinds.
+// Logical-kind name, parse, and physical-kind mapping all run as single switches.
 package types
 
 import (
@@ -33,35 +33,38 @@ type Type struct {
 	Name string
 }
 
-type sqlKindInfo struct {
-	name    string
-	vecKind VecKind
-}
-
-var sqlKindTable = [...]sqlKindInfo{
-	KindInvalid:   {name: "invalid"},
-	KindBool:      {name: "bool", vecKind: VecBool},
-	KindInt16:     {name: "int16", vecKind: VecInt16},
-	KindInt32:     {name: "int32", vecKind: VecInt32},
-	KindInt64:     {name: "int64", vecKind: VecInt64},
-	KindFloat32:   {name: "float32", vecKind: VecFloat32},
-	KindFloat64:   {name: "float64", vecKind: VecFloat64},
-	KindDecimal:   {name: "decimal", vecKind: VecDecimal64},
-	KindText:      {name: "text", vecKind: VecText},
-	KindBytes:     {name: "bytes", vecKind: VecBytes},
-	KindUUID:      {name: "uuid", vecKind: VecUUID},
-	KindTimestamp: {name: "timestamp", vecKind: VecTimestamp},
-	KindTime:      {name: "time", vecKind: VecTime},
-	KindDate:      {name: "date", vecKind: VecDate},
-	KindJSON:      {name: "json", vecKind: VecJSON},
-	KindNamed:     {name: "named", vecKind: VecEnum32},
-}
-
 func (k Kind) String() string {
-	if int(k) < len(sqlKindTable) {
-		if n := sqlKindTable[k].name; n != "" {
-			return n
-		}
+	switch k {
+	case KindBool:
+		return "bool"
+	case KindInt16:
+		return "int16"
+	case KindInt32:
+		return "int32"
+	case KindInt64:
+		return "int64"
+	case KindFloat32:
+		return "float32"
+	case KindFloat64:
+		return "float64"
+	case KindDecimal:
+		return "decimal"
+	case KindText:
+		return "text"
+	case KindBytes:
+		return "bytes"
+	case KindUUID:
+		return "uuid"
+	case KindTimestamp:
+		return "timestamp"
+	case KindTime:
+		return "time"
+	case KindDate:
+		return "date"
+	case KindJSON:
+		return "json"
+	case KindNamed:
+		return "named"
 	}
 	return "invalid"
 }
@@ -87,24 +90,38 @@ func Named(name string) Type {
 	return Type{Kind: KindNamed, Name: name}
 }
 
-var sqlNameToKind = func() map[string]Kind {
-	m := make(map[string]Kind, len(sqlKindTable))
-	for i, info := range sqlKindTable {
-		k := Kind(i)
-		if k == KindInvalid || k == KindNamed || info.name == "" {
-			continue
-		}
-		m[info.name] = k
-	}
-	return m
-}()
-
 func Parse(name string) Type {
-	canon := strings.ToLower(strings.TrimSpace(name))
-	if k, ok := sqlNameToKind[canon]; ok {
-		return Type{Kind: k}
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "bool":
+		return Bool
+	case "int16":
+		return Int16
+	case "int32":
+		return Int32
+	case "int64":
+		return Int64
+	case "float32":
+		return Float32
+	case "float64":
+		return Float64
+	case "decimal":
+		return Decimal
+	case "text":
+		return Text
+	case "bytes":
+		return Bytes
+	case "uuid":
+		return UUID
+	case "timestamp":
+		return Timestamp
+	case "time":
+		return Time
+	case "date":
+		return Date
+	case "json":
+		return JSON
 	}
-	return Named(canon)
+	return Named(strings.ToLower(strings.TrimSpace(name)))
 }
 
 func (t Type) Valid() bool {
@@ -126,8 +143,7 @@ func (t Type) String() string {
 	return t.Kind.String()
 }
 
-// Inverse of VecKindOf, used when reconstructing logical Type from segment metadata.
-// VecEnum32 maps to a Named type carrying enumName; other kinds ignore it.
+// TypeFromVecKind reconstructs a logical Type from a physical VecKind and requires enumName when k is VecEnum32.
 func TypeFromVecKind(k VecKind, enumName string) (Type, error) {
 	switch k {
 	case VecBool:
@@ -171,12 +187,37 @@ func VecKindOf(t Type) (VecKind, error) {
 	if !t.Valid() {
 		return VecInvalid, fmt.Errorf("VecKindOf: invalid type %v", t)
 	}
-	if int(t.Kind) >= len(sqlKindTable) {
-		return VecInvalid, fmt.Errorf("VecKindOf: unknown kind %d", t.Kind)
+	switch t.Kind {
+	case KindBool:
+		return VecBool, nil
+	case KindInt16:
+		return VecInt16, nil
+	case KindInt32:
+		return VecInt32, nil
+	case KindInt64:
+		return VecInt64, nil
+	case KindFloat32:
+		return VecFloat32, nil
+	case KindFloat64:
+		return VecFloat64, nil
+	case KindDecimal:
+		return VecDecimal64, nil
+	case KindText:
+		return VecText, nil
+	case KindBytes:
+		return VecBytes, nil
+	case KindUUID:
+		return VecUUID, nil
+	case KindTimestamp:
+		return VecTimestamp, nil
+	case KindTime:
+		return VecTime, nil
+	case KindDate:
+		return VecDate, nil
+	case KindJSON:
+		return VecJSON, nil
+	case KindNamed:
+		return VecEnum32, nil
 	}
-	vk := sqlKindTable[t.Kind].vecKind
-	if vk == VecInvalid {
-		return VecInvalid, fmt.Errorf("VecKindOf: kind %v has no physical mapping", t.Kind)
-	}
-	return vk, nil
+	return VecInvalid, fmt.Errorf("VecKindOf: invalid kind %v", t.Kind)
 }

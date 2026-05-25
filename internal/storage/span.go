@@ -1,4 +1,4 @@
-// Named phase budgets with wall time and row/byte/call counters.
+// Span carries a named phase budget with wall time and row counters and is nil-receiver safe.
 // WriteSegment returns a per-call tree that the engine roots under a statement span.
 package storage
 
@@ -17,6 +17,10 @@ type Span struct {
 	Children []*Span
 
 	start time.Time
+}
+
+func NewSpan(name string) *Span {
+	return &Span{Name: name, start: time.Now()}
 }
 
 func (s *Span) Child(name string) *Span {

@@ -1,10 +1,6 @@
 // VecKind tags every Vec with the physical kind of data it holds.
-// One metadata table drives name, fixed-width discriminator, and FOR-packable bit.
+// Width, FOR-packability, and name come from per-kind switches the compiler folds.
 package types
-
-import "fmt"
-
-const StandardBatchRows = 2048
 
 type VecKind uint8
 
@@ -27,6 +23,8 @@ const (
 	VecEnum32
 )
 
+const StandardBatchRows = 2048
+
 type Width int
 
 const (
@@ -34,51 +32,69 @@ const (
 	WidthBool     Width = -2
 )
 
-type vecKindInfo struct {
-	name        string
-	width       Width
-	forPackable bool
-}
-
-var vecKindTable = [...]vecKindInfo{
-	VecInvalid:   {name: "invalid"},
-	VecBool:      {name: "bool", width: WidthBool},
-	VecInt16:     {name: "int16", width: 2, forPackable: true},
-	VecInt32:     {name: "int32", width: 4, forPackable: true},
-	VecInt64:     {name: "int64", width: 8, forPackable: true},
-	VecFloat32:   {name: "float32", width: 4},
-	VecFloat64:   {name: "float64", width: 8},
-	VecDecimal64: {name: "decimal64", width: 8, forPackable: true},
-	VecText:      {name: "text", width: WidthVarBytes},
-	VecBytes:     {name: "bytes", width: WidthVarBytes},
-	VecUUID:      {name: "uuid", width: 16},
-	VecTimestamp: {name: "timestamp", width: 8, forPackable: true},
-	VecTime:      {name: "time", width: 8, forPackable: true},
-	VecDate:      {name: "date", width: 4, forPackable: true},
-	VecJSON:      {name: "json", width: WidthVarBytes},
-	VecEnum32:    {name: "enum32", width: 4, forPackable: true},
-}
-
 func (k VecKind) String() string {
-	if int(k) < len(vecKindTable) {
-		if name := vecKindTable[k].name; name != "" {
-			return name
-		}
+	switch k {
+	case VecBool:
+		return "bool"
+	case VecInt16:
+		return "int16"
+	case VecInt32:
+		return "int32"
+	case VecInt64:
+		return "int64"
+	case VecFloat32:
+		return "float32"
+	case VecFloat64:
+		return "float64"
+	case VecDecimal64:
+		return "decimal64"
+	case VecText:
+		return "text"
+	case VecBytes:
+		return "bytes"
+	case VecUUID:
+		return "uuid"
+	case VecTimestamp:
+		return "timestamp"
+	case VecTime:
+		return "time"
+	case VecDate:
+		return "date"
+	case VecJSON:
+		return "json"
+	case VecEnum32:
+		return "enum32"
 	}
-	return fmt.Sprintf("vec_kind(%d)", k)
+	return "invalid"
 }
 
 func (k VecKind) FixedWidth() Width {
-	if int(k) < len(vecKindTable) {
-		return vecKindTable[k].width
+	switch k {
+	case VecBool:
+		return WidthBool
+	case VecInt16:
+		return 2
+	case VecInt32, VecDate, VecEnum32:
+		return 4
+	case VecInt64, VecFloat64, VecDecimal64, VecTimestamp, VecTime:
+		return 8
+	case VecFloat32:
+		return 4
+	case VecUUID:
+		return 16
+	case VecText, VecBytes, VecJSON:
+		return WidthVarBytes
 	}
 	return 0
 }
 
-func (k VecKind) IsVarBytes() bool {
-	return k.FixedWidth() == WidthVarBytes
-}
+func (k VecKind) IsVarBytes() bool { return k.FixedWidth() == WidthVarBytes }
 
 func (k VecKind) IsFORPackable() bool {
-	return int(k) < len(vecKindTable) && vecKindTable[k].forPackable
+	switch k {
+	case VecInt16, VecInt32, VecInt64, VecDecimal64,
+		VecTimestamp, VecTime, VecDate, VecEnum32:
+		return true
+	}
+	return false
 }
