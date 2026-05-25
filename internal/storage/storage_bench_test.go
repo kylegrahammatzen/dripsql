@@ -134,11 +134,11 @@ func BenchmarkStorage_ScanFull(b *testing.B) {
 func BenchmarkStorage_ScanEqInt64Hit(b *testing.B) {
 	seg := openBenchSegment(b, 4)
 	defer seg.Close()
-	pred := EqInt64{Column: "age", Value: 42}
+	pred := Pred{Op: OpEq, Col: "age", Kind: types.VecInt64, I64: 42}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		opts := ScanOpts{Segments: []*Segment{seg}, Predicate: pred}
+		opts := ScanOpts{Segments: []*Segment{seg}, Pred: &pred}
 		err := Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error { return nil })
 		if err != nil {
 			b.Fatal(err)
@@ -150,11 +150,11 @@ func BenchmarkStorage_ScanEqInt64Miss(b *testing.B) {
 	seg := openBenchSegment(b, 4)
 	defer seg.Close()
 	// age is i % 100 so 999 falls inside [0, 99] only as a Bloom-rescuable miss.
-	pred := EqInt64{Column: "age", Value: 999}
+	pred := Pred{Op: OpEq, Col: "age", Kind: types.VecInt64, I64: 999}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		opts := ScanOpts{Segments: []*Segment{seg}, Predicate: pred}
+		opts := ScanOpts{Segments: []*Segment{seg}, Pred: &pred}
 		err := Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error { return nil })
 		if err != nil {
 			b.Fatal(err)
@@ -165,11 +165,11 @@ func BenchmarkStorage_ScanEqInt64Miss(b *testing.B) {
 func BenchmarkStorage_ScanEqBytesHit(b *testing.B) {
 	seg := openBenchSegment(b, 4)
 	defer seg.Close()
-	pred := EqBytes{Column: "category", Value: []byte("alpha")}
+	pred := Pred{Op: OpEq, Col: "category", Kind: types.VecText, Bytes: []byte("alpha")}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		opts := ScanOpts{Segments: []*Segment{seg}, Predicate: pred}
+		opts := ScanOpts{Segments: []*Segment{seg}, Pred: &pred}
 		err := Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error { return nil })
 		if err != nil {
 			b.Fatal(err)

@@ -13,14 +13,11 @@ import (
 type ScanFn func(batch types.Batch, sel *types.SelectionMask) error
 
 type ScanOpts struct {
-	Segments  []*Segment
-	Columns   []string
-	Predicate Predicate
-	TopK      *TopKPushdown
-	// ReadTs is the MVCC visibility cutoff. Segments with CommitTs > ReadTs are skipped.
-	// Zero means "no cutoff" (latest), matching the pre-MVCC behavior. Engine-level
-	// snapshots set this to nextCommitTs.Load() at statement start.
-	ReadTs uint64
+	Segments []*Segment
+	Columns  []string
+	Pred     *Pred
+	TopK     *TopKPushdown
+	ReadTs   uint64
 }
 
 // TopKPushdown is storage-owned scan metadata for ORDER BY ... LIMIT/OFFSET over a single
@@ -49,13 +46,16 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 			projection[i] = c.Name
 		}
 	}
-	predCols := PredicateColumns(opts.Predicate)
+	var predCols []string
+	if opts.Pred != nil {
+		predCols = opts.Pred.Columns()
+	}
 	decode := projection
 	if len(predCols) != 0 {
 		decode = unionNames(projection, predCols)
 	}
 	var topKPages map[[2]int]bool
-	if opts.TopK != nil && opts.Predicate == nil {
+	if opts.TopK != nil && opts.Pred == nil {
 		topKPages = selectTopKPages(opts.Segments, opts.TopK)
 	}
 	var predNeeded []bool
@@ -78,14 +78,9 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 		if err != nil {
 			return fmt.Errorf("Scan: %w", err)
 		}
-		var bp BoundPredicate
-		if opts.Predicate != nil {
-			bp, err = BindPredicate(opts.Predicate, SegmentSchema(seg))
-			if err != nil {
-				return fmt.Errorf("Scan: bind predicate: %w", err)
-			}
+		if opts.Pred != nil {
 			seg.LoadPageStats()
-			if bp.PruneSegment(seg) {
+			if opts.Pred.Skips(seg) {
 				continue
 			}
 		}
@@ -97,7 +92,7 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 				pageMask[pi] = topKPages[[2]int{si, pi}]
 			}
 		}
-		if err := scanSegment(seg, decode, decodeIdx, projIdx, predNeeded, bp, pageMask, fn); err != nil {
+		if err := scanSegment(seg, decode, decodeIdx, projIdx, predNeeded, opts.Pred, pageMask, fn); err != nil {
 			return err
 		}
 	}
@@ -257,7 +252,7 @@ func resolveSegmentColumns(seg *Segment, decode, projection []string) (decodeIdx
 	return decodeIdx, projIdx, nil
 }
 
-func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNeeded []bool, bp BoundPredicate, pageMask []bool, fn ScanFn) error {
+func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNeeded []bool, pred *Pred, pageMask []bool, fn ScanFn) error {
 	if len(decodeIdx) == 0 {
 		return nil
 	}
@@ -272,7 +267,6 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 	var sel types.SelectionMask
 	var scratch []byte
 	predOnly := predicateOnlyMask(decodeIdx, projIdx)
-	encEval, _ := bp.(EncodedEvaluator)
 	for i, ci := range decodeIdx {
 		decoded[i].Name = seg.Cols[ci].Name
 		decoded[i].EnumLabels = seg.Cols[ci].EnumLabels
@@ -303,18 +297,18 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 		if pageMask != nil && !pageMask[pi] {
 			continue
 		}
-		if bp != nil && bp.PrunePage(seg, pi) {
+		if pred != nil && pred.SkipsPage(seg, pi) {
 			continue
 		}
 		ci0 := decodeIdx[0]
 		pageRows := int(seg.Cols[ci0].Pages[pi].Rows)
 		pageRowStart := seg.Cols[ci0].Pages[pi].RowStart
 		encodedDone := false
-		if encEval != nil && hasAny(predOnly) {
-			handled, newScratch, err := encEval.EvalEncoded(seg, pi, &sel, scratch)
+		if pred != nil && hasAny(predOnly) {
+			handled, newScratch, err := pred.ApplyEncoded(seg, pi, &sel, scratch)
 			scratch = newScratch
 			if err != nil {
-				return fmt.Errorf("scan: EvalEncoded page %d: %w", pi, err)
+				return fmt.Errorf("scan: ApplyEncoded page %d: %w", pi, err)
 			}
 			if handled {
 				encodedDone = true
@@ -338,10 +332,11 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 			} else {
 				sel.Clear()
 			}
-			if bp == nil {
+			if pred == nil {
 				sel.FillAll()
 			} else {
-				bp.Eval(batch, &sel)
+				sel.FillAll()
+				pred.Apply(batch, &sel)
 			}
 		}
 		if seg.DV != nil {

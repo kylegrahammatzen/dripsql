@@ -592,7 +592,7 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, ou
 	var residual *sql.BoundExpr
 	if rel.Where != nil {
 		if pred, ok := loweredPredicate(*rel.Where); ok {
-			opts.Predicate = pred
+			opts.Pred = &pred
 			if len(rel.PredicateOnly) > 0 {
 				drop := make(map[sql.ColumnID]struct{}, len(rel.PredicateOnly))
 				for _, id := range rel.PredicateOnly {

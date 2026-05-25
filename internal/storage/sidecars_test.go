@@ -51,18 +51,12 @@ func TestBoundEqInt64_PruneSegment_UsesIntFilterWhenInRange(t *testing.T) {
 		t.Fatal("expected int filter sidecar to be loaded")
 	}
 
-	pred, err := BindPredicate(EqInt64{Column: "id", Value: 50}, SegmentSchema(seg))
-	if err != nil {
-		t.Fatal(err)
+	p := Pred{Op: OpEq, Col: "id", Kind: types.VecInt64, I64: 50}
+	if !p.Skips(seg) {
+		t.Fatalf("Skips(id=50) should have pruned via Binary Fuse (50 in [0, 9900] but not in segment)")
 	}
-	if !pred.PruneSegment(seg) {
-		t.Fatalf("PruneSegment(id=50) should have pruned via Binary Fuse (50 in [0, 9900] but not in segment)")
-	}
-	pred, err = BindPredicate(EqInt64{Column: "id", Value: 100}, SegmentSchema(seg))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pred.PruneSegment(seg) {
-		t.Fatalf("PruneSegment(id=100) must not prune a key present in segment")
+	p = Pred{Op: OpEq, Col: "id", Kind: types.VecInt64, I64: 100}
+	if p.Skips(seg) {
+		t.Fatalf("Skips(id=100) must not prune a key present in segment")
 	}
 }

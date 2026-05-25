@@ -93,7 +93,7 @@ func TestScan_FiltersWithPredicate(t *testing.T) {
 	err := Scan(ScanOpts{
 		Segments:  []*Segment{seg},
 		Columns:   []string{"id"},
-		Predicate: LtInt64{Column: "id", Value: 10},
+		Pred: &Pred{Op: OpLt, Col: "id", Kind: types.VecInt64, I64: 10},
 	}, func(b types.Batch, sel *types.SelectionMask) error {
 		sel.IterSet(func(row int) { seen = append(seen, b.Columns[0].V.I64()[row]) })
 		return nil
@@ -263,7 +263,7 @@ func TestScan_PrunesSegmentsOutsideRange(t *testing.T) {
 	err := Scan(ScanOpts{
 		Segments:  []*Segment{low, high},
 		Columns:   []string{"id"},
-		Predicate: EqInt64{Column: "id", Value: 25},
+		Pred: &Pred{Op: OpEq, Col: "id", Kind: types.VecInt64, I64: 25},
 	}, func(b types.Batch, sel *types.SelectionMask) error {
 		callCount++
 		return nil
@@ -357,7 +357,7 @@ func TestScan_PredicateOnUnprojectedColumn(t *testing.T) {
 	err := Scan(ScanOpts{
 		Segments:  []*Segment{seg},
 		Columns:   []string{"tag"},
-		Predicate: LtInt64{Column: "id", Value: 5},
+		Pred: &Pred{Op: OpLt, Col: "id", Kind: types.VecInt64, I64: 5},
 	}, func(b types.Batch, sel *types.SelectionMask) error {
 		if len(b.Columns) != 1 || b.Columns[0].Name != "tag" {
 			t.Fatalf("callback batch shape wrong: %d cols, first=%q", len(b.Columns), b.Columns[0].Name)

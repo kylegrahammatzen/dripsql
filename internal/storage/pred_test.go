@@ -1,5 +1,5 @@
-// Pred tests: invariant validation, schema binding, and end-to-end Skips/Apply through delegation.
-// Delegation path goes away in the Phase 2 cleanup commit so these tests then prove the inlined logic.
+// Pred tests cover validatePred invariants and BindPred schema resolution and non-mutation.
+// Per-Op Skips, SkipsPage, Apply, ApplyEncoded round-trips live in scan_test.go via the production path.
 package storage
 
 import (

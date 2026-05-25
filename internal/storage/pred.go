@@ -1,5 +1,5 @@
-// Pred is the storage-facing predicate IR replacing the Predicate interface + bound* shim.
-// Typed literal slots avoid any-boxing and the binder constructs a fresh tree per execution.
+// Pred is the storage-facing predicate IR with typed literal slots so the binder avoids any-boxing.
+// BindPred returns a fresh tree so cached plans are never mutated by re-binding parameters.
 package storage
 
 import (
@@ -121,7 +121,44 @@ func BindPred(raw Pred, lookup SchemaLookup) (Pred, error) {
 	return Pred{}, fmt.Errorf("BindPred: unknown op %v", raw.Op)
 }
 
-// validatePred asserts the per-op invariants documented in drip_recode_code.md §2.
+// Columns returns the column names referenced by p in first-encountered order.
+func (p Pred) Columns() []string {
+	seen := map[string]struct{}{}
+	var out []string
+	var walk func(p Pred)
+	walk = func(p Pred) {
+		switch p.Op {
+		case OpAnd, OpOr:
+			for _, c := range p.Children {
+				walk(c)
+			}
+			return
+		case OpNot:
+			if len(p.Children) == 1 {
+				walk(p.Children[0])
+			}
+			return
+		case OpIn:
+			for _, c := range p.Set {
+				walk(c)
+			}
+			return
+		}
+		if p.Col == "" {
+			return
+		}
+		key := types.NormalizeName(p.Col)
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, p.Col)
+	}
+	walk(p)
+	return out
+}
+
+// validatePred asserts the per-op shape invariants for tests and transitional checks.
 func validatePred(p Pred) error {
 	switch p.Op {
 	case OpEq, OpNe, OpLt, OpLe, OpGt, OpGe:
@@ -211,8 +248,7 @@ func (p Pred) ApplyEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, 
 	return ee.EvalEncoded(seg, pageIdx, sel, scratch)
 }
 
-// toBound delegates to the legacy bound* path so Pred reuses proven pruning/eval logic
-// during the Phase 2 transition; the legacy path goes away in the cleanup commit.
+// toBound maps a Pred to the equivalent bound predicate so eval and prune reuse the proven legacy code.
 func (p Pred) toBound() (BoundPredicate, error) {
 	switch p.Op {
 	case OpEq:

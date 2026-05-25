@@ -1,50 +1,50 @@
-// Predicate pushdown lowers a sql.BoundExpr WHERE into a storage.Predicate so the scan
-// layer evaluates the filter before materializing downstream columns. Returns ok=false on
-// any unsupported node so the caller can keep the decoded FilterOp path as a fallback.
+// Lowers a sql.BoundExpr WHERE into a storage.Pred so the scan layer skips and applies before decode.
+// Returns ok=false on any unsupported node so the caller keeps the decoded FilterOp path as a fallback.
 package exec
 
 import (
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
+	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
-func loweredPredicate(expr sql.BoundExpr) (storage.Predicate, bool) {
+func loweredPredicate(expr sql.BoundExpr) (storage.Pred, bool) {
 	switch expr.Op {
 	case sql.ExprAnd:
 		if len(expr.Args) != 2 {
-			return nil, false
+			return storage.Pred{}, false
 		}
 		l, ok := loweredPredicate(expr.Args[0])
 		if !ok {
-			return nil, false
+			return storage.Pred{}, false
 		}
 		r, ok := loweredPredicate(expr.Args[1])
 		if !ok {
-			return nil, false
+			return storage.Pred{}, false
 		}
-		return storage.And{Children: []storage.Predicate{l, r}}, true
+		return storage.Pred{Op: storage.OpAnd, Children: []storage.Pred{l, r}}, true
 	case sql.ExprOr:
 		if len(expr.Args) != 2 {
-			return nil, false
+			return storage.Pred{}, false
 		}
 		l, ok := loweredPredicate(expr.Args[0])
 		if !ok {
-			return nil, false
+			return storage.Pred{}, false
 		}
 		r, ok := loweredPredicate(expr.Args[1])
 		if !ok {
-			return nil, false
+			return storage.Pred{}, false
 		}
-		return storage.Or{Children: []storage.Predicate{l, r}}, true
+		return storage.Pred{Op: storage.OpOr, Children: []storage.Pred{l, r}}, true
 	case sql.ExprNot:
 		if len(expr.Args) != 1 {
-			return nil, false
+			return storage.Pred{}, false
 		}
 		c, ok := loweredPredicate(expr.Args[0])
 		if !ok {
-			return nil, false
+			return storage.Pred{}, false
 		}
-		return storage.Not{Child: c}, true
+		return storage.Pred{Op: storage.OpNot, Children: []storage.Pred{c}}, true
 	case sql.ExprEqual, sql.ExprLess, sql.ExprGreater,
 		sql.ExprLessEqual, sql.ExprGreaterEqual, sql.ExprNotEqual:
 		return loweredComparison(expr)
@@ -53,71 +53,65 @@ func loweredPredicate(expr sql.BoundExpr) (storage.Predicate, bool) {
 	case sql.ExprIn:
 		return loweredIn(expr)
 	}
-	return nil, false
+	return storage.Pred{}, false
 }
 
-// loweredBetween rewrites `target BETWEEN low AND high` as And{>=low, <=high}, then
-// defers to the existing comparison lowering so overflow guards apply at the boundary.
-func loweredBetween(expr sql.BoundExpr) (storage.Predicate, bool) {
+func loweredBetween(expr sql.BoundExpr) (storage.Pred, bool) {
 	if len(expr.Args) != 3 {
-		return nil, false
+		return storage.Pred{}, false
 	}
 	col, low, high := expr.Args[0], expr.Args[1], expr.Args[2]
 	if col.Op != sql.ExprColumn {
-		return nil, false
+		return storage.Pred{}, false
 	}
 	ge, ok := loweredComparison(sql.BoundExpr{Op: sql.ExprGreaterEqual, Args: []sql.BoundExpr{col, low}})
 	if !ok {
-		return nil, false
+		return storage.Pred{}, false
 	}
 	le, ok := loweredComparison(sql.BoundExpr{Op: sql.ExprLessEqual, Args: []sql.BoundExpr{col, high}})
 	if !ok {
-		return nil, false
+		return storage.Pred{}, false
 	}
-	return storage.And{Children: []storage.Predicate{ge, le}}, true
+	return storage.Pred{Op: storage.OpAnd, Children: []storage.Pred{ge, le}}, true
 }
 
-// loweredIn lowers `target IN (v1, v2, ...)` to Or{Eq, Eq, ...}. Empty list is
-// the constant FALSE which we can't express today, so bail. NOT IN wraps the
-// whole disjunction in Not, which composes with the existing prune logic.
-func loweredIn(expr sql.BoundExpr) (storage.Predicate, bool) {
+func loweredIn(expr sql.BoundExpr) (storage.Pred, bool) {
 	if len(expr.Args) < 2 {
-		return nil, false
+		return storage.Pred{}, false
 	}
 	col := expr.Args[0]
 	if col.Op != sql.ExprColumn {
-		return nil, false
+		return storage.Pred{}, false
 	}
-	preds := make([]storage.Predicate, 0, len(expr.Args)-1)
+	preds := make([]storage.Pred, 0, len(expr.Args)-1)
 	for _, arg := range expr.Args[1:] {
 		if arg.Op != sql.ExprLiteral || arg.Literal == nil {
-			return nil, false
+			return storage.Pred{}, false
 		}
 		switch v := arg.Literal.(type) {
 		case int64:
-			preds = append(preds, storage.EqInt64{Column: col.Column, Value: v})
+			preds = append(preds, storage.Pred{Op: storage.OpEq, Col: col.Column, Kind: types.VecInt64, I64: v})
 		case string:
-			preds = append(preds, storage.EqBytes{Column: col.Column, Value: []byte(v)})
+			preds = append(preds, storage.Pred{Op: storage.OpEq, Col: col.Column, Kind: types.VecText, Bytes: []byte(v)})
 		default:
-			return nil, false
+			return storage.Pred{}, false
 		}
 	}
-	var p storage.Predicate
+	var p storage.Pred
 	if len(preds) == 1 {
 		p = preds[0]
 	} else {
-		p = storage.Or{Children: preds}
+		p = storage.Pred{Op: storage.OpOr, Children: preds}
 	}
 	if expr.Not {
-		p = storage.Not{Child: p}
+		p = storage.Pred{Op: storage.OpNot, Children: []storage.Pred{p}}
 	}
 	return p, true
 }
 
-
-func loweredComparison(expr sql.BoundExpr) (storage.Predicate, bool) {
+func loweredComparison(expr sql.BoundExpr) (storage.Pred, bool) {
 	if len(expr.Args) != 2 {
-		return nil, false
+		return storage.Pred{}, false
 	}
 	col, lit := expr.Args[0], expr.Args[1]
 	op := expr.Op
@@ -135,45 +129,44 @@ func loweredComparison(expr sql.BoundExpr) (storage.Predicate, bool) {
 		}
 	}
 	if col.Op != sql.ExprColumn || lit.Op != sql.ExprLiteral || lit.Literal == nil {
-		return nil, false
+		return storage.Pred{}, false
 	}
 	switch v := lit.Literal.(type) {
 	case int64:
 		switch op {
 		case sql.ExprEqual:
-			return storage.EqInt64{Column: col.Column, Value: v}, true
+			return storage.Pred{Op: storage.OpEq, Col: col.Column, Kind: types.VecInt64, I64: v}, true
 		case sql.ExprNotEqual:
-			return storage.Not{Child: storage.EqInt64{Column: col.Column, Value: v}}, true
+			eq := storage.Pred{Op: storage.OpEq, Col: col.Column, Kind: types.VecInt64, I64: v}
+			return storage.Pred{Op: storage.OpNot, Children: []storage.Pred{eq}}, true
 		case sql.ExprLess:
-			return storage.LtInt64{Column: col.Column, Value: v}, true
+			return storage.Pred{Op: storage.OpLt, Col: col.Column, Kind: types.VecInt64, I64: v}, true
 		case sql.ExprGreater:
-			return storage.GtInt64{Column: col.Column, Value: v}, true
+			return storage.Pred{Op: storage.OpGt, Col: col.Column, Kind: types.VecInt64, I64: v}, true
 		case sql.ExprLessEqual:
-			// x <= v  ==>  x < v+1, guard the int64 overflow at MaxInt64.
 			if v == int64(^uint64(0)>>1) {
-				return nil, false
+				return storage.Pred{}, false
 			}
-			return storage.LtInt64{Column: col.Column, Value: v + 1}, true
+			return storage.Pred{Op: storage.OpLt, Col: col.Column, Kind: types.VecInt64, I64: v + 1}, true
 		case sql.ExprGreaterEqual:
-			// x >= v  ==>  x > v-1, guard the int64 overflow at MinInt64.
-			if v == -int64(^uint64(0)>>1) - 1 {
-				return nil, false
+			if v == -int64(^uint64(0)>>1)-1 {
+				return storage.Pred{}, false
 			}
-			return storage.GtInt64{Column: col.Column, Value: v - 1}, true
+			return storage.Pred{Op: storage.OpGt, Col: col.Column, Kind: types.VecInt64, I64: v - 1}, true
 		}
 	case string:
 		switch op {
 		case sql.ExprEqual:
-			return storage.EqBytes{Column: col.Column, Value: []byte(v)}, true
+			return storage.Pred{Op: storage.OpEq, Col: col.Column, Kind: types.VecText, Bytes: []byte(v)}, true
 		case sql.ExprLess:
-			return storage.LtBytes{Column: col.Column, Value: []byte(v)}, true
+			return storage.Pred{Op: storage.OpLt, Col: col.Column, Kind: types.VecText, Bytes: []byte(v)}, true
 		case sql.ExprLessEqual:
-			return storage.LtBytes{Column: col.Column, Value: []byte(v), Inclusive: true}, true
+			return storage.Pred{Op: storage.OpLe, Col: col.Column, Kind: types.VecText, Bytes: []byte(v)}, true
 		case sql.ExprGreater:
-			return storage.GtBytes{Column: col.Column, Value: []byte(v)}, true
+			return storage.Pred{Op: storage.OpGt, Col: col.Column, Kind: types.VecText, Bytes: []byte(v)}, true
 		case sql.ExprGreaterEqual:
-			return storage.GtBytes{Column: col.Column, Value: []byte(v), Inclusive: true}, true
+			return storage.Pred{Op: storage.OpGe, Col: col.Column, Kind: types.VecText, Bytes: []byte(v)}, true
 		}
 	}
-	return nil, false
+	return storage.Pred{}, false
 }
