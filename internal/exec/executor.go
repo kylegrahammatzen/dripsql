@@ -210,7 +210,7 @@ func drainValues(op Operator) ([]any, error) {
 		col := &batch.Columns[0]
 		iter := batch.Sel
 		if iter == nil {
-			for row := 0; row < batch.Len; row++ {
+			for row := range batch.Len {
 				v, verr := col.ValueAt(row)
 				if verr != nil {
 					return nil, verr
@@ -284,7 +284,7 @@ func drainScalar(op Operator) (any, error) {
 		col := &batch.Columns[0]
 		iter := batch.Sel
 		if iter == nil {
-			for row := 0; row < batch.Len; row++ {
+			for row := range batch.Len {
 				rows++
 				if rows > 1 {
 					return nil, fmt.Errorf("scalar subquery returned more than one row")

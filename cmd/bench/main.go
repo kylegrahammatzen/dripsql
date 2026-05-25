@@ -155,7 +155,7 @@ func runBench(args []string) {
 			pf.Close()
 		}()
 	}
-	for i := 0; i < *runs; i++ {
+	for i := range *runs {
 		if *mode == "cold-soft" || *mode == "cold-hard" {
 			if err := db.Close(); err != nil {
 				fmt.Fprintln(os.Stderr, "bench: close between runs:", err)

@@ -71,7 +71,7 @@ func FilterBytes(col *VarBytes, valid Validity, lit []byte, op FilterOp, in Sele
 			validWord = valid[wi]
 		}
 		var passWord uint64
-		for i := 0; i < end; i++ {
+		for i := range end {
 			row := base + i
 			if filterBytesRow(col.Bytes(row), lit, op) {
 				passWord |= uint64(1) << uint(i)
@@ -125,7 +125,7 @@ func BetweenOrdered[T cmp.Ordered](col []T, valid Validity, lo, hi T, in Selecti
 			validWord = valid[wi]
 		}
 		var passWord uint64
-		for i := 0; i < end; i++ {
+		for i := range end {
 			v := col[base+i]
 			if v >= lo && v <= hi {
 				passWord |= uint64(1) << uint(i)
@@ -143,37 +143,37 @@ func buildPassWord[T cmp.Ordered](col []T, lit T, op FilterOp, base, end int) ui
 	var passWord uint64
 	switch op {
 	case FilterEqual:
-		for i := 0; i < end; i++ {
+		for i := range end {
 			if col[base+i] == lit {
 				passWord |= uint64(1) << uint(i)
 			}
 		}
 	case FilterNotEqual:
-		for i := 0; i < end; i++ {
+		for i := range end {
 			if col[base+i] != lit {
 				passWord |= uint64(1) << uint(i)
 			}
 		}
 	case FilterLess:
-		for i := 0; i < end; i++ {
+		for i := range end {
 			if col[base+i] < lit {
 				passWord |= uint64(1) << uint(i)
 			}
 		}
 	case FilterLessEqual:
-		for i := 0; i < end; i++ {
+		for i := range end {
 			if col[base+i] <= lit {
 				passWord |= uint64(1) << uint(i)
 			}
 		}
 	case FilterGreater:
-		for i := 0; i < end; i++ {
+		for i := range end {
 			if col[base+i] > lit {
 				passWord |= uint64(1) << uint(i)
 			}
 		}
 	case FilterGreaterEqual:
-		for i := 0; i < end; i++ {
+		for i := range end {
 			if col[base+i] >= lit {
 				passWord |= uint64(1) << uint(i)
 			}

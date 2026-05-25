@@ -511,7 +511,7 @@ func (s *SortOp) materializeChunk(start, end int) (types.Batch, *types.Selection
 		cols[i] = types.Column{Name: c.Name, Type: c.Type, EnumLabels: c.EnumLabels, V: v}
 	}
 
-	for off := 0; off < count; off++ {
+	for off := range count {
 		permIdx := s.order[start+off]
 		bufIdx, srcRow := s.resolveRef(permIdx)
 		srcBatch := s.bufs[bufIdx].batch

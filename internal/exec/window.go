@@ -71,7 +71,7 @@ func (w *WindowOp) buildBatches() error {
 		w.batches = append(w.batches, batch)
 		iter := batch.Sel
 		if iter == nil {
-			for row := 0; row < batch.Len; row++ {
+			for row := range batch.Len {
 				w.rows = append(w.rows, windowRow{batchIdx: bi, rowIdx: row})
 			}
 			continue

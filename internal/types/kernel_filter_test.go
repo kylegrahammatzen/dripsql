@@ -84,7 +84,7 @@ func TestFilterOrdered_TwoWordRows(t *testing.T) {
 			t.Fatalf("row %d should pass", i)
 		}
 	}
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		if out.IsSet(i) {
 			t.Fatalf("row %d should not pass", i)
 		}

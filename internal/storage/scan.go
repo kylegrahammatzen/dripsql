@@ -172,7 +172,7 @@ func selectTopKPages(segments []*Segment, tk *TopKPushdown) map[[2]int]bool {
 			cum[i] = cum[i+1] + int64(sorted[i].rows)
 		}
 	} else {
-		for i := 0; i < len(sorted); i++ {
+		for i := range len(sorted) {
 			cum[i+1] = cum[i] + int64(sorted[i].rows)
 		}
 	}

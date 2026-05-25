@@ -140,9 +140,9 @@ func fillTextRandom(v types.Vec) {
 	r := rand.New(rand.NewSource(2))
 	letters := []byte("abcdefghijklmnopqrstuvwxyz")
 	buf := make([]byte, 32)
-	for i := 0; i < int(v.Len); i++ {
+	for i := range int(v.Len) {
 		n := 5 + r.Intn(12)
-		for j := 0; j < n; j++ {
+		for j := range n {
 			buf[j] = letters[r.Intn(len(letters))]
 		}
 		v.Var().AppendBytes(i, buf[:n])
@@ -152,7 +152,7 @@ func fillTextRandom(v types.Vec) {
 func fillTextLowCard(v types.Vec) {
 	r := rand.New(rand.NewSource(3))
 	labels := [][]byte{[]byte("alpha"), []byte("beta"), []byte("gamma"), []byte("delta"), []byte("epsilon")}
-	for i := 0; i < int(v.Len); i++ {
+	for i := range int(v.Len) {
 		v.Var().AppendBytes(i, labels[r.Intn(len(labels))])
 	}
 }

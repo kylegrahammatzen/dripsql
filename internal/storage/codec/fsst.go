@@ -181,7 +181,7 @@ func trainFSST(raw []byte) [][]byte {
 			break
 		}
 		end := len(sample) - L + 1
-		for i := 0; i < end; i++ {
+		for i := range end {
 			counts[string(sample[i:i+L])]++
 		}
 	}
@@ -224,7 +224,7 @@ func newFSSTCoder(symbols [][]byte) *fsstCoder {
 		head := s[0]
 		c.byHead[head] = append(c.byHead[head], uint8(i))
 	}
-	for b := 0; b < 256; b++ {
+	for b := range 256 {
 		ids := c.byHead[b]
 		sort.Slice(ids, func(i, j int) bool {
 			return len(symbols[ids[i]]) > len(symbols[ids[j]])
