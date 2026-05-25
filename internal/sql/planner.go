@@ -150,6 +150,7 @@ func (p *Planner) planSelect(stmt *SelectStmt) (*Plan, error) {
 		return nil, err
 	}
 	pruneJoinedScans(rel)
+	rel = fusePlan(rel)
 	return &Plan{Kind: PlanQuery, Rel: rel}, nil
 }
 
@@ -185,7 +186,7 @@ func (p *Planner) planSelectUnion(stmt *SelectStmt) (*Plan, error) {
 			return nil, err
 		}
 	}
-	return &Plan{Kind: PlanQuery, Rel: root}, nil
+	return &Plan{Kind: PlanQuery, Rel: fusePlan(root)}, nil
 }
 
 func checkUnionShape(left, right []BoundOutput) error {

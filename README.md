@@ -144,7 +144,10 @@ What the engine currently supports versus what's still on the list:
 | Compaction / vacuum (for DV path) | yes | `DB.Compact` rewrites half-or-more-deleted segments; `DB.Vacuum` drops unreferenced DV files |
 | User-declared codecs in DDL | yes | `CREATE TABLE ... col WITH (codec = 'dictionary' | ... | 'fsst')` overrides cascade |
 | Bench harness (TPC-H Q1/Q6, ClickBench Q1/Q4/Q5/Q7/Q9, SQLsmith fuzz, CI) | yes | Synthetic loaders for `lineitem` and `hits` plus a deterministic SELECT fuzzer; GitHub Actions runs build/vet/test + smoke bench |
-| UNION, Selective Late Materialization, Pcodec, operator fusion | no | Tractable next slices |
+| UNION / UNION ALL | yes | Parser + planner lower to `RelUnion`; UNION distinct wraps in GROUP BY over all output columns for dedup |
+| Selective Late Materialization | yes | `Scan` decodes predicate-needed columns first, evaluates the filter, then decodes projection-only columns only when the page survives |
+| Pcodec (chunked FOR + bitpack) | yes | Splits FOR-packable pages into 1024-row sub-chunks each with its own base + bit-width; cascade picks it when multimodal distributions beat single-base FOR |
+| Operator fusion pass | yes | `fusePlan` collapses stacked `RelFilter` nodes into one `AND`-merged filter post-bind |
 
 ## License
 
