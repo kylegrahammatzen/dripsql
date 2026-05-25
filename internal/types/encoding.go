@@ -19,6 +19,7 @@ const (
 	EncodingALP
 	EncodingALPRD
 	EncodingFSST
+	EncodingPcodec
 )
 
 type encodingInfo struct {
@@ -39,6 +40,7 @@ var encodingTable = [...]encodingInfo{
 	EncodingALP:          {"alp", 9},
 	EncodingALPRD:        {"alp-rd", 10},
 	EncodingFSST:         {"fsst", 11},
+	EncodingPcodec:       {"pcodec", 12},
 }
 
 func (e Encoding) String() string {

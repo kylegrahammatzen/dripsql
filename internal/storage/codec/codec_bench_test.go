@@ -24,6 +24,7 @@ func codecBenchCases() []codecBenchCase {
 		{"delta_int64", types.EncodingDeltaBitPack, types.VecInt64, fillInt64Delta},
 		{"sequence_int64", types.EncodingSequence, types.VecInt64, fillInt64Sequence},
 		{"constant_int64", types.EncodingConstant, types.VecInt64, fillInt64Constant},
+		{"pcodec_int64", types.EncodingPcodec, types.VecInt64, fillInt64Multimodal},
 		{"plain_text", types.EncodingFlat, types.VecText, fillTextRandom},
 		{"dict_text_lowcard", types.EncodingDictionary, types.VecText, fillTextLowCard},
 	}
@@ -113,6 +114,18 @@ func fillInt64Delta(v types.Vec) {
 func fillInt64Sequence(v types.Vec) {
 	for i := range v.I64() {
 		v.I64()[i] = int64(i)
+	}
+}
+
+func fillInt64Multimodal(v types.Vec) {
+	s := v.I64()
+	for i := range s {
+		switch (i / 1024) % 2 {
+		case 0:
+			s[i] = int64(1_000 + i%64)
+		case 1:
+			s[i] = int64(10_000_000_000 + int64(i%256))
+		}
 	}
 }
 

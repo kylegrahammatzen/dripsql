@@ -19,11 +19,13 @@ func Candidates(k types.VecKind) []Codec {
 		base = append(base,
 			mustLookup(types.EncodingSequence),
 			mustLookup(types.EncodingFORBitPack),
-			mustLookup(types.EncodingDeltaBitPack))
+			mustLookup(types.EncodingDeltaBitPack),
+			mustLookup(types.EncodingPcodec))
 	case k.IsFORPackable():
 		base = append(base,
 			mustLookup(types.EncodingFORBitPack),
-			mustLookup(types.EncodingDeltaBitPack))
+			mustLookup(types.EncodingDeltaBitPack),
+			mustLookup(types.EncodingPcodec))
 	case k == types.VecFloat32 || k == types.VecFloat64:
 		base = append(base, mustLookup(types.EncodingALP))
 		if k == types.VecFloat64 {
