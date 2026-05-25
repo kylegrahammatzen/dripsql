@@ -7,8 +7,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 func TestEngine_UserCodec_PlainForcedOnDictionaryFriendlyColumn(t *testing.T) {
@@ -52,11 +52,11 @@ func TestEngine_UserCodec_PlainForcedOnDictionaryFriendlyColumn(t *testing.T) {
 		t.Fatal("label column not in segment")
 	}
 	page := seg.Cols[labelCol].Pages[0]
-	got, ok := types.EncodingFromWire(page.Encoding)
+	got, ok := schema.EncodingFromWire(page.Encoding)
 	if !ok {
 		t.Fatalf("page encoding %d unknown", page.Encoding)
 	}
-	if got != types.EncodingFlat {
+	if got != schema.EncodingFlat {
 		t.Fatalf("label codec = %v, want EncodingFlat (plain)", got)
 	}
 	_ = storage.MagicLen

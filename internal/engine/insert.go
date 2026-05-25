@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 // BulkInsert parses and plans each statement, accumulates the resulting batches,
@@ -35,7 +36,7 @@ func (db *DB) BulkInsert(ctx context.Context, statements []string) (int64, error
 	var (
 		def     sql.BoundTableDef
 		defSet  bool
-		batches []types.Batch
+		batches []vector.Batch
 		total   int64
 	)
 	for i, text := range statements {
@@ -60,7 +61,7 @@ func (db *DB) BulkInsert(ctx context.Context, statements []string) (int64, error
 			if !defSet {
 				def = plan.Table
 				defSet = true
-			} else if types.NormalizeName(def.Name) != types.NormalizeName(plan.Table.Name) {
+			} else if schema.NormalizeName(def.Name) != schema.NormalizeName(plan.Table.Name) {
 				return total, fmt.Errorf("BulkInsert: stmt %d targets %q but bulk set is for %q", i, plan.Table.Name, def.Name)
 			}
 			batch, err := batchFromInsert(plan.Values, plan.Table)
@@ -125,7 +126,7 @@ func (db *DB) insert(ctx context.Context, plan *sql.Plan, target commitTarget) (
 		}
 	}()
 	stmt := storage.NewSpan("INSERT " + def.Name)
-	span, err := storage.WriteSegment(path, []types.Batch{batch}, columnCodecs(def))
+	span, err := storage.WriteSegment(path, []vector.Batch{batch}, columnCodecs(def))
 	if span != nil {
 		stmt.AppendChild(span)
 	}
@@ -141,55 +142,55 @@ func (db *DB) insert(ctx context.Context, plan *sql.Plan, target commitTarget) (
 	return int64(values.RowCount), nil
 }
 
-func batchFromInsert(values sql.InsertValues, def sql.BoundTableDef) (types.Batch, error) {
+func batchFromInsert(values sql.InsertValues, def sql.BoundTableDef) (vector.Batch, error) {
 	byID := make(map[sql.ColumnID]sql.InsertColumn, len(values.Columns))
 	for _, c := range values.Columns {
 		byID[c.ID] = c
 	}
-	cols := make([]types.Column, len(def.Columns))
+	cols := make([]vector.Column, len(def.Columns))
 	for i, c := range def.Columns {
 		ic, ok := byID[c.ID]
 		if !ok {
-			return types.Batch{}, fmt.Errorf("insert: column %q not provided", c.Name)
+			return vector.Batch{}, fmt.Errorf("insert: column %q not provided", c.Name)
 		}
 		v, err := buildInsertVec(ic, c, values.RowCount)
 		if err != nil {
-			return types.Batch{}, fmt.Errorf("insert: column %q: %w", c.Name, err)
+			return vector.Batch{}, fmt.Errorf("insert: column %q: %w", c.Name, err)
 		}
-		cols[i] = types.Column{Name: c.Name, Type: c.Type, EnumLabels: c.Labels, V: v}
+		cols[i] = vector.Column{Name: c.Name, Type: c.Type, EnumLabels: c.Labels, V: v}
 	}
-	return types.NewBatch(cols)
+	return vector.NewBatch(cols)
 }
 
 type insertValueWriter func(row int, val sql.Value) error
 
-func buildInsertVec(ic sql.InsertColumn, def sql.BoundColumnDef, rows int) (types.Vec, error) {
+func buildInsertVec(ic sql.InsertColumn, def sql.BoundColumnDef, rows int) (vector.Vec, error) {
 	if len(ic.Values) != rows {
-		return types.Vec{}, fmt.Errorf("got %d values for %d rows", len(ic.Values), rows)
+		return vector.Vec{}, fmt.Errorf("got %d values for %d rows", len(ic.Values), rows)
 	}
 	if ic.NullCount > 0 && !def.Nullable {
-		return types.Vec{}, fmt.Errorf("null value but column is NOT NULL")
+		return vector.Vec{}, fmt.Errorf("null value but column is NOT NULL")
 	}
-	vk, err := types.VecKindOf(def.Type)
+	vk, err := vector.VecKindOf(def.Type)
 	if err != nil {
-		return types.Vec{}, err
+		return vector.Vec{}, err
 	}
-	v, err := types.NewVecForKind(vk, rows)
+	v, err := vector.NewVecForKind(vk, rows)
 	if err != nil {
-		return types.Vec{}, err
+		return vector.Vec{}, err
 	}
-	var valid types.Validity
+	var valid vector.Validity
 	if ic.NullCount > 0 {
-		valid = make(types.Validity, types.ValidityWords(rows))
+		valid = make(vector.Validity, vector.ValidityWords(rows))
 	}
 	writer, err := newInsertValueWriter(&v, vk)
 	if err != nil {
-		return types.Vec{}, err
+		return vector.Vec{}, err
 	}
 	for row, val := range ic.Values {
 		if val.Kind == sql.ValueNull {
 			if valid == nil {
-				return types.Vec{}, fmt.Errorf("row %d null literal but column rejects nulls", row)
+				return vector.Vec{}, fmt.Errorf("row %d null literal but column rejects nulls", row)
 			}
 			continue
 		}
@@ -197,7 +198,7 @@ func buildInsertVec(ic sql.InsertColumn, def sql.BoundColumnDef, rows int) (type
 			valid.SetValid(row)
 		}
 		if err := writer(row, val); err != nil {
-			return types.Vec{}, fmt.Errorf("row %d: %w", row, err)
+			return vector.Vec{}, fmt.Errorf("row %d: %w", row, err)
 		}
 	}
 	v.Valid = valid
@@ -207,9 +208,9 @@ func buildInsertVec(ic sql.InsertColumn, def sql.BoundColumnDef, rows int) (type
 // newInsertValueWriter returns a per-column closure. The kind switch runs once per column,
 // the typed destination slice is hoisted once, and the row loop in buildInsertVec only does
 // the per-row work (null check, validity bit, typed store). Enum lookup is built once.
-func newInsertValueWriter(v *types.Vec, vk types.VecKind) (insertValueWriter, error) {
+func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, error) {
 	switch vk {
-	case types.VecBool:
+	case vector.VecBool:
 		dst := v.BoolBits()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueBool {
@@ -220,7 +221,7 @@ func newInsertValueWriter(v *types.Vec, vk types.VecKind) (insertValueWriter, er
 			}
 			return nil
 		}, nil
-	case types.VecInt16:
+	case vector.VecInt16:
 		dst := v.I16()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueInt {
@@ -229,7 +230,7 @@ func newInsertValueWriter(v *types.Vec, vk types.VecKind) (insertValueWriter, er
 			dst[row] = int16(val.Int)
 			return nil
 		}, nil
-	case types.VecInt32, types.VecDate:
+	case vector.VecInt32, vector.VecDate:
 		dst := v.I32()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueInt {
@@ -238,7 +239,7 @@ func newInsertValueWriter(v *types.Vec, vk types.VecKind) (insertValueWriter, er
 			dst[row] = int32(val.Int)
 			return nil
 		}, nil
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		dst := v.I64()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueInt {
@@ -247,7 +248,7 @@ func newInsertValueWriter(v *types.Vec, vk types.VecKind) (insertValueWriter, er
 			dst[row] = val.Int
 			return nil
 		}, nil
-	case types.VecFloat32:
+	case vector.VecFloat32:
 		dst := v.F32()
 		return func(row int, val sql.Value) error {
 			switch val.Kind {
@@ -260,7 +261,7 @@ func newInsertValueWriter(v *types.Vec, vk types.VecKind) (insertValueWriter, er
 			}
 			return nil
 		}, nil
-	case types.VecFloat64:
+	case vector.VecFloat64:
 		dst := v.F64()
 		return func(row int, val sql.Value) error {
 			switch val.Kind {
@@ -273,7 +274,7 @@ func newInsertValueWriter(v *types.Vec, vk types.VecKind) (insertValueWriter, er
 			}
 			return nil
 		}, nil
-	case types.VecText, types.VecBytes, types.VecJSON:
+	case vector.VecText, vector.VecBytes, vector.VecJSON:
 		dst := v.Var()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueString {
@@ -282,20 +283,20 @@ func newInsertValueWriter(v *types.Vec, vk types.VecKind) (insertValueWriter, er
 			dst.AppendString(row, val.String)
 			return nil
 		}, nil
-	case types.VecUUID:
+	case vector.VecUUID:
 		dst := v.FixedBytes()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueString {
 				return fmt.Errorf("uuid column got %v", val.Kind)
 			}
-			u, err := types.ParseUUID(val.String)
+			u, err := vector.ParseUUID(val.String)
 			if err != nil {
 				return err
 			}
 			copy(dst[row*16:row*16+16], u[:])
 			return nil
 		}, nil
-	case types.VecEnum32:
+	case vector.VecEnum32:
 		dst := v.U32()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueEnum {

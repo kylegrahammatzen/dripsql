@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 )
 
 type Sidecar[T any] struct {
@@ -63,7 +63,7 @@ func (s Sidecar[T]) Decode(data []byte) (map[string]T, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: decode body %q: %w", s.Suffix, name, err)
 		}
-		out[types.NormalizeName(name)] = v
+		out[schema.NormalizeName(name)] = v
 	}
 	if err := r.Err(); err != nil {
 		return nil, fmt.Errorf("%s: decode: %w", s.Suffix, err)

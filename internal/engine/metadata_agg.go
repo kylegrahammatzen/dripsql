@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func (db *DB) tryMetadataAggregate(plan *sql.Plan) (*Rows, bool, error) {
@@ -90,13 +91,13 @@ func (db *DB) tryGroupByDictHistogram(plan *sql.Plan, rel, agg, scan *sql.Rel, s
 			}
 		}
 	}
-	keyName := types.NormalizeName(agg.GroupBy[0].Column)
+	keyName := schema.NormalizeName(agg.GroupBy[0].Column)
 	keyCol, ok := scanColumnDefByID(scan, agg.GroupBy[0].ColumnID)
 	if !ok {
 		return nil, false, nil
 	}
 	switch keyCol.Type.Kind {
-	case types.KindText, types.KindBytes, types.KindJSON:
+	case schema.KindText, schema.KindBytes, schema.KindJSON:
 	default:
 		return nil, false, nil
 	}
@@ -203,9 +204,9 @@ func countColumn(segs []*storage.Segment, col sql.BoundColumnDef) (any, bool, er
 	return total, true, nil
 }
 
-func mergeMinMax(segs []*storage.Segment, name string, kind types.Kind, wantMax bool) (any, bool, error) {
+func mergeMinMax(segs []*storage.Segment, name string, kind schema.Kind, wantMax bool) (any, bool, error) {
 	switch kind {
-	case types.KindInt16, types.KindInt32, types.KindInt64, types.KindDate, types.KindTimestamp, types.KindTime, types.KindDecimal:
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64, schema.KindDate, schema.KindTimestamp, schema.KindTime, schema.KindDecimal:
 	default:
 		return nil, false, nil
 	}
@@ -243,11 +244,11 @@ func mergeMinMax(segs []*storage.Segment, name string, kind types.Kind, wantMax 
 
 func mergeSum(segs []*storage.Segment, col sql.BoundColumnDef) (any, bool, error) {
 	switch col.Type.Kind {
-	case types.KindInt16, types.KindInt32, types.KindInt64, types.KindDate, types.KindTimestamp, types.KindTime, types.KindDecimal:
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64, schema.KindDate, schema.KindTimestamp, schema.KindTime, schema.KindDecimal:
 	default:
 		return nil, false, nil
 	}
-	name := types.NormalizeName(col.Name)
+	name := schema.NormalizeName(col.Name)
 	var total int64
 	for _, seg := range segs {
 		sums, err := seg.NumericSums()
@@ -280,23 +281,23 @@ func addOverflows(a, b int64) bool {
 
 func segColInt64MinMax(c *storage.SegmentColumn) (int64, int64, bool) {
 	switch c.Kind {
-	case types.VecInt16, types.VecInt32, types.VecDate:
+	case vector.VecInt16, vector.VecInt32, vector.VecDate:
 		s := storage.UnmarshalNumericStats[int32](c.Stats[:], true)
 		return int64(s.Min), int64(s.Max), true
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		s := storage.UnmarshalNumericStats[int64](c.Stats[:], true)
 		return s.Min, s.Max, true
 	}
 	return 0, 0, false
 }
 
-func narrowInt(v int64, kind types.Kind) any {
+func narrowInt(v int64, kind schema.Kind) any {
 	switch kind {
-	case types.KindInt16:
+	case schema.KindInt16:
 		if v >= math.MinInt16 && v <= math.MaxInt16 {
 			return int16(v)
 		}
-	case types.KindInt32, types.KindDate:
+	case schema.KindInt32, schema.KindDate:
 		if v >= math.MinInt32 && v <= math.MaxInt32 {
 			return int32(v)
 		}
@@ -306,7 +307,7 @@ func narrowInt(v int64, kind types.Kind) any {
 
 func findSegColumn(seg *storage.Segment, name string) (*storage.SegmentColumn, bool) {
 	for i := range seg.Cols {
-		if types.NormalizeName(seg.Cols[i].Name) == types.NormalizeName(name) {
+		if schema.NormalizeName(seg.Cols[i].Name) == schema.NormalizeName(name) {
 			return &seg.Cols[i], true
 		}
 	}

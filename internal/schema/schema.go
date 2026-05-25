@@ -1,6 +1,6 @@
 // TypeSpec, TableSpec, ColumnSpec, and TableOptions are catalog-level shapes.
 // Validate methods catch malformed specs before the binder/storage layers see them.
-package types
+package schema
 
 import (
 	"fmt"

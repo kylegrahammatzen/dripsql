@@ -27,8 +27,8 @@ type ManifestIntent struct {
 // ManifestCommit is logged after Manifest.Commit returns successfully. Pairs an intent
 // with proof that the manifest accepted it, so replay can ignore matching intents.
 type ManifestCommit struct {
-	TxnID          uint64 `json:"txn_id"`
-	CommitTs       uint64 `json:"commit_ts,omitempty"`
+	TxnID           uint64 `json:"txn_id"`
+	CommitTs        uint64 `json:"commit_ts,omitempty"`
 	ManifestVersion uint64 `json:"manifest_version"`
 }
 

@@ -8,9 +8,9 @@ import (
 	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/exec"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 func (db *DB) runExplain(ctx context.Context, plan *sql.Plan) (*Rows, error) {
@@ -40,7 +40,7 @@ func (db *DB) runExplain(ctx context.Context, plan *sql.Plan) (*Rows, error) {
 func (db *DB) runAnalyze(ctx context.Context, plan *sql.Plan) (*exec.TimingStats, error) {
 	openSegs := make(map[string][]*storage.Segment)
 	resolve := func(d sql.BoundTableDef) ([]*storage.Segment, error) {
-		key := types.NormalizeName(d.Name)
+		key := schema.NormalizeName(d.Name)
 		if segs, ok := openSegs[key]; ok {
 			return segs, nil
 		}

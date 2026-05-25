@@ -1,6 +1,6 @@
 // VecKind tags every Vec with the physical kind of data it holds.
 // Width, FOR-packability, and name come from per-kind switches the compiler folds.
-package types
+package vector
 
 type VecKind uint8
 

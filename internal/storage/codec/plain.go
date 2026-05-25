@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type plainCodec struct{}
@@ -15,23 +16,23 @@ func init() {
 	Register(plainCodec{})
 }
 
-func (plainCodec) Encoding() types.Encoding { return types.EncodingFlat }
+func (plainCodec) Encoding() schema.Encoding { return schema.EncodingFlat }
 
-func (c plainCodec) plainSize(v types.Vec) (int, bool) {
+func (c plainCodec) plainSize(v vector.Vec) (int, bool) {
 	w := v.Kind.FixedWidth()
 	if w > 0 {
 		return int(v.Len) * int(w), true
 	}
 	switch w {
-	case types.WidthBool:
+	case vector.WidthBool:
 		return (int(v.Len) + 7) / 8, true
-	case types.WidthVarBytes:
+	case vector.WidthVarBytes:
 		return varbytesWireSize(v), true
 	}
 	return 0, false
 }
 
-func (c plainCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+func (c plainCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	n, ok := c.plainSize(v)
 	if !ok {
 		return nil, ErrSkip
@@ -48,7 +49,7 @@ func (c plainCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 		return scratch, nil
 	}
 	switch w {
-	case types.WidthBool:
+	case vector.WidthBool:
 		copy(scratch, v.BoolBits())
 		if n > 0 {
 			if rem := int(v.Len) & 7; rem != 0 {
@@ -56,14 +57,14 @@ func (c plainCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 			}
 		}
 		return scratch, nil
-	case types.WidthVarBytes:
+	case vector.WidthVarBytes:
 		writeVarbytesWire(scratch, v)
 		return scratch, nil
 	}
 	return nil, fmt.Errorf("plain encode: unreachable kind %v", v.Kind)
 }
 
-func (plainCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (plainCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("plain decode: %w", err)
 	}
@@ -78,23 +79,23 @@ func (plainCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int
 		return nil
 	}
 	switch w {
-	case types.WidthBool:
+	case vector.WidthBool:
 		need := (rows + 7) / 8
 		if len(payload) != need {
 			return fmt.Errorf("plain decode bool: payload %d != expected %d", len(payload), need)
 		}
-		*dst = types.NewVec(kind, rows)
+		*dst = vector.NewVec(kind, rows)
 		bits := dst.BoolBits()
 		copy(bits, payload)
 		if rem := rows & 7; rem != 0 && len(bits) > 0 {
 			bits[len(bits)-1] &= byte(1<<rem - 1)
 		}
 		return nil
-	case types.WidthVarBytes:
+	case vector.WidthVarBytes:
 		if err := readVarbytesWire(payload, kind, rows, dst); err != nil {
 			return err
 		}
-		dst.Enc = types.EncodingFlat
+		dst.Enc = schema.EncodingFlat
 		dst.Valid = nil
 		return nil
 	}
@@ -106,11 +107,10 @@ func validateDecodeArgs(rows, nullCount int) error {
 		return fmt.Errorf("rows %d negative", rows)
 	}
 	if rows > math.MaxInt32 {
-		return fmt.Errorf("rows %d exceeds int32 range; types.Vec cannot represent it", rows)
+		return fmt.Errorf("rows %d exceeds int32 range; vector.Vec cannot represent it", rows)
 	}
 	if nullCount < 0 || nullCount > rows {
 		return fmt.Errorf("nullCount %d out of range [0, %d]", nullCount, rows)
 	}
 	return nil
 }
-

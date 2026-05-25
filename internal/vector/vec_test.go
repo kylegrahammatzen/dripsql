@@ -1,6 +1,6 @@
 // Vec invariant tests: FixedBytes round-trip, varbytes access, header size budget.
 // FixedBytes is the codec hot path. The size test pins the slim-Vec layout goal.
-package types
+package vector
 
 import (
 	"encoding/binary"

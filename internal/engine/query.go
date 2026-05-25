@@ -7,9 +7,10 @@ import (
 	"fmt"
 
 	"github.com/kylegrahammatzen/dripsql/internal/exec"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func (db *DB) runQuery(ctx context.Context, plan *sql.Plan) (*Rows, error) {
@@ -41,7 +42,7 @@ func (db *DB) runQueryWith(ctx context.Context, plan *sql.Plan, resolveBase func
 	}
 	openSegs := make(map[string][]*storage.Segment)
 	resolve := func(d sql.BoundTableDef) ([]*storage.Segment, error) {
-		key := types.NormalizeName(d.Name)
+		key := schema.NormalizeName(d.Name)
 		if segs, ok := openSegs[key]; ok {
 			return segs, nil
 		}
@@ -164,7 +165,7 @@ func (db *DB) evictColdSegments(working map[segCacheKey]struct{}) {
 	}
 }
 
-func columnNames(batch types.Batch) []string {
+func columnNames(batch vector.Batch) []string {
 	names := make([]string, len(batch.Columns))
 	for i, c := range batch.Columns {
 		names[i] = c.Name
@@ -172,7 +173,7 @@ func columnNames(batch types.Batch) []string {
 	return names
 }
 
-func appendBatchRows(rows *Rows, batch types.Batch) error {
+func appendBatchRows(rows *Rows, batch vector.Batch) error {
 	rowValues := func(row int) ([]any, error) {
 		out := make([]any, len(batch.Columns))
 		for i, c := range batch.Columns {

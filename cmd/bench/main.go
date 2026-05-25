@@ -16,7 +16,7 @@ import (
 
 	"github.com/kylegrahammatzen/dripsql/internal/engine"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const benchDir = "./bench-db"
@@ -97,8 +97,8 @@ func runBench(args []string) {
 	}
 
 	segmentRows := *rows
-	if segmentRows > types.StandardBatchRows {
-		segmentRows = types.StandardBatchRows
+	if segmentRows > vector.StandardBatchRows {
+		segmentRows = vector.StandardBatchRows
 	}
 	if segmentRows < 1 {
 		segmentRows = 1

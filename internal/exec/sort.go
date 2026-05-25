@@ -11,8 +11,9 @@ import (
 	"math"
 	"slices"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type SortOp struct {
@@ -36,7 +37,7 @@ type SortOp struct {
 	keys  []int64
 	nulls []uint64
 
-	textVars []*types.VarBytes
+	textVars []*vector.VarBytes
 	textRows []uint32
 
 	slowRows []sortRow
@@ -44,8 +45,8 @@ type SortOp struct {
 }
 
 type bufferedBatch struct {
-	batch types.Batch
-	sel   types.SelectionMask
+	batch vector.Batch
+	sel   vector.SelectionMask
 }
 
 type rowRef16 struct {
@@ -67,11 +68,11 @@ type sortRow struct {
 // selectionForBatch returns a mask the caller can store. nil Sel means "all rows visible"
 // per the Operator contract; we materialize that into an all-set mask so downstream
 // IterSet calls are safe.
-func selectionForBatch(batch types.Batch) types.SelectionMask {
+func selectionForBatch(batch vector.Batch) vector.SelectionMask {
 	if batch.Sel != nil {
 		return batch.Sel.Clone()
 	}
-	sel := types.NewSelectionMask(batch.Len)
+	sel := vector.NewSelectionMask(batch.Len)
 	sel.FillAll()
 	return sel
 }
@@ -101,23 +102,23 @@ func (s *SortOp) Open(ctx context.Context) error {
 	return nil
 }
 
-func (s *SortOp) Next() (types.Batch, bool, error) {
+func (s *SortOp) Next() (vector.Batch, bool, error) {
 	if err := s.state.requireOpen(); err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	if !s.built {
 		if err := s.build(); err != nil {
-			return types.Batch{}, false, err
+			return vector.Batch{}, false, err
 		}
 		s.built = true
 	}
 	if s.cursor >= len(s.order) {
-		return types.Batch{}, false, nil
+		return vector.Batch{}, false, nil
 	}
-	end := min(s.cursor+types.StandardBatchRows, len(s.order))
+	end := min(s.cursor+vector.StandardBatchRows, len(s.order))
 	batch, sel, err := s.materializeChunk(s.cursor, end)
 	if err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	s.cursor = end
 	batch.Sel = sel
@@ -224,7 +225,7 @@ func (s *SortOp) canFastInt64() bool {
 		return false
 	}
 	switch k.Type.Kind {
-	case types.KindInt16, types.KindInt32, types.KindInt64, types.KindDate, types.KindTimestamp:
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64, schema.KindDate, schema.KindTimestamp:
 		return true
 	}
 	return false
@@ -295,7 +296,7 @@ func (s *SortOp) canFastText() bool {
 		return false
 	}
 	switch k.Type.Kind {
-	case types.KindText, types.KindBytes, types.KindJSON:
+	case schema.KindText, schema.KindBytes, schema.KindJSON:
 		return true
 	}
 	return false
@@ -318,7 +319,7 @@ func (s *SortOp) buildFastText() error {
 		s.refs = make([]rowRef16, 0, total)
 	}
 	s.nulls = make([]uint64, (total+63)/64)
-	s.textVars = make([]*types.VarBytes, len(s.bufs))
+	s.textVars = make([]*vector.VarBytes, len(s.bufs))
 
 	keyCol := s.Keys[0].Expr.Column
 	idx := uint32(0)
@@ -495,20 +496,20 @@ func (s *SortOp) refsMustBeWide() bool {
 	return false
 }
 
-func (s *SortOp) materializeChunk(start, end int) (types.Batch, *types.SelectionMask, error) {
+func (s *SortOp) materializeChunk(start, end int) (vector.Batch, *vector.SelectionMask, error) {
 	if len(s.bufs) == 0 {
-		empty := types.NewSelectionMask(0)
-		return types.Batch{Len: 0}, &empty, nil
+		empty := vector.NewSelectionMask(0)
+		return vector.Batch{Len: 0}, &empty, nil
 	}
 	count := end - start
 	tmpl := s.bufs[0].batch
-	cols := make([]types.Column, len(tmpl.Columns))
+	cols := make([]vector.Column, len(tmpl.Columns))
 	for i, c := range tmpl.Columns {
-		v, err := types.NewVecForKind(c.V.Kind, count)
+		v, err := vector.NewVecForKind(c.V.Kind, count)
 		if err != nil {
-			return types.Batch{}, nil, err
+			return vector.Batch{}, nil, err
 		}
-		cols[i] = types.Column{Name: c.Name, Type: c.Type, EnumLabels: c.EnumLabels, V: v}
+		cols[i] = vector.Column{Name: c.Name, Type: c.Type, EnumLabels: c.EnumLabels, V: v}
 	}
 
 	for off := range count {
@@ -516,17 +517,17 @@ func (s *SortOp) materializeChunk(start, end int) (types.Batch, *types.Selection
 		bufIdx, srcRow := s.resolveRef(permIdx)
 		srcBatch := s.bufs[bufIdx].batch
 		for ci, sc := range srcBatch.Columns {
-			if err := types.CopyVecRow(sc.V, srcRow, &cols[ci].V, off); err != nil {
-				return types.Batch{}, nil, err
+			if err := vector.CopyVecRow(sc.V, srcRow, &cols[ci].V, off); err != nil {
+				return vector.Batch{}, nil, err
 			}
 		}
 	}
 
-	out, err := types.NewBatch(cols)
+	out, err := vector.NewBatch(cols)
 	if err != nil {
-		return types.Batch{}, nil, fmt.Errorf("sort: NewBatch: %w", err)
+		return vector.Batch{}, nil, fmt.Errorf("sort: NewBatch: %w", err)
 	}
-	sel := types.NewSelectionMask(count)
+	sel := vector.NewSelectionMask(count)
 	sel.FillAll()
 	return out, &sel, nil
 }
@@ -544,13 +545,13 @@ func (s *SortOp) resolveRef(permIdx uint32) (int, int) {
 	return int(r.bufIdx), int(r.row)
 }
 
-func readInt64SortKey(v types.Vec, row int) int64 {
+func readInt64SortKey(v vector.Vec, row int) int64 {
 	switch v.Kind {
-	case types.VecInt16:
+	case vector.VecInt16:
 		return int64(v.I16()[row])
-	case types.VecInt32, types.VecDate:
+	case vector.VecInt32, vector.VecDate:
 		return int64(v.I32()[row])
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		return v.I64()[row]
 	}
 	return 0

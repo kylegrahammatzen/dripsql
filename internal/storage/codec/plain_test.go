@@ -6,17 +6,18 @@ import (
 	"math"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestPlain_EncodingIsFlat(t *testing.T) {
-	if (plainCodec{}).Encoding() != types.EncodingFlat {
+	if (plainCodec{}).Encoding() != schema.EncodingFlat {
 		t.Fatal("plainCodec must claim Flat encoding")
 	}
 }
 
 func TestPlain_Int64RoundTrip(t *testing.T) {
-	src := types.NewVec(types.VecInt64, 5)
+	src := vector.NewVec(vector.VecInt64, 5)
 	for i, val := range []int64{10, -20, 0, 1 << 40, -1 << 40} {
 		src.I64()[i] = val
 	}
@@ -27,8 +28,8 @@ func TestPlain_Int64RoundTrip(t *testing.T) {
 	if len(payload) != 40 {
 		t.Fatalf("payload len=%d want 40", len(payload))
 	}
-	var dst types.Vec
-	if err := (plainCodec{}).Decode(payload, types.VecInt64, 5, 0, &dst); err != nil {
+	var dst vector.Vec
+	if err := (plainCodec{}).Decode(payload, vector.VecInt64, 5, 0, &dst); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
 	for i, want := range []int64{10, -20, 0, 1 << 40, -1 << 40} {
@@ -39,7 +40,7 @@ func TestPlain_Int64RoundTrip(t *testing.T) {
 }
 
 func TestPlain_BoolRoundTrip(t *testing.T) {
-	src := types.NewVec(types.VecBool, 17)
+	src := vector.NewVec(vector.VecBool, 17)
 	bits := src.BoolBits()
 	bits[0] = 0b10101010
 	bits[1] = 0b01010101
@@ -51,8 +52,8 @@ func TestPlain_BoolRoundTrip(t *testing.T) {
 	if len(payload) != 3 {
 		t.Fatalf("payload len=%d want 3", len(payload))
 	}
-	var dst types.Vec
-	if err := (plainCodec{}).Decode(payload, types.VecBool, 17, 0, &dst); err != nil {
+	var dst vector.Vec
+	if err := (plainCodec{}).Decode(payload, vector.VecBool, 17, 0, &dst); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
 	got := dst.BoolBits()
@@ -62,7 +63,7 @@ func TestPlain_BoolRoundTrip(t *testing.T) {
 }
 
 func TestPlain_VarBytesRoundTrip(t *testing.T) {
-	src := types.NewVarVec(types.VecText, 4, 0)
+	src := vector.NewVarVec(vector.VecText, 4, 0)
 	vb := src.Var()
 	vb.AppendString(0, "")
 	vb.AppendString(1, "short")
@@ -72,8 +73,8 @@ func TestPlain_VarBytesRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	var dst types.Vec
-	if err := (plainCodec{}).Decode(payload, types.VecText, 4, 0, &dst); err != nil {
+	var dst vector.Vec
+	if err := (plainCodec{}).Decode(payload, vector.VecText, 4, 0, &dst); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
 	got := dst.Var()
@@ -86,20 +87,20 @@ func TestPlain_VarBytesRoundTrip(t *testing.T) {
 }
 
 func TestPlain_DecodeRejectsTrailingBytes(t *testing.T) {
-	var dst types.Vec
+	var dst vector.Vec
 	src := make([]byte, 16+1)
-	if err := (plainCodec{}).Decode(src, types.VecInt32, 4, 0, &dst); err == nil {
+	if err := (plainCodec{}).Decode(src, vector.VecInt32, 4, 0, &dst); err == nil {
 		t.Fatal("Decode must reject trailing bytes")
 	}
 }
 
 func TestPlain_DecodeSetsEncAndClearsValid(t *testing.T) {
-	dst := types.Vec{Kind: types.VecInt64, Valid: types.NewValidity(4)}
+	dst := vector.Vec{Kind: vector.VecInt64, Valid: vector.NewValidity(4)}
 	src := make([]byte, 32)
-	if err := (plainCodec{}).Decode(src, types.VecInt64, 4, 0, &dst); err != nil {
+	if err := (plainCodec{}).Decode(src, vector.VecInt64, 4, 0, &dst); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if dst.Enc != types.EncodingFlat {
+	if dst.Enc != schema.EncodingFlat {
 		t.Fatalf("dst.Enc=%v want Flat", dst.Enc)
 	}
 	if dst.Valid != nil {
@@ -108,17 +109,17 @@ func TestPlain_DecodeSetsEncAndClearsValid(t *testing.T) {
 }
 
 func TestPlain_DecodeRejectsNegativeRows(t *testing.T) {
-	var dst types.Vec
-	if err := (plainCodec{}).Decode(nil, types.VecInt64, -1, 0, &dst); err == nil {
+	var dst vector.Vec
+	if err := (plainCodec{}).Decode(nil, vector.VecInt64, -1, 0, &dst); err == nil {
 		t.Fatal("Decode must reject negative rows")
 	}
-	if err := (plainCodec{}).Decode(make([]byte, 32), types.VecInt64, 4, 5, &dst); err == nil {
+	if err := (plainCodec{}).Decode(make([]byte, 32), vector.VecInt64, 4, 5, &dst); err == nil {
 		t.Fatal("Decode must reject nullCount > rows")
 	}
 }
 
 func TestPlain_BoolEncodeMasksTail(t *testing.T) {
-	src := types.NewVec(types.VecBool, 3)
+	src := vector.NewVec(vector.VecBool, 3)
 	bits := src.BoolBits()
 	bits[0] = 0xFF
 	payload, err := plainCodec{}.Encode(src, nil)
@@ -131,23 +132,23 @@ func TestPlain_BoolEncodeMasksTail(t *testing.T) {
 }
 
 func TestPlain_DecodeRejectsTruncated(t *testing.T) {
-	var dst types.Vec
-	if err := (plainCodec{}).Decode([]byte{0, 0, 0, 0}, types.VecInt64, 4, 0, &dst); err == nil {
+	var dst vector.Vec
+	if err := (plainCodec{}).Decode([]byte{0, 0, 0, 0}, vector.VecInt64, 4, 0, &dst); err == nil {
 		t.Fatal("fixed-width decode must reject short payload")
 	}
-	if err := (plainCodec{}).Decode([]byte{0, 0}, types.VecBool, 17, 0, &dst); err == nil {
+	if err := (plainCodec{}).Decode([]byte{0, 0}, vector.VecBool, 17, 0, &dst); err == nil {
 		t.Fatal("bool decode must reject short payload")
 	}
-	if err := (plainCodec{}).Decode([]byte{5, 0, 0, 0}, types.VecText, 1, 0, &dst); err == nil {
+	if err := (plainCodec{}).Decode([]byte{5, 0, 0, 0}, vector.VecText, 1, 0, &dst); err == nil {
 		t.Fatal("varbytes decode must reject truncated value (header says 5 bytes, none follow)")
 	}
-	if err := (plainCodec{}).Decode([]byte{5, 0, 0}, types.VecText, 1, 0, &dst); err == nil {
+	if err := (plainCodec{}).Decode([]byte{5, 0, 0}, vector.VecText, 1, 0, &dst); err == nil {
 		t.Fatal("varbytes decode must reject truncated header (3 bytes < 4)")
 	}
 }
 
 func TestPlain_EstimateMatchesEncode(t *testing.T) {
-	src := types.NewVarVec(types.VecText, 3, 0)
+	src := vector.NewVarVec(vector.VecText, 3, 0)
 	src.Var().AppendString(0, "abc")
 	src.Var().AppendString(1, "longer than twelve")
 	src.Var().AppendString(2, "")
@@ -165,7 +166,7 @@ func TestPlain_EstimateMatchesEncode(t *testing.T) {
 }
 
 func TestPlain_EncodeReusesScratch(t *testing.T) {
-	src := types.NewVec(types.VecInt32, 4)
+	src := vector.NewVec(vector.VecInt32, 4)
 	for i := range src.I32() {
 		src.I32()[i] = int32(i)
 	}

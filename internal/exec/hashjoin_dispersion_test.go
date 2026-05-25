@@ -7,24 +7,25 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestHashJoinKey_DispersionAcrossBuckets(t *testing.T) {
 	const batchRows = 2048
 	const batches = 50
 	const n = batchRows * batches
-	cols := []joinKeyCol{{idx: 0, kind: types.VecInt64}}
+	cols := []joinKeyCol{{idx: 0, kind: vector.VecInt64}}
 	enc := keyEncoder{seed: maphash.MakeSeed()}
 	build := hashJoinBuild{index: make(map[uint64][]hashBucket, n)}
 	r := rand.New(rand.NewSource(1))
 	for bi := range batches {
-		v := types.NewVec(types.VecInt64, batchRows)
+		v := vector.NewVec(vector.VecInt64, batchRows)
 		vals := v.I64()
 		for i := range batchRows {
 			vals[i] = r.Int63()
 		}
-		batch, err := types.NewBatch([]types.Column{{Name: "k", Type: types.Int64, V: v}})
+		batch, err := vector.NewBatch([]vector.Column{{Name: "k", Type: schema.Int64, V: v}})
 		if err != nil {
 			t.Fatalf("NewBatch: %v", err)
 		}

@@ -1,6 +1,6 @@
 // UUID invariant tests: canonical, bare-32 hex, and uppercase all round-trip.
 // Parse and String are the boundary between SQL literals and the 16-byte value.
-package types
+package vector
 
 import (
 	"strings"

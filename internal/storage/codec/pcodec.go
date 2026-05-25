@@ -8,7 +8,8 @@ import (
 	"fmt"
 	"math/bits"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const (
@@ -23,9 +24,9 @@ func init() {
 	Register(pcodecCodec{})
 }
 
-func (pcodecCodec) Encoding() types.Encoding { return types.EncodingPcodec }
+func (pcodecCodec) Encoding() schema.Encoding { return schema.EncodingPcodec }
 
-func (c pcodecCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+func (c pcodecCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !v.Kind.IsFORPackable() {
 		return nil, ErrSkip
 	}
@@ -79,7 +80,7 @@ func (c pcodecCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 	return scratch, nil
 }
 
-func (pcodecCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (pcodecCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("pcodec decode: %w", err)
 	}

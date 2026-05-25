@@ -1,6 +1,6 @@
 // SelectionMask is a packed row-selection bitmap.
 // Tail-bit invariant: bits beyond rows are always zero, maintained by FillAll/NotCount/Resize/Clear so the other ops can trust it.
-package types
+package vector
 
 import "math/bits"
 
@@ -193,4 +193,3 @@ func (s *SelectionMask) NotCount() int {
 	s.allSet = count == s.rows
 	return count
 }
-

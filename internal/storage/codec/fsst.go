@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const (
@@ -23,9 +24,9 @@ func init() { Register(&fsstCodec{}) }
 
 type fsstCodec struct{}
 
-func (fsstCodec) Encoding() types.Encoding { return types.EncodingFSST }
+func (fsstCodec) Encoding() schema.Encoding { return schema.EncodingFSST }
 
-func (fsstCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+func (fsstCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !v.Kind.IsVarBytes() {
 		return nil, ErrSkip
 	}
@@ -89,7 +90,7 @@ func (fsstCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 	return out, nil
 }
 
-func (fsstCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (fsstCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("fsst decode: %w", err)
 	}
@@ -127,7 +128,7 @@ func (fsstCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int,
 		return fmt.Errorf("fsst decode: row mismatch wire=%d want=%d", encRows, rows)
 	}
 
-	*dst = types.NewVarVec(kind, rows, 0)
+	*dst = vector.NewVarVec(kind, rows, 0)
 	out := dst.Var()
 	row := make([]byte, 0, 64)
 	for i := range rows {
@@ -162,7 +163,7 @@ func (fsstCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int,
 		out.AppendBytes(i, row)
 		pos = end
 	}
-	dst.Enc = types.EncodingFlat
+	dst.Enc = schema.EncodingFlat
 	dst.Valid = nil
 	return nil
 }

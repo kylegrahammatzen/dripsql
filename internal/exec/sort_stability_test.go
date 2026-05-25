@@ -6,27 +6,28 @@ import (
 	"context"
 	"testing"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestSort_Stable_EqualKeysPreserveInputOrder(t *testing.T) {
 	const rows = 256
 	const distinctKeys = 8
-	k := types.NewVec(types.VecInt64, rows)
-	tag := types.NewVec(types.VecInt64, rows)
+	k := vector.NewVec(vector.VecInt64, rows)
+	tag := vector.NewVec(vector.VecInt64, rows)
 	for i := range rows {
 		k.I64()[i] = int64(i % distinctKeys)
 		tag.I64()[i] = int64(i)
 	}
-	batch, err := types.NewBatch([]types.Column{
-		{Name: "k", Type: types.Int64, V: k},
-		{Name: "tag", Type: types.Int64, V: tag},
+	batch, err := vector.NewBatch([]vector.Column{
+		{Name: "k", Type: schema.Int64, V: k},
+		{Name: "tag", Type: schema.Int64, V: tag},
 	})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
-	sel := types.NewSelectionMask(rows)
+	sel := vector.NewSelectionMask(rows)
 	sel.FillAll()
 	batch.Sel = &sel
 
@@ -37,15 +38,15 @@ func TestSort_Stable_EqualKeysPreserveInputOrder(t *testing.T) {
 		{
 			name: "full sort",
 			op: &SortOp{
-				Source: &bufferSource{batches: []types.Batch{batch}},
-				Keys:   []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: types.Int64, Column: "k"}}},
+				Source: &bufferSource{batches: []vector.Batch{batch}},
+				Keys:   []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: schema.Int64, Column: "k"}}},
 			},
 		},
 		{
 			name: "streaming top-K",
 			op: &SortOp{
-				Source: &bufferSource{batches: []types.Batch{batch}},
-				Keys:   []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: types.Int64, Column: "k"}}},
+				Source: &bufferSource{batches: []vector.Batch{batch}},
+				Keys:   []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: schema.Int64, Column: "k"}}},
 				K:      int64(rows),
 			},
 		},

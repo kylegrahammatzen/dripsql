@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/engine"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func setupHits(ctx context.Context, db *engine.DB, rows int, segmentRows int) error {
@@ -26,8 +26,8 @@ func setupHits(ctx context.Context, db *engine.DB, rows int, segmentRows int) er
 	if _, err := db.Exec(ctx, ddl); err != nil {
 		return err
 	}
-	if segmentRows <= 0 || segmentRows > types.StandardBatchRows {
-		segmentRows = types.StandardBatchRows
+	if segmentRows <= 0 || segmentRows > vector.StandardBatchRows {
+		segmentRows = vector.StandardBatchRows
 	}
 	urls := []string{"/", "/index", "/home", "/search", "/cart", "/product", "/about", "/contact"}
 	phrases := []string{"", "buy", "sale", "review", "best", "cheap", "near me", "tutorial"}

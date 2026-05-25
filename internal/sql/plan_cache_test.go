@@ -4,11 +4,11 @@ package sql
 import (
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 )
 
 func dummyPlan(name string) *Plan {
-	return &Plan{Kind: PlanCreateTable, TableSpec: types.TableSpec{Name: name}}
+	return &Plan{Kind: PlanCreateTable, TableSpec: schema.TableSpec{Name: name}}
 }
 
 func TestPlanCache_HitAndMiss(t *testing.T) {

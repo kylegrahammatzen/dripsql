@@ -14,11 +14,11 @@ import (
 )
 
 const (
-	walMagic        = "DWAL"
-	walVersion uint16 = 1
-	walHeaderLen     = len(walMagic) + 2
-	walFrameHdrLen   = 1 + 4
-	walFrameTailLen  = 4
+	walMagic               = "DWAL"
+	walVersion      uint16 = 1
+	walHeaderLen           = len(walMagic) + 2
+	walFrameHdrLen         = 1 + 4
+	walFrameTailLen        = 4
 )
 
 type WALRecord struct {

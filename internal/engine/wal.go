@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 func (db *DB) openWAL() error {
@@ -133,7 +133,7 @@ func (db *DB) commitManifestTxnAs(tableName string, txnID, commitTs uint64, adds
 	intent := storage.ManifestIntent{
 		TxnID:     txnID,
 		CommitTs:  commitTs,
-		Table:     types.NormalizeName(tableName),
+		Table:     schema.NormalizeName(tableName),
 		Adds:      adds,
 		DVUpdates: dvUpdates,
 	}

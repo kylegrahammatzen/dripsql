@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"runtime"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 type SegmentsFn func(def sql.BoundTableDef) ([]*storage.Segment, error)
@@ -485,7 +485,7 @@ func isIdentityProject(rel *sql.Rel) bool {
 }
 
 func sameFoldName(a, b string) bool {
-	return types.NormalizeName(a) == types.NormalizeName(b)
+	return schema.NormalizeName(a) == schema.NormalizeName(b)
 }
 
 // checkProjectionOps rejects expressions the row-by-row eval has not implemented yet.
@@ -547,10 +547,10 @@ func scanColumnName(scan *sql.Rel, id sql.ColumnID) string {
 	return ""
 }
 
-func intLikeType(t types.Type) bool {
+func intLikeType(t schema.Type) bool {
 	switch t.Kind {
-	case types.KindInt16, types.KindInt32, types.KindInt64,
-		types.KindDate, types.KindTimestamp, types.KindTime, types.KindDecimal:
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64,
+		schema.KindDate, schema.KindTimestamp, schema.KindTime, schema.KindDecimal:
 		return true
 	}
 	return false

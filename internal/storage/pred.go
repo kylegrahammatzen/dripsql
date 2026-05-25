@@ -5,7 +5,8 @@ package storage
 import (
 	"fmt"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type PredOp uint8
@@ -57,7 +58,7 @@ func (op PredOp) String() string {
 type Pred struct {
 	Op   PredOp
 	Col  string
-	Kind types.VecKind
+	Kind vector.VecKind
 
 	I64   int64
 	F64   float64
@@ -147,7 +148,7 @@ func (p Pred) Columns() []string {
 		if p.Col == "" {
 			return
 		}
-		key := types.NormalizeName(p.Col)
+		key := schema.NormalizeName(p.Col)
 		if _, dup := seen[key]; dup {
 			return
 		}
@@ -226,7 +227,7 @@ func (p Pred) SkipsPage(seg *Segment, pageIdx int) bool {
 }
 
 // Apply narrows sel to rows satisfying p on the decoded batch.
-func (p Pred) Apply(batch types.Batch, sel *types.SelectionMask) {
+func (p Pred) Apply(batch vector.Batch, sel *vector.SelectionMask) {
 	bp, err := p.toBound()
 	if err != nil {
 		return
@@ -236,7 +237,7 @@ func (p Pred) Apply(batch types.Batch, sel *types.SelectionMask) {
 
 // ApplyEncoded runs p against raw codec bytes for one page.
 // ok=true means p is fully applied, ok=false means caller decodes and runs Apply.
-func (p Pred) ApplyEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (ok bool, _ []byte, _ error) {
+func (p Pred) ApplyEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (ok bool, _ []byte, _ error) {
 	bp, err := p.toBound()
 	if err != nil {
 		return false, scratch, err
@@ -253,33 +254,33 @@ func (p Pred) toBound() (BoundPredicate, error) {
 	switch p.Op {
 	case OpEq:
 		switch p.Kind {
-		case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 			return boundEqInt64{column: p.Col, value: p.I64}, nil
-		case types.VecText, types.VecBytes, types.VecJSON:
+		case vector.VecText, vector.VecBytes, vector.VecJSON:
 			return boundEqBytes{column: p.Col, value: p.Bytes}, nil
 		}
 	case OpLt:
 		switch p.Kind {
-		case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 			return boundLtInt64{column: p.Col, value: p.I64}, nil
-		case types.VecText, types.VecBytes, types.VecJSON:
+		case vector.VecText, vector.VecBytes, vector.VecJSON:
 			return boundLtBytes{column: p.Col, value: p.Bytes}, nil
 		}
 	case OpLe:
 		switch p.Kind {
-		case types.VecText, types.VecBytes, types.VecJSON:
+		case vector.VecText, vector.VecBytes, vector.VecJSON:
 			return boundLtBytes{column: p.Col, value: p.Bytes, inclusive: true}, nil
 		}
 	case OpGt:
 		switch p.Kind {
-		case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 			return boundGtInt64{column: p.Col, value: p.I64}, nil
-		case types.VecText, types.VecBytes, types.VecJSON:
+		case vector.VecText, vector.VecBytes, vector.VecJSON:
 			return boundGtBytes{column: p.Col, value: p.Bytes}, nil
 		}
 	case OpGe:
 		switch p.Kind {
-		case types.VecText, types.VecBytes, types.VecJSON:
+		case vector.VecText, vector.VecBytes, vector.VecJSON:
 			return boundGtBytes{column: p.Col, value: p.Bytes, inclusive: true}, nil
 		}
 	case OpIsNull:

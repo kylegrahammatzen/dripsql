@@ -9,11 +9,12 @@ import (
 
 	"github.com/klauspost/compress/flate"
 	"github.com/klauspost/compress/zstd"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type compressedTextCodec struct {
-	enc        types.Encoding
+	enc        schema.Encoding
 	compress   func(plain []byte) ([]byte, error)
 	decompress func(src []byte, uncompLen int) ([]byte, error)
 }
@@ -27,20 +28,20 @@ func init() {
 	zstdEncoder, _ = zstd.NewWriter(nil)
 	zstdDecoder, _ = zstd.NewReader(nil)
 	Register(&compressedTextCodec{
-		enc:        types.EncodingFlate,
+		enc:        schema.EncodingFlate,
 		compress:   flateCompress,
 		decompress: flateDecompress,
 	})
 	Register(&compressedTextCodec{
-		enc:        types.EncodingZstd,
+		enc:        schema.EncodingZstd,
 		compress:   zstdCompress,
 		decompress: zstdDecompress,
 	})
 }
 
-func (c *compressedTextCodec) Encoding() types.Encoding { return c.enc }
+func (c *compressedTextCodec) Encoding() schema.Encoding { return c.enc }
 
-func (c *compressedTextCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+func (c *compressedTextCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !v.Kind.IsVarBytes() {
 		return nil, ErrSkip
 	}
@@ -62,7 +63,7 @@ func (c *compressedTextCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, e
 	return out, nil
 }
 
-func (c *compressedTextCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (c *compressedTextCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("%v decode: %w", c.enc, err)
 	}
@@ -86,7 +87,7 @@ func (c *compressedTextCodec) Decode(payload []byte, kind types.VecKind, rows, n
 	// Decoded layout is flat (StringView + data buffer); doc invariant says
 	// Enc != Flat means data points at codec-specific encoded state, which
 	// is not the case here. Surface the runtime shape, not the wire choice.
-	dst.Enc = types.EncodingFlat
+	dst.Enc = schema.EncodingFlat
 	dst.Valid = nil
 	return nil
 }

@@ -5,17 +5,18 @@ import (
 	"math"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestALPRD_EncodingIsALPRD(t *testing.T) {
-	if (alpRDCodec{}).Encoding() != types.EncodingALPRD {
+	if (alpRDCodec{}).Encoding() != schema.EncodingALPRD {
 		t.Fatal("alpRDCodec must claim ALP-RD encoding")
 	}
 }
 
 func TestALPRD_RoundTrip_Irrationals(t *testing.T) {
-	src := types.NewVec(types.VecFloat64, 4)
+	src := vector.NewVec(vector.VecFloat64, 4)
 	src.F64()[0] = math.Pi
 	src.F64()[1] = math.E
 	src.F64()[2] = math.Sqrt2
@@ -24,8 +25,8 @@ func TestALPRD_RoundTrip_Irrationals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	var dst types.Vec
-	if err := (alpRDCodec{}).Decode(payload, types.VecFloat64, 4, 0, &dst); err != nil {
+	var dst vector.Vec
+	if err := (alpRDCodec{}).Decode(payload, vector.VecFloat64, 4, 0, &dst); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
 	for i, want := range []float64{math.Pi, math.E, math.Sqrt2, math.Phi} {
@@ -41,7 +42,7 @@ func TestALPRD_PreservesNaNAndInf(t *testing.T) {
 	pos := math.Inf(1)
 	neg := math.Inf(-1)
 	negZero := math.Copysign(0, -1)
-	src := types.NewVec(types.VecFloat64, 4)
+	src := vector.NewVec(vector.VecFloat64, 4)
 	src.F64()[0] = nan
 	src.F64()[1] = pos
 	src.F64()[2] = neg
@@ -50,8 +51,8 @@ func TestALPRD_PreservesNaNAndInf(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	var dst types.Vec
-	if err := (alpRDCodec{}).Decode(payload, types.VecFloat64, 4, 0, &dst); err != nil {
+	var dst vector.Vec
+	if err := (alpRDCodec{}).Decode(payload, vector.VecFloat64, 4, 0, &dst); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
 	if !math.IsNaN(dst.F64()[0]) {
@@ -72,7 +73,7 @@ func TestALPRD_CascadePicksRDForIrrationals(t *testing.T) {
 	// 2048 irrationals: ALP-decimal won't round-trip the irrational base, and at
 	// this page size the FastLanes block rounding doesn't bury ALP-RD's win.
 	// The cascade should pick ALP-RD over Plain.
-	src := types.NewVec(types.VecFloat64, 2048)
+	src := vector.NewVec(vector.VecFloat64, 2048)
 	for i := range src.F64() {
 		// Vary mantissa via Ldexp on Pi so the top-16 head dict stays small
 		// (just exponent-varying) but the tail is 48-bit-noisy.
@@ -82,14 +83,14 @@ func TestALPRD_CascadePicksRDForIrrationals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cascade Encode: %v", err)
 	}
-	if enc == types.EncodingFlat {
+	if enc == schema.EncodingFlat {
 		t.Fatalf("cascade fell to plain for irrational floats: payload %d bytes", len(payload))
 	}
 }
 
 func TestALPRD_RejectsTooManyDistinctHeads(t *testing.T) {
 	// 257 distinct exponent values forces >256 distinct top-16-bits heads.
-	src := types.NewVec(types.VecFloat64, 257)
+	src := vector.NewVec(vector.VecFloat64, 257)
 	for i := range src.F64() {
 		src.F64()[i] = math.Ldexp(1.0, i)
 	}

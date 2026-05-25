@@ -1,6 +1,6 @@
 // Encoding tags a Vec with its physical buffer layout where the wire byte equals the iota value.
 // EncodingAuto is a binder sentinel rejected at the wire boundary.
-package types
+package schema
 
 type Encoding uint8
 

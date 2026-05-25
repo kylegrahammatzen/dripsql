@@ -5,7 +5,7 @@ package exec
 import (
 	"context"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type LimitOp struct {
@@ -32,12 +32,12 @@ func (l *LimitOp) Open(ctx context.Context) error {
 	return nil
 }
 
-func (l *LimitOp) Next() (types.Batch, bool, error) {
+func (l *LimitOp) Next() (vector.Batch, bool, error) {
 	if err := l.state.requireOpen(); err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	if l.done() {
-		return types.Batch{}, false, nil
+		return vector.Batch{}, false, nil
 	}
 	for {
 		batch, ok, err := l.Source.Next()
@@ -53,7 +53,7 @@ func (l *LimitOp) Next() (types.Batch, bool, error) {
 				return out, true, nil
 			}
 			if l.done() {
-				return types.Batch{}, false, nil
+				return vector.Batch{}, false, nil
 			}
 			continue
 		}
@@ -62,7 +62,7 @@ func (l *LimitOp) Next() (types.Batch, bool, error) {
 		l.sent += sent
 		if sent == 0 {
 			if l.done() {
-				return types.Batch{}, false, nil
+				return vector.Batch{}, false, nil
 			}
 			continue
 		}
@@ -71,12 +71,12 @@ func (l *LimitOp) Next() (types.Batch, bool, error) {
 	}
 }
 
-func (l *LimitOp) limitAllRows(batch types.Batch) (types.Batch, bool) {
+func (l *LimitOp) limitAllRows(batch vector.Batch) (vector.Batch, bool) {
 	rows := int64(batch.Len)
 	start := max(int64(0), l.Offset-l.seen)
 	if start >= rows {
 		l.seen += rows
-		return types.Batch{}, false
+		return vector.Batch{}, false
 	}
 	take := rows - start
 	if l.N > 0 {
@@ -84,17 +84,17 @@ func (l *LimitOp) limitAllRows(batch types.Batch) (types.Batch, bool) {
 	}
 	if take <= 0 {
 		l.seen += rows
-		return types.Batch{}, false
+		return vector.Batch{}, false
 	}
 	end := start + take
-	out := types.NewSelectionRange(batch.Len, int(start), int(end))
+	out := vector.NewSelectionRange(batch.Len, int(start), int(end))
 	batch.Sel = &out
 	l.seen += end
 	l.sent += take
 	return batch, true
 }
 
-func (l *LimitOp) limitSelectedRows(batch types.Batch) (types.SelectionMask, int64, int64) {
+func (l *LimitOp) limitSelectedRows(batch vector.Batch) (vector.SelectionMask, int64, int64) {
 	skip := max(int64(0), l.Offset-l.seen)
 	take := int64(-1)
 	if l.N > 0 {

@@ -1,6 +1,6 @@
 // SelectionMask invariant tests: allSet cache stays coherent, tail bits ignored,
 // zero-row masks are vacuously all-set across construction, resize, and clear.
-package types
+package vector
 
 import "testing"
 

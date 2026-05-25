@@ -6,17 +6,18 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestScanOpts_ReadTs_SkipsNewerSegments(t *testing.T) {
 	tmp := t.TempDir()
 	mk := func(name string, val int64) *Segment {
 		path := filepath.Join(tmp, name)
-		v := types.NewVec(types.VecInt64, 1)
+		v := vector.NewVec(vector.VecInt64, 1)
 		v.I64()[0] = val
-		batch, _ := types.NewBatch([]types.Column{{Name: "id", Type: types.Int64, V: v}})
-		if _, err := WriteSegment(path, []types.Batch{batch}, nil); err != nil {
+		batch, _ := vector.NewBatch([]vector.Column{{Name: "id", Type: schema.Int64, V: v}})
+		if _, err := WriteSegment(path, []vector.Batch{batch}, nil); err != nil {
 			t.Fatalf("WriteSegment: %v", err)
 		}
 		s, err := OpenSegment(path)
@@ -41,7 +42,7 @@ func TestScanOpts_ReadTs_SkipsNewerSegments(t *testing.T) {
 		err := Scan(ScanOpts{
 			Segments: []*Segment{older, newer},
 			ReadTs:   readTs,
-		}, func(batch types.Batch, sel *types.SelectionMask) error {
+		}, func(batch vector.Batch, sel *vector.SelectionMask) error {
 			col, _ := batch.ColumnByName("id")
 			sel.IterSet(func(r int) {
 				got = append(got, row{val: col.V.I64()[r]})

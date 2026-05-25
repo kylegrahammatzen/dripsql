@@ -1,6 +1,6 @@
 // VarBytes is German Strings for text/bytes/JSON: 16-byte StringView per row.
 // bufId 0 references own data, bufId >= 1 references extras[bufId-1] (dict-shared).
-package types
+package vector
 
 import (
 	"encoding/binary"

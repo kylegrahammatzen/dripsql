@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 type Tx struct {
@@ -51,7 +51,7 @@ func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
 }
 
 func (tx *Tx) commit(table string, adds []storage.ManifestSegmentAdd, dvUpdates []storage.ManifestDVUpdate) error {
-	key := types.NormalizeName(table)
+	key := schema.NormalizeName(table)
 	p, ok := tx.pending[key]
 	if !ok {
 		p = &tablePending{}
@@ -129,7 +129,7 @@ func (tx *Tx) Query(ctx context.Context, sqlText string) (*Rows, error) {
 // and pending Adds append as fresh segments. Overlay segments get a CommitTs of 0
 // (always visible to this txn's reader).
 func (tx *Tx) resolveSegments(d sql.BoundTableDef) ([]*storage.Segment, error) {
-	key := types.NormalizeName(d.Name)
+	key := schema.NormalizeName(d.Name)
 	p := tx.pending[key]
 	m, err := tx.db.manifestFor(d.Name)
 	if err != nil {

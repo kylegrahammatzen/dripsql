@@ -1,11 +1,8 @@
 // Type is the SQL-side data type referenced by parser, binder, and exec.
 // Logical-kind name, parse, and physical-kind mapping all run as single switches.
-package types
+package schema
 
-import (
-	"fmt"
-	"strings"
-)
+import "strings"
 
 type Kind uint8
 
@@ -141,83 +138,4 @@ func (t Type) String() string {
 		return t.Name
 	}
 	return t.Kind.String()
-}
-
-// TypeFromVecKind reconstructs a logical Type from a physical VecKind and requires enumName when k is VecEnum32.
-func TypeFromVecKind(k VecKind, enumName string) (Type, error) {
-	switch k {
-	case VecBool:
-		return Bool, nil
-	case VecInt16:
-		return Int16, nil
-	case VecInt32:
-		return Int32, nil
-	case VecInt64:
-		return Int64, nil
-	case VecFloat32:
-		return Float32, nil
-	case VecFloat64:
-		return Float64, nil
-	case VecDecimal64:
-		return Decimal, nil
-	case VecText:
-		return Text, nil
-	case VecBytes:
-		return Bytes, nil
-	case VecUUID:
-		return UUID, nil
-	case VecTimestamp:
-		return Timestamp, nil
-	case VecTime:
-		return Time, nil
-	case VecDate:
-		return Date, nil
-	case VecJSON:
-		return JSON, nil
-	case VecEnum32:
-		if enumName == "" {
-			return Type{}, fmt.Errorf("TypeFromVecKind: enum without name")
-		}
-		return Named(enumName), nil
-	}
-	return Type{}, fmt.Errorf("TypeFromVecKind: unknown VecKind %v", k)
-}
-
-func VecKindOf(t Type) (VecKind, error) {
-	if !t.Valid() {
-		return VecInvalid, fmt.Errorf("VecKindOf: invalid type %v", t)
-	}
-	switch t.Kind {
-	case KindBool:
-		return VecBool, nil
-	case KindInt16:
-		return VecInt16, nil
-	case KindInt32:
-		return VecInt32, nil
-	case KindInt64:
-		return VecInt64, nil
-	case KindFloat32:
-		return VecFloat32, nil
-	case KindFloat64:
-		return VecFloat64, nil
-	case KindDecimal:
-		return VecDecimal64, nil
-	case KindText:
-		return VecText, nil
-	case KindBytes:
-		return VecBytes, nil
-	case KindUUID:
-		return VecUUID, nil
-	case KindTimestamp:
-		return VecTimestamp, nil
-	case KindTime:
-		return VecTime, nil
-	case KindDate:
-		return VecDate, nil
-	case KindJSON:
-		return VecJSON, nil
-	case KindNamed:
-		return VecEnum32, nil
-	}
-	return VecInvalid, fmt.Errorf("VecKindOf: invalid kind %v", t.Kind)
 }

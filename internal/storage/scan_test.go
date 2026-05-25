@@ -7,10 +7,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-func openWrittenSegment(t *testing.T, dir, name string, pages []types.Batch) *Segment {
+func openWrittenSegment(t *testing.T, dir, name string, pages []vector.Batch) *Segment {
 	t.Helper()
 	path := filepath.Join(dir, name)
 	if _, err := WriteSegment(path, pages, nil); err != nil {
@@ -23,26 +24,26 @@ func openWrittenSegment(t *testing.T, dir, name string, pages []types.Batch) *Se
 	return seg
 }
 
-func makeIntValuesBatch(t *testing.T, name string, vals ...int64) types.Batch {
+func makeIntValuesBatch(t *testing.T, name string, vals ...int64) vector.Batch {
 	t.Helper()
-	v := types.NewVec(types.VecInt64, len(vals))
+	v := vector.NewVec(vector.VecInt64, len(vals))
 	copy(v.I64(), vals)
-	b, err := types.NewBatch([]types.Column{{Name: name, Type: types.Int64, V: v}})
+	b, err := vector.NewBatch([]vector.Column{{Name: name, Type: schema.Int64, V: v}})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	return b
 }
 
-func makeNullableIntValuesBatch(t *testing.T, name string, vals []int64, nullRows ...int) types.Batch {
+func makeNullableIntValuesBatch(t *testing.T, name string, vals []int64, nullRows ...int) vector.Batch {
 	t.Helper()
-	v := types.NewVec(types.VecInt64, len(vals))
+	v := vector.NewVec(vector.VecInt64, len(vals))
 	copy(v.I64(), vals)
-	v.Valid = types.NewValidity(len(vals))
+	v.Valid = vector.NewValidity(len(vals))
 	for _, row := range nullRows {
 		v.Valid.SetInvalid(row)
 	}
-	b, err := types.NewBatch([]types.Column{{Name: name, Type: types.Int64, V: v}})
+	b, err := vector.NewBatch([]vector.Column{{Name: name, Type: schema.Int64, V: v}})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
@@ -59,14 +60,14 @@ func containsInt64(vals []int64, want int64) bool {
 }
 
 func TestScan_EnumerateAll_NoPredicate(t *testing.T) {
-	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []types.Batch{
+	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{
 		makeIntBatch(t, "id", 0, 50),
 		makeIntBatch(t, "id", 50, 50),
 	})
 	defer seg.Close()
 
 	var seen []int64
-	err := Scan(ScanOpts{Segments: []*Segment{seg}, Columns: []string{"id"}}, func(b types.Batch, sel *types.SelectionMask) error {
+	err := Scan(ScanOpts{Segments: []*Segment{seg}, Columns: []string{"id"}}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		sel.IterSet(func(row int) {
 			seen = append(seen, b.Columns[0].V.I64()[row])
 		})
@@ -86,15 +87,15 @@ func TestScan_EnumerateAll_NoPredicate(t *testing.T) {
 }
 
 func TestScan_FiltersWithPredicate(t *testing.T) {
-	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []types.Batch{makeIntBatch(t, "id", 0, 100)})
+	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{makeIntBatch(t, "id", 0, 100)})
 	defer seg.Close()
 
 	var seen []int64
 	err := Scan(ScanOpts{
-		Segments:  []*Segment{seg},
-		Columns:   []string{"id"},
-		Pred: &Pred{Op: OpLt, Col: "id", Kind: types.VecInt64, I64: 10},
-	}, func(b types.Batch, sel *types.SelectionMask) error {
+		Segments: []*Segment{seg},
+		Columns:  []string{"id"},
+		Pred:     &Pred{Op: OpLt, Col: "id", Kind: vector.VecInt64, I64: 10},
+	}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		sel.IterSet(func(row int) { seen = append(seen, b.Columns[0].V.I64()[row]) })
 		return nil
 	})
@@ -107,7 +108,7 @@ func TestScan_FiltersWithPredicate(t *testing.T) {
 }
 
 func TestScan_TopKPushdownKeepsMixedRangeCandidatePage(t *testing.T) {
-	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []types.Batch{
+	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{
 		makeIntValuesBatch(t, "id", 100, 0),
 		makeIntValuesBatch(t, "id", 99, 98),
 	})
@@ -118,7 +119,7 @@ func TestScan_TopKPushdownKeepsMixedRangeCandidatePage(t *testing.T) {
 		Segments: []*Segment{seg},
 		Columns:  []string{"id"},
 		TopK:     &TopKPushdown{Column: "id", Desc: true, K: 2},
-	}, func(b types.Batch, sel *types.SelectionMask) error {
+	}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		sel.IterSet(func(row int) { seen = append(seen, b.Columns[0].V.I64()[row]) })
 		return nil
 	})
@@ -131,7 +132,7 @@ func TestScan_TopKPushdownKeepsMixedRangeCandidatePage(t *testing.T) {
 }
 
 func TestScan_TopKPushdownDoesNotPruneNullablePages(t *testing.T) {
-	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []types.Batch{
+	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{
 		makeIntValuesBatch(t, "id", 5, 6),
 		makeNullableIntValuesBatch(t, "id", []int64{0, 100}, 0),
 	})
@@ -142,7 +143,7 @@ func TestScan_TopKPushdownDoesNotPruneNullablePages(t *testing.T) {
 		Segments: []*Segment{seg},
 		Columns:  []string{"id"},
 		TopK:     &TopKPushdown{Column: "id", K: 1},
-	}, func(b types.Batch, sel *types.SelectionMask) error {
+	}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		col := b.Columns[0]
 		sel.IterSet(func(row int) {
 			if col.V.Valid != nil && !col.V.Valid.IsValid(row) {
@@ -162,13 +163,13 @@ func TestScan_TopKPushdownDoesNotPruneNullablePages(t *testing.T) {
 func TestScan_TopKPushdownDoesNotPruneWithDeletionVector(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{
+	if _, err := WriteSegment(path, []vector.Batch{
 		makeIntValuesBatch(t, "id", 100, 0),
 		makeIntValuesBatch(t, "id", 99, 98),
 	}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
-	dv := types.NewValidity(4)
+	dv := vector.NewValidity(4)
 	dv.SetInvalid(0)
 	if err := WriteDV(path, 4, dv); err != nil {
 		t.Fatalf("WriteDV: %v", err)
@@ -184,7 +185,7 @@ func TestScan_TopKPushdownDoesNotPruneWithDeletionVector(t *testing.T) {
 		Segments: []*Segment{seg},
 		Columns:  []string{"id"},
 		TopK:     &TopKPushdown{Column: "id", Desc: true, K: 1},
-	}, func(b types.Batch, sel *types.SelectionMask) error {
+	}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		sel.IterSet(func(row int) { seen = append(seen, b.Columns[0].V.I64()[row]) })
 		return nil
 	})
@@ -200,14 +201,14 @@ func TestScan_TopKPushdownPrunesClusteredPages(t *testing.T) {
 	// Pages laid out so per-page min/max are disjoint: [0..99], [100..199], [200..299], [300..399].
 	// DESC top-2 must scan only the last page; ASC top-2 must scan only the first.
 	dir := t.TempDir()
-	mk := func(start int64) types.Batch {
+	mk := func(start int64) vector.Batch {
 		vals := make([]int64, 100)
 		for i := range vals {
 			vals[i] = start + int64(i)
 		}
 		return makeIntValuesBatch(t, "id", vals...)
 	}
-	pages := []types.Batch{mk(0), mk(100), mk(200), mk(300)}
+	pages := []vector.Batch{mk(0), mk(100), mk(200), mk(300)}
 	path := filepath.Join(dir, "seg.dsv4")
 	if _, err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
@@ -233,7 +234,7 @@ func TestScan_TopKPushdownPrunesClusteredPages(t *testing.T) {
 				Segments: []*Segment{seg},
 				Columns:  []string{"id"},
 				TopK:     &TopKPushdown{Column: "id", Desc: tc.desc, K: 2},
-			}, func(b types.Batch, sel *types.SelectionMask) error {
+			}, func(b vector.Batch, sel *vector.SelectionMask) error {
 				sel.IterSet(func(row int) { seen = append(seen, b.Columns[0].V.I64()[row]) })
 				return nil
 			})
@@ -254,17 +255,17 @@ func TestScan_TopKPushdownPrunesClusteredPages(t *testing.T) {
 
 func TestScan_PrunesSegmentsOutsideRange(t *testing.T) {
 	dir := t.TempDir()
-	low := openWrittenSegment(t, dir, "low.dsv4", []types.Batch{makeIntBatch(t, "id", 0, 50)})
-	high := openWrittenSegment(t, dir, "high.dsv4", []types.Batch{makeIntBatch(t, "id", 1000, 50)})
+	low := openWrittenSegment(t, dir, "low.dsv4", []vector.Batch{makeIntBatch(t, "id", 0, 50)})
+	high := openWrittenSegment(t, dir, "high.dsv4", []vector.Batch{makeIntBatch(t, "id", 1000, 50)})
 	defer low.Close()
 	defer high.Close()
 
 	callCount := 0
 	err := Scan(ScanOpts{
-		Segments:  []*Segment{low, high},
-		Columns:   []string{"id"},
-		Pred: &Pred{Op: OpEq, Col: "id", Kind: types.VecInt64, I64: 25},
-	}, func(b types.Batch, sel *types.SelectionMask) error {
+		Segments: []*Segment{low, high},
+		Columns:  []string{"id"},
+		Pred:     &Pred{Op: OpEq, Col: "id", Kind: vector.VecInt64, I64: 25},
+	}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		callCount++
 		return nil
 	})
@@ -277,7 +278,7 @@ func TestScan_PrunesSegmentsOutsideRange(t *testing.T) {
 }
 
 func TestScan_StopsOnFnError(t *testing.T) {
-	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []types.Batch{
+	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{
 		makeIntBatch(t, "id", 0, 10),
 		makeIntBatch(t, "id", 10, 10),
 		makeIntBatch(t, "id", 20, 10),
@@ -286,7 +287,7 @@ func TestScan_StopsOnFnError(t *testing.T) {
 
 	sentinel := errors.New("stop")
 	calls := 0
-	err := Scan(ScanOpts{Segments: []*Segment{seg}, Columns: []string{"id"}}, func(b types.Batch, sel *types.SelectionMask) error {
+	err := Scan(ScanOpts{Segments: []*Segment{seg}, Columns: []string{"id"}}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		calls++
 		return sentinel
 	})
@@ -299,11 +300,11 @@ func TestScan_StopsOnFnError(t *testing.T) {
 }
 
 func TestScan_ProjectionDropsColumns(t *testing.T) {
-	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []types.Batch{makeTwoColumnBatch(t, 0, 32)})
+	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{makeTwoColumnBatch(t, 0, 32)})
 	defer seg.Close()
 
 	var seenCols int
-	err := Scan(ScanOpts{Segments: []*Segment{seg}, Columns: []string{"id"}}, func(b types.Batch, sel *types.SelectionMask) error {
+	err := Scan(ScanOpts{Segments: []*Segment{seg}, Columns: []string{"id"}}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		seenCols = len(b.Columns)
 		return nil
 	})
@@ -316,11 +317,11 @@ func TestScan_ProjectionDropsColumns(t *testing.T) {
 }
 
 func TestScan_EmptyColumnsScansAll(t *testing.T) {
-	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []types.Batch{makeTwoColumnBatch(t, 0, 32)})
+	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{makeTwoColumnBatch(t, 0, 32)})
 	defer seg.Close()
 
 	var seenCols int
-	err := Scan(ScanOpts{Segments: []*Segment{seg}}, func(b types.Batch, sel *types.SelectionMask) error {
+	err := Scan(ScanOpts{Segments: []*Segment{seg}}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		seenCols = len(b.Columns)
 		return nil
 	})
@@ -333,9 +334,9 @@ func TestScan_EmptyColumnsScansAll(t *testing.T) {
 }
 
 func TestScan_RejectsMissingColumn(t *testing.T) {
-	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []types.Batch{makeIntBatch(t, "id", 0, 5)})
+	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{makeIntBatch(t, "id", 0, 5)})
 	defer seg.Close()
-	err := Scan(ScanOpts{Segments: []*Segment{seg}, Columns: []string{"nope"}}, func(b types.Batch, sel *types.SelectionMask) error {
+	err := Scan(ScanOpts{Segments: []*Segment{seg}, Columns: []string{"nope"}}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		return nil
 	})
 	if err == nil {
@@ -350,15 +351,15 @@ func TestScan_RejectsNilFn(t *testing.T) {
 }
 
 func TestScan_PredicateOnUnprojectedColumn(t *testing.T) {
-	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []types.Batch{makeTwoColumnBatch(t, 0, 32)})
+	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{makeTwoColumnBatch(t, 0, 32)})
 	defer seg.Close()
 
 	var seen []int64
 	err := Scan(ScanOpts{
-		Segments:  []*Segment{seg},
-		Columns:   []string{"tag"},
-		Pred: &Pred{Op: OpLt, Col: "id", Kind: types.VecInt64, I64: 5},
-	}, func(b types.Batch, sel *types.SelectionMask) error {
+		Segments: []*Segment{seg},
+		Columns:  []string{"tag"},
+		Pred:     &Pred{Op: OpLt, Col: "id", Kind: vector.VecInt64, I64: 5},
+	}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		if len(b.Columns) != 1 || b.Columns[0].Name != "tag" {
 			t.Fatalf("callback batch shape wrong: %d cols, first=%q", len(b.Columns), b.Columns[0].Name)
 		}
@@ -374,9 +375,9 @@ func TestScan_PredicateOnUnprojectedColumn(t *testing.T) {
 }
 
 func TestScan_ProjectionCaseInsensitive(t *testing.T) {
-	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []types.Batch{makeIntBatch(t, "id", 0, 5)})
+	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{makeIntBatch(t, "id", 0, 5)})
 	defer seg.Close()
-	err := Scan(ScanOpts{Segments: []*Segment{seg}, Columns: []string{"ID"}}, func(b types.Batch, sel *types.SelectionMask) error {
+	err := Scan(ScanOpts{Segments: []*Segment{seg}, Columns: []string{"ID"}}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		if b.Columns[0].Name != "id" {
 			t.Fatalf("column name = %q, want %q", b.Columns[0].Name, "id")
 		}
@@ -389,7 +390,7 @@ func TestScan_ProjectionCaseInsensitive(t *testing.T) {
 
 func TestScan_NoSegments_NoOp(t *testing.T) {
 	calls := 0
-	err := Scan(ScanOpts{}, func(b types.Batch, sel *types.SelectionMask) error {
+	err := Scan(ScanOpts{}, func(b vector.Batch, sel *vector.SelectionMask) error {
 		calls++
 		return nil
 	})

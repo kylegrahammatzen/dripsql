@@ -5,24 +5,24 @@ package sql
 import (
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 )
 
 func planBenchDef() BoundTableDef {
 	return BoundTableDef{
 		Name: "users",
 		Columns: []BoundColumnDef{
-			{ID: 1, Name: "id", Type: types.Int64},
-			{ID: 2, Name: "name", Type: types.Text},
-			{ID: 3, Name: "age", Type: types.Int64},
-			{ID: 4, Name: "category", Type: types.Text},
+			{ID: 1, Name: "id", Type: schema.Int64},
+			{ID: 2, Name: "name", Type: schema.Text},
+			{ID: 3, Name: "age", Type: schema.Int64},
+			{ID: 4, Name: "category", Type: schema.Text},
 		},
 	}
 }
 
 func planBenchResolver(def BoundTableDef) TableResolver {
 	return func(name string) (BoundTableDef, error) {
-		if types.NormalizeName(name) != types.NormalizeName(def.Name) {
+		if schema.NormalizeName(name) != schema.NormalizeName(def.Name) {
 			return BoundTableDef{}, nil
 		}
 		return def, nil

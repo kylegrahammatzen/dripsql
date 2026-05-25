@@ -5,7 +5,7 @@ package exec
 import (
 	"context"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type UnionOp struct {
@@ -36,9 +36,9 @@ func (u *UnionOp) Open(ctx context.Context) error {
 	return nil
 }
 
-func (u *UnionOp) Next() (types.Batch, bool, error) {
+func (u *UnionOp) Next() (vector.Batch, bool, error) {
 	if err := u.state.requireOpen(); err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	for {
 		src := u.Left
@@ -47,11 +47,11 @@ func (u *UnionOp) Next() (types.Batch, bool, error) {
 		}
 		batch, ok, err := src.Next()
 		if err != nil {
-			return types.Batch{}, false, err
+			return vector.Batch{}, false, err
 		}
 		if !ok {
 			if u.useRight {
-				return types.Batch{}, false, nil
+				return vector.Batch{}, false, nil
 			}
 			u.useRight = true
 			continue

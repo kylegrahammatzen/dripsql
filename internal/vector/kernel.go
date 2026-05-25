@@ -1,6 +1,6 @@
 // Scalar kernels shared by predicate eval, sort comparators, and aggregate accumulators.
 // Generic over cmp.Ordered so int16/int32/int64 share one implementation.
-package types
+package vector
 
 import (
 	"bytes"

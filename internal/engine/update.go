@@ -9,9 +9,10 @@ import (
 	"os"
 
 	"github.com/kylegrahammatzen/dripsql/internal/exec"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func (db *DB) update(ctx context.Context, plan *sql.Plan, target commitTarget) (int64, error) {
@@ -50,7 +51,7 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan, target commitTarget) (
 			return err
 		}
 		path := db.nextSegmentPath(def.Name)
-		span, err := storage.WriteSegment(path, []types.Batch{batch}, columnCodecs(def))
+		span, err := storage.WriteSegment(path, []vector.Batch{batch}, columnCodecs(def))
 		if span != nil {
 			stmt.AppendChild(span)
 		}
@@ -118,14 +119,14 @@ func buildUpdatePlan(plan *sql.Plan) (*updatePlan, error) {
 	tableDefs := plan.Table.Columns
 	tableIdx := make(map[string]int, len(tableDefs))
 	for i, d := range tableDefs {
-		tableIdx[types.NormalizeName(d.Name)] = i
+		tableIdx[schema.NormalizeName(d.Name)] = i
 	}
 
 	assigned := make([]bool, len(tableDefs))
 	values := make([]sql.Value, len(tableDefs))
 	for i := range plan.Assignments {
 		a := &plan.Assignments[i]
-		idx, ok := tableIdx[types.NormalizeName(a.Column.Name)]
+		idx, ok := tableIdx[schema.NormalizeName(a.Column.Name)]
 		if !ok {
 			return nil, fmt.Errorf("update: assigned column %q not in table", a.Column.Name)
 		}
@@ -139,14 +140,14 @@ func buildUpdatePlan(plan *sql.Plan) (*updatePlan, error) {
 	}
 	for ti, d := range tableDefs {
 		if !assigned[ti] {
-			need[types.NormalizeName(d.Name)] = struct{}{}
+			need[schema.NormalizeName(d.Name)] = struct{}{}
 		}
 	}
 
 	up := &updatePlan{cols: make([]updateCol, len(tableDefs))}
 	decodeIdxByName := make(map[string]int, len(need))
 	for _, d := range tableDefs {
-		name := types.NormalizeName(d.Name)
+		name := schema.NormalizeName(d.Name)
 		if _, ok := need[name]; !ok {
 			continue
 		}
@@ -157,7 +158,7 @@ func buildUpdatePlan(plan *sql.Plan) (*updatePlan, error) {
 	for ti, d := range tableDefs {
 		col := updateCol{def: d, decodeIdx: -1, assigned: assigned[ti], value: values[ti]}
 		if !col.assigned {
-			col.decodeIdx = decodeIdxByName[types.NormalizeName(d.Name)]
+			col.decodeIdx = decodeIdxByName[schema.NormalizeName(d.Name)]
 		}
 		up.cols[ti] = col
 	}
@@ -187,7 +188,7 @@ func (db *DB) applyUpdateToSegment(ctx context.Context, entry storage.ManifestEn
 	idxByName := segmentColumnIndex(seg)
 	segIdxs := make([]int, len(up.decodeDefs))
 	for i, d := range up.decodeDefs {
-		idx, ok := idxByName[types.NormalizeName(d.Name)]
+		idx, ok := idxByName[schema.NormalizeName(d.Name)]
 		if !ok {
 			return 0, nil, fmt.Errorf("column %q not in segment", d.Name)
 		}
@@ -199,7 +200,7 @@ func (db *DB) applyUpdateToSegment(ctx context.Context, entry storage.ManifestEn
 	// Single scratch is safe: every codec.Decode either copies into a fresh fixed-width
 	// buffer or appends into a fresh VarVec, so the returned Vec never aliases scratch.
 	var scratch []byte
-	decoded := make([]types.Column, len(up.decodeDefs))
+	decoded := make([]vector.Column, len(up.decodeDefs))
 	anyMatch := false
 
 	for pi := range pageCount {
@@ -209,7 +210,7 @@ func (db *DB) applyUpdateToSegment(ctx context.Context, entry storage.ManifestEn
 		page := seg.Cols[0].Pages[pi]
 		pageRows := int(page.Rows)
 		rowStart := int(page.RowStart)
-		live := types.NewSelectionMask(pageRows)
+		live := vector.NewSelectionMask(pageRows)
 		liveCount := 0
 		if !hadDV {
 			live.FillAll()
@@ -231,11 +232,11 @@ func (db *DB) applyUpdateToSegment(ctx context.Context, entry storage.ManifestEn
 				return updated, nil, fmt.Errorf("page %d col %q: %w", pi, d.Name, err)
 			}
 			scratch = s
-			decoded[ci] = types.Column{Name: d.Name, Type: d.Type, EnumLabels: d.Labels, V: v}
+			decoded[ci] = vector.Column{Name: d.Name, Type: d.Type, EnumLabels: d.Labels, V: v}
 		}
-		batch := types.Batch{Len: pageRows, Columns: decoded, Sel: &live}
+		batch := vector.Batch{Len: pageRows, Columns: decoded, Sel: &live}
 
-		var sel types.SelectionMask
+		var sel vector.SelectionMask
 		if plan.Where == nil {
 			sel = live
 		} else {
@@ -258,7 +259,7 @@ func (db *DB) applyUpdateToSegment(ctx context.Context, entry storage.ManifestEn
 			dv.SetInvalid(abs)
 			updated++
 			anyMatch = true
-			if pending.rows == types.StandardBatchRows {
+			if pending.rows == vector.StandardBatchRows {
 				if err := flush(); err != nil {
 					loopErr = err
 					return
@@ -281,26 +282,26 @@ func (db *DB) applyUpdateToSegment(ctx context.Context, entry storage.ManifestEn
 
 type updateBuffer struct {
 	plan *updatePlan
-	cols []types.Column
+	cols []vector.Column
 	rows int
 }
 
 func newUpdateBuffer(up *updatePlan) (*updateBuffer, error) {
-	cols, err := allocUpdateCols(up, types.StandardBatchRows)
+	cols, err := allocUpdateCols(up, vector.StandardBatchRows)
 	if err != nil {
 		return nil, err
 	}
 	return &updateBuffer{plan: up, cols: cols}, nil
 }
 
-func allocUpdateCols(up *updatePlan, rows int) ([]types.Column, error) {
-	cols := make([]types.Column, len(up.cols))
+func allocUpdateCols(up *updatePlan, rows int) ([]vector.Column, error) {
+	cols := make([]vector.Column, len(up.cols))
 	for i, c := range up.cols {
-		vk, err := types.VecKindOf(c.def.Type)
+		vk, err := vector.VecKindOf(c.def.Type)
 		if err != nil {
 			return nil, err
 		}
-		v, err := types.NewVecForKind(vk, rows)
+		v, err := vector.NewVecForKind(vk, rows)
 		if err != nil {
 			return nil, err
 		}
@@ -310,18 +311,18 @@ func allocUpdateCols(up *updatePlan, rows int) ([]types.Column, error) {
 		// CopyVecRow lazily allocate.
 		if c.assigned {
 			if c.value.Kind == sql.ValueNull {
-				v.Valid = make(types.Validity, types.ValidityWords(rows))
+				v.Valid = make(vector.Validity, vector.ValidityWords(rows))
 			} else if c.def.Nullable {
-				v.Valid = types.NewAllValid(rows)
+				v.Valid = vector.NewAllValid(rows)
 			}
 		}
-		cols[i] = types.Column{Name: c.def.Name, Type: c.def.Type, EnumLabels: c.def.Labels, V: v}
+		cols[i] = vector.Column{Name: c.def.Name, Type: c.def.Type, EnumLabels: c.def.Labels, V: v}
 	}
 	return cols, nil
 }
 
 func (b *updateBuffer) reset() error {
-	cols, err := allocUpdateCols(b.plan, types.StandardBatchRows)
+	cols, err := allocUpdateCols(b.plan, vector.StandardBatchRows)
 	if err != nil {
 		return err
 	}
@@ -330,7 +331,7 @@ func (b *updateBuffer) reset() error {
 	return nil
 }
 
-func (b *updateBuffer) appendRow(src types.Batch, srcRow int) error {
+func (b *updateBuffer) appendRow(src vector.Batch, srcRow int) error {
 	dst := b.rows
 	for i, c := range b.plan.cols {
 		if c.assigned {
@@ -342,7 +343,7 @@ func (b *updateBuffer) appendRow(src types.Batch, srcRow int) error {
 			}
 			continue
 		}
-		if err := types.CopyVecRow(src.Columns[c.decodeIdx].V, srcRow, &b.cols[i].V, dst); err != nil {
+		if err := vector.CopyVecRow(src.Columns[c.decodeIdx].V, srcRow, &b.cols[i].V, dst); err != nil {
 			return err
 		}
 	}
@@ -354,48 +355,48 @@ func (b *updateBuffer) appendRow(src types.Batch, srcRow int) error {
 // Vec at StandardBatchRows; setting Len to the actual row count makes the existing buffer
 // the output. reset allocates a fresh buffer for the next chunk so callers never see
 // overwrites after WriteSegment retains references.
-func (b *updateBuffer) materialize() (types.Batch, error) {
-	out := make([]types.Column, len(b.cols))
+func (b *updateBuffer) materialize() (vector.Batch, error) {
+	out := make([]vector.Column, len(b.cols))
 	for i, c := range b.cols {
 		c.V.Truncate(b.rows)
 		out[i] = c
 	}
-	return types.NewBatch(out)
+	return vector.NewBatch(out)
 }
 
-func writeAssignedRow(v *types.Vec, vk types.VecKind, val sql.Value, row int) error {
+func writeAssignedRow(v *vector.Vec, vk vector.VecKind, val sql.Value, row int) error {
 	switch vk {
-	case types.VecBool:
+	case vector.VecBool:
 		if val.Bool {
 			v.BoolBits()[row>>3] |= 1 << (row & 7)
 		}
-	case types.VecInt16:
+	case vector.VecInt16:
 		v.I16()[row] = int16(val.Int)
-	case types.VecInt32, types.VecDate:
+	case vector.VecInt32, vector.VecDate:
 		v.I32()[row] = int32(val.Int)
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		v.I64()[row] = val.Int
-	case types.VecFloat32:
+	case vector.VecFloat32:
 		if val.Kind == sql.ValueInt {
 			v.F32()[row] = float32(val.Int)
 		} else {
 			v.F32()[row] = float32(val.Float)
 		}
-	case types.VecFloat64:
+	case vector.VecFloat64:
 		if val.Kind == sql.ValueInt {
 			v.F64()[row] = float64(val.Int)
 		} else {
 			v.F64()[row] = val.Float
 		}
-	case types.VecText, types.VecBytes, types.VecJSON:
+	case vector.VecText, vector.VecBytes, vector.VecJSON:
 		v.Var().AppendString(row, val.String)
-	case types.VecUUID:
-		u, err := types.ParseUUID(val.String)
+	case vector.VecUUID:
+		u, err := vector.ParseUUID(val.String)
 		if err != nil {
 			return err
 		}
 		copy(v.FixedBytes()[row*16:row*16+16], u[:])
-	case types.VecEnum32:
+	case vector.VecEnum32:
 		if val.Kind != sql.ValueEnum {
 			return fmt.Errorf("enum column got %v (binder did not resolve to ValueEnum)", val.Kind)
 		}

@@ -7,7 +7,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type constantCodec struct{}
@@ -16,9 +17,9 @@ func init() {
 	Register(constantCodec{})
 }
 
-func (constantCodec) Encoding() types.Encoding { return types.EncodingConstant }
+func (constantCodec) Encoding() schema.Encoding { return schema.EncodingConstant }
 
-func (constantCodec) constantSize(v types.Vec, ctx *EncodeContext) (int, bool) {
+func (constantCodec) constantSize(v vector.Vec, ctx *EncodeContext) (int, bool) {
 	w := v.Kind.FixedWidth()
 	if w == 0 {
 		return 0, false
@@ -38,7 +39,7 @@ func (constantCodec) constantSize(v types.Vec, ctx *EncodeContext) (int, bool) {
 	return constantValueSize(v), true
 }
 
-func constantAllEqual(v types.Vec) bool {
+func constantAllEqual(v vector.Vec) bool {
 	rows := int(v.Len)
 	w := v.Kind.FixedWidth()
 	if w > 0 {
@@ -52,7 +53,7 @@ func constantAllEqual(v types.Vec) bool {
 		return true
 	}
 	switch w {
-	case types.WidthBool:
+	case vector.WidthBool:
 		bits := v.BoolBits()
 		first := (bits[0] & 1) != 0
 		for i := 1; i < rows; i++ {
@@ -62,7 +63,7 @@ func constantAllEqual(v types.Vec) bool {
 			}
 		}
 		return true
-	case types.WidthVarBytes:
+	case vector.WidthVarBytes:
 		vb := v.Var()
 		first := vb.Bytes(0)
 		for i := 1; i < rows; i++ {
@@ -75,21 +76,21 @@ func constantAllEqual(v types.Vec) bool {
 	return false
 }
 
-func constantValueSize(v types.Vec) int {
+func constantValueSize(v vector.Vec) int {
 	w := v.Kind.FixedWidth()
 	if w > 0 {
 		return int(w)
 	}
 	switch w {
-	case types.WidthBool:
+	case vector.WidthBool:
 		return 1
-	case types.WidthVarBytes:
+	case vector.WidthVarBytes:
 		return 4 + v.Var().Len(0)
 	}
 	return 0
 }
 
-func (c constantCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+func (c constantCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	n, ok := c.constantSize(v, ctx)
 	if !ok {
 		return nil, ErrSkip
@@ -110,14 +111,14 @@ func (c constantCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 		return scratch, nil
 	}
 	switch w {
-	case types.WidthBool:
+	case vector.WidthBool:
 		if v.BoolBits()[0]&1 != 0 {
 			scratch[0] = 1
 		} else {
 			scratch[0] = 0
 		}
 		return scratch, nil
-	case types.WidthVarBytes:
+	case vector.WidthVarBytes:
 		first := v.Var().Bytes(0)
 		binary.LittleEndian.PutUint32(scratch[0:4], uint32(len(first)))
 		copy(scratch[4:], first)
@@ -126,7 +127,7 @@ func (c constantCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 	return nil, fmt.Errorf("constant encode: unsupported kind %v", v.Kind)
 }
 
-func (constantCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (constantCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("constant decode: %w", err)
 	}
@@ -147,7 +148,7 @@ func (constantCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount 
 		return nil
 	}
 	switch w {
-	case types.WidthBool:
+	case vector.WidthBool:
 		expected := 0
 		if rows > 0 {
 			expected = 1
@@ -155,7 +156,7 @@ func (constantCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount 
 		if len(payload) != expected {
 			return fmt.Errorf("constant decode bool: payload %d != expected %d", len(payload), expected)
 		}
-		*dst = types.NewVec(kind, rows)
+		*dst = vector.NewVec(kind, rows)
 		if rows == 0 {
 			return nil
 		}
@@ -172,7 +173,7 @@ func (constantCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount 
 			}
 		}
 		return nil
-	case types.WidthVarBytes:
+	case vector.WidthVarBytes:
 		var value []byte
 		if rows > 0 {
 			if len(payload) < 4 {
@@ -186,7 +187,7 @@ func (constantCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount 
 		} else if len(payload) != 0 {
 			return fmt.Errorf("constant decode varbytes: zero rows but %d-byte payload", len(payload))
 		}
-		*dst = types.NewVarVec(kind, rows, len(value))
+		*dst = vector.NewVarVec(kind, rows, len(value))
 		if rows > 0 {
 			dst.Var().Broadcast(value)
 		}

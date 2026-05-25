@@ -8,36 +8,36 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 const catalogFile = "catalog.json"
 
 type catalogFileShape struct {
-	Version uint64          `json:"version"`
-	Types   []typeRecord    `json:"types"`
-	Tables  []tableRecord   `json:"tables"`
+	Version uint64        `json:"version"`
+	Types   []typeRecord  `json:"types"`
+	Tables  []tableRecord `json:"tables"`
 }
 
 type typeRecord struct {
-	ID   sql.TypeID     `json:"id"`
-	Spec types.TypeSpec `json:"spec"`
+	ID   sql.TypeID      `json:"id"`
+	Spec schema.TypeSpec `json:"spec"`
 }
 
 type tableRecord struct {
-	ID   sql.TableID     `json:"id"`
-	Spec types.TableSpec `json:"spec"`
+	ID   sql.TableID      `json:"id"`
+	Spec schema.TableSpec `json:"spec"`
 }
 
 type typeEntry struct {
 	id   sql.TypeID
-	spec types.TypeSpec
+	spec schema.TypeSpec
 }
 
 type tableEntry struct {
 	id   sql.TableID
-	spec types.TableSpec
+	spec schema.TableSpec
 }
 
 func loadCatalog(root string) (typesByName map[string]typeEntry, tablesByName map[string]tableEntry, version sql.SchemaVersion, err error) {
@@ -56,10 +56,10 @@ func loadCatalog(root string) (typesByName map[string]typeEntry, tablesByName ma
 		return nil, nil, 0, fmt.Errorf("catalog: parse %s: %w", path, err)
 	}
 	for _, rec := range shape.Types {
-		typesByName[types.NormalizeName(rec.Spec.Name)] = typeEntry{id: rec.ID, spec: rec.Spec}
+		typesByName[schema.NormalizeName(rec.Spec.Name)] = typeEntry{id: rec.ID, spec: rec.Spec}
 	}
 	for _, rec := range shape.Tables {
-		tablesByName[types.NormalizeName(rec.Spec.Name)] = tableEntry{id: rec.ID, spec: rec.Spec}
+		tablesByName[schema.NormalizeName(rec.Spec.Name)] = tableEntry{id: rec.ID, spec: rec.Spec}
 	}
 	return typesByName, tablesByName, sql.SchemaVersion(shape.Version), nil
 }
@@ -83,4 +83,3 @@ func saveCatalog(root string, typesByName map[string]typeEntry, tablesByName map
 	}
 	return os.Rename(tmp, target)
 }
-

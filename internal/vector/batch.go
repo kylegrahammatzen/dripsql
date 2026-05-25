@@ -1,16 +1,18 @@
 // Batch is a row-aligned set of named typed columns.
 // All columns share Len rows. Sel is an optional row-selection bitmap.
-package types
+package vector
 
 import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 )
 
 type Column struct {
 	Name       string
-	Type       Type
+	Type       schema.Type
 	EnumLabels []string
 	V          Vec
 }

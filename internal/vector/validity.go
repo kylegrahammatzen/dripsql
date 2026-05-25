@@ -1,6 +1,6 @@
 // Validity is a packed bitmap where a set bit means the row is non-null.
 // nil Validity means every row is valid. Allocate only when nullCount > 0.
-package types
+package vector
 
 import (
 	"encoding/binary"

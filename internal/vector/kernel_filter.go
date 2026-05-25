@@ -1,6 +1,6 @@
 // Vectorized filter kernels narrow a SelectionMask in place against col op lit.
 // Word-stride loop over the input mask, no per-row closure or boxing.
-package types
+package vector
 
 import (
 	"bytes"

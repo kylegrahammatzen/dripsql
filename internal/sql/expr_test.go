@@ -5,15 +5,15 @@ package sql
 import (
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 )
 
 func sampleSchema() []BoundColumnDef {
 	return []BoundColumnDef{
-		{ID: 1, Name: "id", Type: types.Int64},
-		{ID: 2, Name: "name", Type: types.Text},
-		{ID: 3, Name: "rating", Type: types.Float64},
-		{ID: 4, Name: "payload", Type: types.JSON},
+		{ID: 1, Name: "id", Type: schema.Int64},
+		{ID: 2, Name: "name", Type: schema.Text},
+		{ID: 3, Name: "rating", Type: schema.Float64},
+		{ID: 4, Name: "payload", Type: schema.JSON},
 	}
 }
 
@@ -32,23 +32,23 @@ func TestBindExpr_ColumnAndLiteral(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BindExpr: %v", err)
 	}
-	if be.Op != ExprColumn || be.Type.Kind != types.KindInt64 || be.ColumnID != 1 {
+	if be.Op != ExprColumn || be.Type.Kind != schema.KindInt64 || be.ColumnID != 1 {
 		t.Fatalf("col bind = %+v", be)
 	}
 	be, _ = bindExprFromSQL(t, "42")
-	if be.Op != ExprLiteral || be.Type.Kind != types.KindInt64 || be.Literal.(int64) != 42 {
+	if be.Op != ExprLiteral || be.Type.Kind != schema.KindInt64 || be.Literal.(int64) != 42 {
 		t.Fatalf("int lit = %+v", be)
 	}
 	be, _ = bindExprFromSQL(t, "2.5")
-	if be.Type.Kind != types.KindFloat64 {
+	if be.Type.Kind != schema.KindFloat64 {
 		t.Fatalf("float lit type = %v", be.Type.Kind)
 	}
 	be, _ = bindExprFromSQL(t, "'hi'")
-	if be.Type.Kind != types.KindText {
+	if be.Type.Kind != schema.KindText {
 		t.Fatalf("text lit type = %v", be.Type.Kind)
 	}
 	be, _ = bindExprFromSQL(t, "true")
-	if be.Type.Kind != types.KindBool {
+	if be.Type.Kind != schema.KindBool {
 		t.Fatalf("bool lit type = %v", be.Type.Kind)
 	}
 }
@@ -64,14 +64,14 @@ func TestBindExpr_ArithmeticResultType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if be.Op != ExprAdd || be.Type.Kind != types.KindInt64 {
+	if be.Op != ExprAdd || be.Type.Kind != schema.KindInt64 {
 		t.Fatalf("int+int = %+v", be)
 	}
 	be, err = bindExprFromSQL(t, "id + 1.5")
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if be.Type.Kind != types.KindFloat64 {
+	if be.Type.Kind != schema.KindFloat64 {
 		t.Fatalf("int+float should widen to float64, got %v", be.Type.Kind)
 	}
 	if _, err := bindExprFromSQL(t, "name + 1"); err == nil {
@@ -87,7 +87,7 @@ func TestBindExpr_Concat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if be.Op != ExprConcat || be.Type.Kind != types.KindText {
+	if be.Op != ExprConcat || be.Type.Kind != schema.KindText {
 		t.Fatalf("concat = %+v", be)
 	}
 	if _, err := bindExprFromSQL(t, "name || 1"); err == nil {
@@ -100,11 +100,11 @@ func TestBindExpr_JSONPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if be.Op != ExprJSONGet || be.Type.Kind != types.KindJSON {
+	if be.Op != ExprJSONGet || be.Type.Kind != schema.KindJSON {
 		t.Fatalf("-> = %+v", be)
 	}
 	be, _ = bindExprFromSQL(t, "payload ->> 'k'")
-	if be.Op != ExprJSONGetText || be.Type.Kind != types.KindText {
+	if be.Op != ExprJSONGetText || be.Type.Kind != schema.KindText {
 		t.Fatalf("->> = %+v", be)
 	}
 	if _, err := bindExprFromSQL(t, "id -> 'k'"); err == nil {
@@ -143,8 +143,8 @@ func TestBindExpr_AggregateRejectedInScalarContext(t *testing.T) {
 
 func TestBindExpr_UUIDColumn_RejectsIncompatibleColumn(t *testing.T) {
 	schema := []BoundColumnDef{
-		{ID: 1, Name: "u", Type: types.UUID},
-		{ID: 2, Name: "n", Type: types.Int64},
+		{ID: 1, Name: "u", Type: schema.UUID},
+		{ID: 2, Name: "n", Type: schema.Int64},
 	}
 	cmp := &BinaryExpr{Left: &ColumnRef{Name: "u"}, Op: BinaryEqual, Right: &ColumnRef{Name: "n"}}
 	if _, err := BindExpr(schema, cmp); err == nil {
@@ -154,8 +154,8 @@ func TestBindExpr_UUIDColumn_RejectsIncompatibleColumn(t *testing.T) {
 
 func TestBindExpr_BytesColumn_RejectsIncompatibleColumn(t *testing.T) {
 	schema := []BoundColumnDef{
-		{ID: 1, Name: "b", Type: types.Bytes},
-		{ID: 2, Name: "f", Type: types.Bool},
+		{ID: 1, Name: "b", Type: schema.Bytes},
+		{ID: 2, Name: "f", Type: schema.Bool},
 	}
 	cmp := &BinaryExpr{Left: &ColumnRef{Name: "b"}, Op: BinaryEqual, Right: &ColumnRef{Name: "f"}}
 	if _, err := BindExpr(schema, cmp); err == nil {
@@ -165,8 +165,8 @@ func TestBindExpr_BytesColumn_RejectsIncompatibleColumn(t *testing.T) {
 
 func TestBindExpr_EnumColumn_RejectsIncompatibleColumn(t *testing.T) {
 	schema := []BoundColumnDef{
-		{ID: 1, Name: "e", Type: types.Named("event"), Labels: []string{"x"}},
-		{ID: 2, Name: "n", Type: types.Int64},
+		{ID: 1, Name: "e", Type: schema.Named("event"), Labels: []string{"x"}},
+		{ID: 2, Name: "n", Type: schema.Int64},
 	}
 	cmp := &BinaryExpr{Left: &ColumnRef{Name: "e"}, Op: BinaryEqual, Right: &ColumnRef{Name: "n"}}
 	if _, err := BindExpr(schema, cmp); err == nil {
@@ -176,8 +176,8 @@ func TestBindExpr_EnumColumn_RejectsIncompatibleColumn(t *testing.T) {
 
 func TestBindExpr_DifferentEnums_Reject(t *testing.T) {
 	schema := []BoundColumnDef{
-		{ID: 1, Name: "a", Type: types.Named("event"), Labels: []string{"x"}},
-		{ID: 2, Name: "b", Type: types.Named("status"), Labels: []string{"y"}},
+		{ID: 1, Name: "a", Type: schema.Named("event"), Labels: []string{"x"}},
+		{ID: 2, Name: "b", Type: schema.Named("status"), Labels: []string{"y"}},
 	}
 	cmp := &BinaryExpr{Left: &ColumnRef{Name: "a"}, Op: BinaryEqual, Right: &ColumnRef{Name: "b"}}
 	if _, err := BindExpr(schema, cmp); err == nil {

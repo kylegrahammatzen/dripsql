@@ -6,7 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 // Codecs return ErrSkip when their preconditions don't fit the Vec. Other
@@ -82,16 +83,16 @@ func ctxU64s(ctx *EncodeContext, n int) []uint64 {
 }
 
 type Codec interface {
-	Encoding() types.Encoding
-	Encode(v types.Vec, ctx *EncodeContext) (payload []byte, err error)
-	Decode(payload []byte, kind types.VecKind, rows int, nullCount int, dst *types.Vec) error
+	Encoding() schema.Encoding
+	Encode(v vector.Vec, ctx *EncodeContext) (payload []byte, err error)
+	Decode(payload []byte, kind vector.VecKind, rows int, nullCount int, dst *vector.Vec) error
 }
 
-var registry = map[types.Encoding]Codec{}
+var registry = map[schema.Encoding]Codec{}
 
 func Register(c Codec) {
 	e := c.Encoding()
-	if e == types.EncodingAuto {
+	if e == schema.EncodingAuto {
 		panic("codec: cannot register EncodingAuto sentinel")
 	}
 	if _, dup := registry[e]; dup {
@@ -100,7 +101,7 @@ func Register(c Codec) {
 	registry[e] = c
 }
 
-func Lookup(e types.Encoding) (Codec, error) {
+func Lookup(e schema.Encoding) (Codec, error) {
 	c, ok := registry[e]
 	if !ok {
 		return nil, fmt.Errorf("codec: no codec registered for %v", e)
@@ -109,7 +110,7 @@ func Lookup(e types.Encoding) (Codec, error) {
 }
 
 // Test-only helper. Production code calls Encode directly via cascade.
-func Estimate(c Codec, v types.Vec) (int, bool) {
+func Estimate(c Codec, v vector.Vec) (int, bool) {
 	ctx := &EncodeContext{Scratch: NewScratchPool()}
 	p, err := c.Encode(v, ctx)
 	if errors.Is(err, ErrSkip) {

@@ -13,9 +13,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 type DB struct {
@@ -33,9 +33,9 @@ type DB struct {
 	lastWriteSpan atomic.Pointer[storage.Span]
 	wal           *storage.WAL
 	nextTxnID     uint64
-	nextCommitTs atomic.Uint64
-	pinnedReadTs map[uint64]int
-	opts         OpenOpts
+	nextCommitTs  atomic.Uint64
+	pinnedReadTs  map[uint64]int
+	opts          OpenOpts
 }
 
 type segCacheEntry struct {
@@ -98,13 +98,13 @@ func OpenWith(path string, opts OpenOpts) (*DB, error) {
 		return nil, err
 	}
 	db := &DB{
-		root:      path,
-		types:     typesByName,
-		tables:    tablesByName,
-		version:   version,
-		plans:     sql.NewPlanCache(256),
-		manifests: make(map[string]*storage.Manifest),
-		segCount:  make(map[string]uint64),
+		root:         path,
+		types:        typesByName,
+		tables:       tablesByName,
+		version:      version,
+		plans:        sql.NewPlanCache(256),
+		manifests:    make(map[string]*storage.Manifest),
+		segCount:     make(map[string]uint64),
 		segCache:     make(map[segCacheKey]*list.Element),
 		segLRU:       list.New(),
 		pinnedReadTs: make(map[uint64]int),
@@ -160,11 +160,11 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) tableDir(name string) string {
-	return filepath.Join(db.root, "segments", types.NormalizeName(name))
+	return filepath.Join(db.root, "segments", schema.NormalizeName(name))
 }
 
 func (db *DB) manifestFor(name string) (*storage.Manifest, error) {
-	key := types.NormalizeName(name)
+	key := schema.NormalizeName(name)
 	if m, ok := db.manifests[key]; ok {
 		return m, nil
 	}
@@ -197,30 +197,30 @@ func parseSegmentID(filename string) (uint64, bool) {
 }
 
 func (db *DB) nextSegmentPath(name string) string {
-	key := types.NormalizeName(name)
+	key := schema.NormalizeName(name)
 	id := db.segCount[key]
 	db.segCount[key] = id + 1
 	return filepath.Join(db.tableDir(key), fmt.Sprintf("%06d.dsv4", id))
 }
 
 func (db *DB) table(name string) (tableEntry, error) {
-	entry, ok := db.tables[types.NormalizeName(name)]
+	entry, ok := db.tables[schema.NormalizeName(name)]
 	if !ok {
 		return tableEntry{}, fmt.Errorf("table %q does not exist", name)
 	}
 	return entry, nil
 }
 
-func columnCodecs(def sql.BoundTableDef) map[string]types.Encoding {
-	var out map[string]types.Encoding
+func columnCodecs(def sql.BoundTableDef) map[string]schema.Encoding {
+	var out map[string]schema.Encoding
 	for _, c := range def.Columns {
-		if c.Codec == types.EncodingAuto {
+		if c.Codec == schema.EncodingAuto {
 			continue
 		}
 		if out == nil {
-			out = make(map[string]types.Encoding, len(def.Columns))
+			out = make(map[string]schema.Encoding, len(def.Columns))
 		}
-		out[types.NormalizeName(c.Name)] = c.Codec
+		out[schema.NormalizeName(c.Name)] = c.Codec
 	}
 	return out
 }
@@ -229,8 +229,8 @@ func (db *DB) boundTable(entry tableEntry) sql.BoundTableDef {
 	cols := make([]sql.BoundColumnDef, len(entry.spec.Columns))
 	for i, col := range entry.spec.Columns {
 		var labels []string
-		if col.Type.Kind == types.KindNamed {
-			if t, ok := db.types[types.NormalizeName(col.Type.Name)]; ok {
+		if col.Type.Kind == schema.KindNamed {
+			if t, ok := db.types[schema.NormalizeName(col.Type.Name)]; ok {
 				labels = append([]string(nil), t.spec.EnumLabels...)
 			}
 		}
@@ -261,8 +261,8 @@ func (db *DB) boundTableByName(name string) (sql.BoundTableDef, error) {
 	return db.boundTable(entry), nil
 }
 
-func (db *DB) registerType(spec types.TypeSpec) error {
-	key := types.NormalizeName(spec.Name)
+func (db *DB) registerType(spec schema.TypeSpec) error {
+	key := schema.NormalizeName(spec.Name)
 	if _, ok := db.types[key]; ok {
 		if spec.IfNotExists {
 			return nil
@@ -280,8 +280,8 @@ func (db *DB) registerType(spec types.TypeSpec) error {
 	return nil
 }
 
-func (db *DB) registerTable(spec types.TableSpec) error {
-	key := types.NormalizeName(spec.Name)
+func (db *DB) registerTable(spec schema.TableSpec) error {
+	key := schema.NormalizeName(spec.Name)
 	if _, ok := db.tables[key]; ok {
 		if spec.IfNotExists {
 			return nil
@@ -305,17 +305,17 @@ func (db *DB) registerTable(spec types.TableSpec) error {
 	return nil
 }
 
-func (db *DB) resolveTableTypes(spec *types.TableSpec) error {
-	spec.Name = types.NormalizeName(spec.Name)
+func (db *DB) resolveTableTypes(spec *schema.TableSpec) error {
+	spec.Name = schema.NormalizeName(spec.Name)
 	for i := range spec.Columns {
 		col := &spec.Columns[i]
-		col.Name = types.NormalizeName(col.Name)
-		if col.Type.Kind == types.KindNamed {
-			name := types.NormalizeName(col.Type.Name)
+		col.Name = schema.NormalizeName(col.Name)
+		if col.Type.Kind == schema.KindNamed {
+			name := schema.NormalizeName(col.Type.Name)
 			if _, ok := db.types[name]; !ok {
 				return fmt.Errorf("unknown type %q", col.Type.Name)
 			}
-			col.Type = types.Named(name)
+			col.Type = schema.Named(name)
 		}
 	}
 	return nil
@@ -360,7 +360,7 @@ func (db *DB) execStmt(ctx context.Context, stmt sql.Stmt) (int64, error) {
 	switch plan.Kind {
 	case sql.PlanCreateType:
 		spec := plan.TypeSpec
-		spec.Name = types.NormalizeName(spec.Name)
+		spec.Name = schema.NormalizeName(spec.Name)
 		if err := spec.Validate(); err != nil {
 			return 0, err
 		}

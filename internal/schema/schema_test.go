@@ -1,6 +1,6 @@
 // Schema validation tests: TableSpec/ColumnSpec/TableOptions/TypeSpec invariants
 // and the CompressionPolicy AllowsFlate/AllowsZstd matrix.
-package types
+package schema
 
 import "testing"
 

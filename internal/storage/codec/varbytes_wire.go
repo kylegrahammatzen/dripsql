@@ -6,10 +6,10 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-func varbytesWireSize(v types.Vec) int {
+func varbytesWireSize(v vector.Vec) int {
 	rows := int(v.Len)
 	n := 4 * rows
 	vb := v.Var()
@@ -19,7 +19,7 @@ func varbytesWireSize(v types.Vec) int {
 	return n
 }
 
-func writeVarbytesWire(dst []byte, v types.Vec) {
+func writeVarbytesWire(dst []byte, v vector.Vec) {
 	rows := int(v.Len)
 	vb := v.Var()
 	pos := 0
@@ -32,9 +32,9 @@ func writeVarbytesWire(dst []byte, v types.Vec) {
 	}
 }
 
-func readVarbytesWire(src []byte, kind types.VecKind, rows int, dst *types.Vec) error {
+func readVarbytesWire(src []byte, kind vector.VecKind, rows int, dst *vector.Vec) error {
 	dataHint := max(len(src)-4*rows, 0)
-	*dst = types.NewVarVec(kind, rows, dataHint)
+	*dst = vector.NewVarVec(kind, rows, dataHint)
 	vb := dst.Var()
 	pos := 0
 	for i := range rows {

@@ -15,8 +15,8 @@ func TestWALRecords_RoundTrip(t *testing.T) {
 	defer w.Close()
 
 	intent := ManifestIntent{
-		TxnID: 7,
-		Adds:  []ManifestSegmentAdd{{Path: "/seg1.dsv4", Rows: 1000, ContentHash: 0xABCD}},
+		TxnID:     7,
+		Adds:      []ManifestSegmentAdd{{Path: "/seg1.dsv4", Rows: 1000, ContentHash: 0xABCD}},
 		DVUpdates: []ManifestDVUpdate{{SegmentPath: "/seg0.dsv4", DVPath: "/seg0.dv", Rows: 800}},
 	}
 	if _, err := w.AppendManifestIntent(intent); err != nil {

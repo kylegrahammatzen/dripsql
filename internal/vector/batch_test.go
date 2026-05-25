@@ -1,8 +1,12 @@
 // Batch validation tests: shape consistency, dup name (case-insensitive) detection,
 // malformed-Vec rejection, EnumLabels defensive clone, SelectionMask shape match.
-package types
+package vector
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+)
 
 func TestBatch_Empty(t *testing.T) {
 	b, err := NewBatch(nil)
@@ -15,8 +19,8 @@ func TestBatch_Empty(t *testing.T) {
 }
 
 func TestBatch_ValidatesShape(t *testing.T) {
-	c1 := Column{Name: "id", Type: Int64, V: NewVec(VecInt64, 4)}
-	c2 := Column{Name: "name", Type: Text, V: NewVarVec(VecText, 4, 0)}
+	c1 := Column{Name: "id", Type: schema.Int64, V: NewVec(VecInt64, 4)}
+	c2 := Column{Name: "name", Type: schema.Text, V: NewVarVec(VecText, 4, 0)}
 	b, err := NewBatch([]Column{c1, c2})
 	if err != nil {
 		t.Fatalf("good batch: %v", err)
@@ -24,13 +28,13 @@ func TestBatch_ValidatesShape(t *testing.T) {
 	if b.Len != 4 || len(b.Columns) != 2 {
 		t.Fatalf("len=%d cols=%d", b.Len, len(b.Columns))
 	}
-	if got, ok := b.ColumnByName("id"); !ok || got.Type != Int64 {
+	if got, ok := b.ColumnByName("id"); !ok || got.Type != schema.Int64 {
 		t.Fatal("ColumnByName lookup failed")
 	}
 }
 
 func TestBatch_ColumnByNameCaseInsensitive(t *testing.T) {
-	c := Column{Name: "User_ID", Type: Int64, V: NewVec(VecInt64, 1)}
+	c := Column{Name: "User_ID", Type: schema.Int64, V: NewVec(VecInt64, 1)}
 	b, err := NewBatch([]Column{c})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
@@ -43,60 +47,60 @@ func TestBatch_ColumnByNameCaseInsensitive(t *testing.T) {
 }
 
 func TestBatch_RejectsMismatchedLen(t *testing.T) {
-	c1 := Column{Name: "a", Type: Int64, V: NewVec(VecInt64, 4)}
-	c2 := Column{Name: "b", Type: Int64, V: NewVec(VecInt64, 5)}
+	c1 := Column{Name: "a", Type: schema.Int64, V: NewVec(VecInt64, 4)}
+	c2 := Column{Name: "b", Type: schema.Int64, V: NewVec(VecInt64, 5)}
 	if _, err := NewBatch([]Column{c1, c2}); err == nil {
 		t.Fatal("mismatched column length must error")
 	}
 }
 
 func TestBatch_RejectsDupAndEmptyNames(t *testing.T) {
-	c1 := Column{Name: "x", Type: Int64, V: NewVec(VecInt64, 1)}
-	c2 := Column{Name: "x", Type: Int64, V: NewVec(VecInt64, 1)}
+	c1 := Column{Name: "x", Type: schema.Int64, V: NewVec(VecInt64, 1)}
+	c2 := Column{Name: "x", Type: schema.Int64, V: NewVec(VecInt64, 1)}
 	if _, err := NewBatch([]Column{c1, c2}); err == nil {
 		t.Fatal("duplicate names must error")
 	}
-	c3 := Column{Name: "  ", Type: Int64, V: NewVec(VecInt64, 1)}
+	c3 := Column{Name: "  ", Type: schema.Int64, V: NewVec(VecInt64, 1)}
 	if _, err := NewBatch([]Column{c3}); err == nil {
 		t.Fatal("whitespace-only names must error")
 	}
 }
 
 func TestBatch_RejectsKindMismatch(t *testing.T) {
-	c := Column{Name: "x", Type: Int64, V: NewVec(VecInt32, 1)}
+	c := Column{Name: "x", Type: schema.Int64, V: NewVec(VecInt32, 1)}
 	if _, err := NewBatch([]Column{c}); err == nil {
 		t.Fatal("type/veckind mismatch must error")
 	}
 }
 
 func TestBatch_RejectsMalformedVec(t *testing.T) {
-	c := Column{Name: "x", Type: Int64, V: Vec{Kind: VecInt64, Len: 1}}
+	c := Column{Name: "x", Type: schema.Int64, V: Vec{Kind: VecInt64, Len: 1}}
 	if _, err := NewBatch([]Column{c}); err == nil {
 		t.Fatal("Vec with Len>0 but nil data must error")
 	}
-	c2 := Column{Name: "y", Type: Int64, V: Vec{Kind: VecInt64, Len: 5, Cap: 2}}
+	c2 := Column{Name: "y", Type: schema.Int64, V: Vec{Kind: VecInt64, Len: 5, Cap: 2}}
 	if _, err := NewBatch([]Column{c2}); err == nil {
 		t.Fatal("Vec with Len>Cap must error")
 	}
 }
 
 func TestBatch_DupNamesCaseInsensitive(t *testing.T) {
-	c1 := Column{Name: "id", Type: Int64, V: NewVec(VecInt64, 1)}
-	c2 := Column{Name: "ID", Type: Int64, V: NewVec(VecInt64, 1)}
+	c1 := Column{Name: "id", Type: schema.Int64, V: NewVec(VecInt64, 1)}
+	c2 := Column{Name: "ID", Type: schema.Int64, V: NewVec(VecInt64, 1)}
 	if _, err := NewBatch([]Column{c1, c2}); err == nil {
 		t.Fatal("case-different duplicate names must error")
 	}
 }
 
 func TestBatch_RejectsOverflow(t *testing.T) {
-	c := Column{Name: "x", Type: Int64, V: Vec{Kind: VecInt64, Len: StandardBatchRows + 1}}
+	c := Column{Name: "x", Type: schema.Int64, V: Vec{Kind: VecInt64, Len: StandardBatchRows + 1}}
 	if _, err := NewBatch([]Column{c}); err == nil {
 		t.Fatal("batch exceeding StandardBatchRows must error")
 	}
 }
 
 func TestBatch_TrimsName(t *testing.T) {
-	c := Column{Name: "  id  ", Type: Int64, V: NewVec(VecInt64, 1)}
+	c := Column{Name: "  id  ", Type: schema.Int64, V: NewVec(VecInt64, 1)}
 	b, err := NewBatch([]Column{c})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -108,7 +112,7 @@ func TestBatch_TrimsName(t *testing.T) {
 
 func TestBatch_EnumLabelsCloned(t *testing.T) {
 	labels := []string{"a", "b"}
-	c := Column{Name: "s", Type: Named("status"), EnumLabels: labels, V: NewVec(VecEnum32, 1)}
+	c := Column{Name: "s", Type: schema.Named("status"), EnumLabels: labels, V: NewVec(VecEnum32, 1)}
 	b, err := NewBatch([]Column{c})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -120,7 +124,7 @@ func TestBatch_EnumLabelsCloned(t *testing.T) {
 }
 
 func TestBatch_SetSelValidatesShape(t *testing.T) {
-	c := Column{Name: "x", Type: Int64, V: NewVec(VecInt64, 8)}
+	c := Column{Name: "x", Type: schema.Int64, V: NewVec(VecInt64, 8)}
 	b, err := NewBatch([]Column{c})
 	if err != nil {
 		t.Fatalf("err: %v", err)

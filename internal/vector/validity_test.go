@@ -1,6 +1,6 @@
 // Validity invariant tests: nil-as-all-valid, null-count verification, bounds checks.
 // Validity is the boundary primitive between wire payloads and runtime nullity.
-package types
+package vector
 
 import "testing"
 

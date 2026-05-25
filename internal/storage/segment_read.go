@@ -8,13 +8,14 @@ import (
 	"os"
 	"sync"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type SegmentColumn struct {
 	Name       string
-	Kind       types.VecKind
+	Kind       vector.VecKind
 	EnumLabels []string
 	Rows       uint32
 	NullCount  uint32
@@ -29,13 +30,13 @@ type SegmentColumn struct {
 }
 
 type Segment struct {
-	f            *os.File
-	path         string
-	bodyEnd      int64
-	sidecarOff   int64
-	sidecarLen   int64
-	Cols         []SegmentColumn
-	DV           types.Validity
+	f          *os.File
+	path       string
+	bodyEnd    int64
+	sidecarOff int64
+	sidecarLen int64
+	Cols       []SegmentColumn
+	DV         vector.Validity
 	// CommitTs is the manifest record's commit timestamp; set by the engine when opening
 	// the segment so the scan visibility filter can skip segments newer than a reader's
 	// ReadTs. Zero on standalone OpenSegment paths (tests, tooling), which treat the
@@ -274,8 +275,8 @@ func validateColumnDirectory(c *SegmentColumn, bodyEnd int64) error {
 		if p.NullCount > p.Rows {
 			return fmt.Errorf("page %d NullCount %d > Rows %d", i, p.NullCount, p.Rows)
 		}
-		if types.VecKind(p.Kind) != c.Kind {
-			return fmt.Errorf("page %d kind %v != column kind %v", i, types.VecKind(p.Kind), c.Kind)
+		if vector.VecKind(p.Kind) != c.Kind {
+			return fmt.Errorf("page %d kind %v != column kind %v", i, vector.VecKind(p.Kind), c.Kind)
 		}
 		if p.RowStart != nextRowStart {
 			return fmt.Errorf("page %d RowStart %d != expected %d (non-contiguous)", i, p.RowStart, nextRowStart)
@@ -305,26 +306,26 @@ func validateColumnDirectory(c *SegmentColumn, bodyEnd int64) error {
 
 func (s *Segment) Close() error { return s.f.Close() }
 
-func (s *Segment) ReadPage(colIdx, pageIdx int) (types.Vec, error) {
+func (s *Segment) ReadPage(colIdx, pageIdx int) (vector.Vec, error) {
 	v, _, err := s.ReadPageInto(colIdx, pageIdx, nil)
 	return v, err
 }
 
 // Caller-supplied scratch is grown if too small and returned for reuse on the next call.
-func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (types.Vec, []byte, error) {
+func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (vector.Vec, []byte, error) {
 	if err := s.ValidateColumns(); err != nil {
-		return types.Vec{}, scratch, err
+		return vector.Vec{}, scratch, err
 	}
 	if colIdx < 0 || colIdx >= len(s.Cols) {
-		return types.Vec{}, scratch, fmt.Errorf("ReadPage: col %d out of range [0, %d)", colIdx, len(s.Cols))
+		return vector.Vec{}, scratch, fmt.Errorf("ReadPage: col %d out of range [0, %d)", colIdx, len(s.Cols))
 	}
 	col := &s.Cols[colIdx]
 	if pageIdx < 0 || pageIdx >= len(col.Pages) {
-		return types.Vec{}, scratch, fmt.Errorf("ReadPage: page %d out of range [0, %d)", pageIdx, len(col.Pages))
+		return vector.Vec{}, scratch, fmt.Errorf("ReadPage: page %d out of range [0, %d)", pageIdx, len(col.Pages))
 	}
 	page := col.Pages[pageIdx]
 	rows := int(page.Rows)
-	kind := types.VecKind(page.Kind)
+	kind := vector.VecKind(page.Kind)
 
 	if page.Flags&PageFlagAllNull != 0 {
 		v := allocVecForKind(kind, rows)
@@ -339,38 +340,38 @@ func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (types.Vec, 
 	}
 	ioStart := nowNanos()
 	if _, err := s.f.ReadAt(scratch, int64(page.PayloadOffset)); err != nil {
-		return types.Vec{}, scratch, fmt.Errorf("ReadPage: read payload: %w", err)
+		return vector.Vec{}, scratch, fmt.Errorf("ReadPage: read payload: %w", err)
 	}
 	addIORead(nowNanos() - ioStart)
 
 	innerPayload := scratch
-	var validity types.Validity
+	var validity vector.Validity
 	if page.NullCount > 0 {
-		words := types.ValidityWords(rows)
+		words := vector.ValidityWords(rows)
 		need := words * 8
 		if len(scratch) < need {
-			return types.Vec{}, scratch, fmt.Errorf("ReadPage: validity prefix truncated: have %d need %d", len(scratch), need)
+			return vector.Vec{}, scratch, fmt.Errorf("ReadPage: validity prefix truncated: have %d need %d", len(scratch), need)
 		}
-		v, _, err := types.UnmarshalValidity(scratch[:need], rows, int(page.NullCount), nil)
+		v, _, err := vector.UnmarshalValidity(scratch[:need], rows, int(page.NullCount), nil)
 		if err != nil {
-			return types.Vec{}, scratch, fmt.Errorf("ReadPage: validity: %w", err)
+			return vector.Vec{}, scratch, fmt.Errorf("ReadPage: validity: %w", err)
 		}
 		validity = v
 		innerPayload = scratch[need:]
 	}
 
-	enc, ok := types.EncodingFromWire(page.Encoding)
+	enc, ok := schema.EncodingFromWire(page.Encoding)
 	if !ok {
-		return types.Vec{}, scratch, fmt.Errorf("ReadPage: unknown encoding wire byte %d", page.Encoding)
+		return vector.Vec{}, scratch, fmt.Errorf("ReadPage: unknown encoding wire byte %d", page.Encoding)
 	}
 	c, err := codec.Lookup(enc)
 	if err != nil {
-		return types.Vec{}, scratch, err
+		return vector.Vec{}, scratch, err
 	}
-	var v types.Vec
+	var v vector.Vec
 	decStart := nowNanos()
 	if err := c.Decode(innerPayload, kind, rows, int(page.NullCount), &v); err != nil {
-		return types.Vec{}, scratch, fmt.Errorf("ReadPage: decode: %w", err)
+		return vector.Vec{}, scratch, fmt.Errorf("ReadPage: decode: %w", err)
 	}
 	addDecode(nowNanos() - decStart)
 	v.Valid = validity
@@ -381,7 +382,7 @@ func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (types.Vec, 
 // invoking the codec decoder. Predicate-on-encoded evaluation hooks in here to inspect the
 // encoded bytes directly so a column that exists only for filtering does not have to pay
 // the full decode + materialize cost.
-func (s *Segment) ReadPagePayload(colIdx, pageIdx int, scratch []byte) (innerPayload []byte, validity types.Validity, allNull bool, scratchOut []byte, err error) {
+func (s *Segment) ReadPagePayload(colIdx, pageIdx int, scratch []byte) (innerPayload []byte, validity vector.Validity, allNull bool, scratchOut []byte, err error) {
 	if colIdx < 0 || colIdx >= len(s.Cols) {
 		return nil, nil, false, scratch, fmt.Errorf("ReadPagePayload: col %d out of range [0, %d)", colIdx, len(s.Cols))
 	}
@@ -406,12 +407,12 @@ func (s *Segment) ReadPagePayload(colIdx, pageIdx int, scratch []byte) (innerPay
 	addIORead(nowNanos() - ioStart)
 	innerPayload = scratch
 	if page.NullCount > 0 {
-		words := types.ValidityWords(rows)
+		words := vector.ValidityWords(rows)
 		need := words * 8
 		if len(scratch) < need {
 			return nil, nil, false, scratch, fmt.Errorf("ReadPagePayload: validity prefix truncated: have %d need %d", len(scratch), need)
 		}
-		v, _, verr := types.UnmarshalValidity(scratch[:need], rows, int(page.NullCount), nil)
+		v, _, verr := vector.UnmarshalValidity(scratch[:need], rows, int(page.NullCount), nil)
 		if verr != nil {
 			return nil, nil, false, scratch, fmt.Errorf("ReadPagePayload: validity: %w", verr)
 		}
@@ -421,18 +422,18 @@ func (s *Segment) ReadPagePayload(colIdx, pageIdx int, scratch []byte) (innerPay
 	return innerPayload, validity, false, scratch, nil
 }
 
-func allocVecForKind(k types.VecKind, rows int) types.Vec {
+func allocVecForKind(k vector.VecKind, rows int) vector.Vec {
 	if k.IsVarBytes() {
-		return types.NewVarVec(k, rows, 0)
+		return vector.NewVarVec(k, rows, 0)
 	}
-	return types.NewVec(k, rows)
+	return vector.NewVec(k, rows)
 }
 
-func allInvalidValidity(rows int) types.Validity {
+func allInvalidValidity(rows int) vector.Validity {
 	if rows == 0 {
 		return nil
 	}
-	return make(types.Validity, types.ValidityWords(rows))
+	return make(vector.Validity, vector.ValidityWords(rows))
 }
 
 // footerLayout captures the trailer offsets parsed from the suffix: where the
@@ -520,7 +521,7 @@ func parseFooter(body []byte) ([]SegmentColumn, error) {
 	for i := range cols {
 		c := &cols[i]
 		c.Name = r.LenPrefixedString()
-		c.Kind = types.VecKind(r.U8())
+		c.Kind = vector.VecKind(r.U8())
 		encodingFlags := r.U8()
 		if encodingFlags != 0 {
 			return nil, fmt.Errorf("parseFooter: col %d encoding_flags %d != 0", i, encodingFlags)

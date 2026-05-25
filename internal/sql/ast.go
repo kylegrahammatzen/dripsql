@@ -248,19 +248,19 @@ type CaseExpr struct {
 	Else Expr
 }
 
-func (*ColumnRef) isExpr()   {}
-func (*StarRef) isExpr()     {}
-func (*FuncCall) isExpr()    {}
-func (*Literal) isExpr()     {}
-func (*BinaryExpr) isExpr()  {}
-func (*BetweenExpr) isExpr() {}
-func (*InExpr) isExpr()      {}
-func (*AndExpr) isExpr()     {}
-func (*OrExpr) isExpr()      {}
+func (*ColumnRef) isExpr()    {}
+func (*StarRef) isExpr()      {}
+func (*FuncCall) isExpr()     {}
+func (*Literal) isExpr()      {}
+func (*BinaryExpr) isExpr()   {}
+func (*BetweenExpr) isExpr()  {}
+func (*InExpr) isExpr()       {}
+func (*AndExpr) isExpr()      {}
+func (*OrExpr) isExpr()       {}
 func (*CaseExpr) isExpr()     {}
 func (*SubqueryExpr) isExpr() {}
 func (*ExistsExpr) isExpr()   {}
-func (*NotExpr) isExpr()     {}
+func (*NotExpr) isExpr()      {}
 
 type BinaryOp uint8
 

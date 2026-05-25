@@ -1,6 +1,6 @@
 // VecKind invariant tests: every kind's metadata-table row must agree with the
 // per-kind FixedWidth, IsVarBytes, IsFORPackable, and String results.
-package types
+package vector
 
 import "testing"
 

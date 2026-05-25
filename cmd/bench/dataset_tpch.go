@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/engine"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 // Days since 1992-01-01 for the windows TPC-H Q1/Q6 use.
@@ -33,8 +33,8 @@ func setupLineitem(ctx context.Context, db *engine.DB, rows int, segmentRows int
 	if _, err := db.Exec(ctx, ddl); err != nil {
 		return err
 	}
-	if segmentRows <= 0 || segmentRows > types.StandardBatchRows {
-		segmentRows = types.StandardBatchRows
+	if segmentRows <= 0 || segmentRows > vector.StandardBatchRows {
+		segmentRows = vector.StandardBatchRows
 	}
 	flags := []string{"A", "N", "R"}
 	stats := []string{"F", "O"}

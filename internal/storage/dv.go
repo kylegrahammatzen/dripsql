@@ -7,16 +7,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func DVPath(segmentPath string) string { return segmentPath + ".dv" }
 
-func loadDV(path string, rows int) (types.Validity, error) {
+func loadDV(path string, rows int) (vector.Validity, error) {
 	return loadDVAtPath(DVPath(path), rows)
 }
 
-func loadDVAtPath(dvPath string, rows int) (types.Validity, error) {
+func loadDVAtPath(dvPath string, rows int) (vector.Validity, error) {
 	data, err := os.ReadFile(dvPath)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -24,11 +24,11 @@ func loadDVAtPath(dvPath string, rows int) (types.Validity, error) {
 	if err != nil {
 		return nil, err
 	}
-	want := types.ValidityWords(rows) * 8
+	want := vector.ValidityWords(rows) * 8
 	if len(data) != want {
 		return nil, fmt.Errorf("DV %q is %d bytes, want %d for %d rows", dvPath, len(data), want, rows)
 	}
-	v := make(types.Validity, types.ValidityWords(rows))
+	v := make(vector.Validity, vector.ValidityWords(rows))
 	for i := range v {
 		base := i * 8
 		v[i] = uint64(data[base]) |
@@ -45,7 +45,7 @@ func loadDVAtPath(dvPath string, rows int) (types.Validity, error) {
 
 // WriteDV serializes v atomically to <segmentPath>.dv. nil v removes the .dv file.
 // Used by DELETE which writes the conventional DV path.
-func WriteDV(segmentPath string, rows int, v types.Validity) error {
+func WriteDV(segmentPath string, rows int, v vector.Validity) error {
 	dvPath := DVPath(segmentPath)
 	if v == nil {
 		err := os.Remove(dvPath)
@@ -60,8 +60,8 @@ func WriteDV(segmentPath string, rows int, v types.Validity) error {
 // WriteDVAtPath writes a DV to a specific path (atomic via tmp+rename+dir-fsync). Used by
 // UPDATE which stages a versioned DV file alongside its segment before the transaction
 // manifest record makes it visible.
-func WriteDVAtPath(dvPath string, rows int, v types.Validity) error {
-	want := types.ValidityWords(rows)
+func WriteDVAtPath(dvPath string, rows int, v vector.Validity) error {
+	want := vector.ValidityWords(rows)
 	if len(v) != want {
 		return fmt.Errorf("WriteDV: validity has %d words, want %d for %d rows", len(v), want, rows)
 	}

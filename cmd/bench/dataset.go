@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/engine"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type dataset struct {
@@ -65,8 +65,8 @@ func setupUsers(ctx context.Context, db *engine.DB, rows int, segmentRows int) e
 	if _, err := db.Exec(ctx, "CREATE TABLE users (id int64 NOT NULL, name text NOT NULL, age int64 NOT NULL, category text NOT NULL, price float64 NOT NULL)"); err != nil {
 		return err
 	}
-	if segmentRows <= 0 || segmentRows > types.StandardBatchRows {
-		segmentRows = types.StandardBatchRows
+	if segmentRows <= 0 || segmentRows > vector.StandardBatchRows {
+		segmentRows = vector.StandardBatchRows
 	}
 	cats := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
 	r := rand.New(rand.NewPCG(1, 2))

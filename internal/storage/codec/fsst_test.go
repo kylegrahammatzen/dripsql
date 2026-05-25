@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestFSST_RoundTrip(t *testing.T) {
@@ -21,7 +22,7 @@ func TestFSST_RoundTrip(t *testing.T) {
 		"",
 		"x",
 	}
-	v := types.NewVarVec(types.VecText, len(inputs), 0)
+	v := vector.NewVarVec(vector.VecText, len(inputs), 0)
 	vb := v.Var()
 	for i, s := range inputs {
 		vb.AppendString(i, s)
@@ -31,8 +32,8 @@ func TestFSST_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	var got types.Vec
-	if err := codec.Decode(payload, types.VecText, len(inputs), 0, &got); err != nil {
+	var got vector.Vec
+	if err := codec.Decode(payload, vector.VecText, len(inputs), 0, &got); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
 	gb := got.Var()
@@ -45,7 +46,7 @@ func TestFSST_RoundTrip(t *testing.T) {
 
 func TestFSST_CascadeBeatsPlainOnRepetition(t *testing.T) {
 	const n = 256
-	v := types.NewVarVec(types.VecText, n, 0)
+	v := vector.NewVarVec(vector.VecText, n, 0)
 	vb := v.Var()
 	for i := range n {
 		vb.AppendString(i, fmt.Sprintf("https://example.com/page/%05d.html", i))
@@ -54,7 +55,7 @@ func TestFSST_CascadeBeatsPlainOnRepetition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	if enc != types.EncodingFSST {
+	if enc != schema.EncodingFSST {
 		t.Fatalf("expected FSST winner, got %v (%d bytes)", enc, len(payload))
 	}
 }

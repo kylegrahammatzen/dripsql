@@ -7,7 +7,8 @@ import (
 	"math"
 	"time"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func BindExpr(columns []BoundColumnDef, expr Expr) (BoundExpr, error) {
@@ -53,7 +54,7 @@ func bindExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
 		if err != nil {
 			return BoundExpr{}, err
 		}
-		return BoundExpr{Op: ExprBetween, Type: types.Bool, Args: []BoundExpr{target, low, high}}, nil
+		return BoundExpr{Op: ExprBetween, Type: schema.Bool, Args: []BoundExpr{target, low, high}}, nil
 	case *InExpr:
 		target, err := bindExpr(columns, e.Expr)
 		if err != nil {
@@ -73,25 +74,25 @@ func bindExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
 			}
 			args = append(args, bv)
 		}
-		return BoundExpr{Op: ExprIn, Type: types.Bool, Args: args, Not: e.Not}, nil
+		return BoundExpr{Op: ExprIn, Type: schema.Bool, Args: args, Not: e.Not}, nil
 	case *AndExpr:
 		left, right, err := bindBinary(columns, e.Left, e.Right)
 		if err != nil {
 			return BoundExpr{}, err
 		}
-		return BoundExpr{Op: ExprAnd, Type: types.Bool, Args: []BoundExpr{left, right}}, nil
+		return BoundExpr{Op: ExprAnd, Type: schema.Bool, Args: []BoundExpr{left, right}}, nil
 	case *OrExpr:
 		left, right, err := bindBinary(columns, e.Left, e.Right)
 		if err != nil {
 			return BoundExpr{}, err
 		}
-		return BoundExpr{Op: ExprOr, Type: types.Bool, Args: []BoundExpr{left, right}}, nil
+		return BoundExpr{Op: ExprOr, Type: schema.Bool, Args: []BoundExpr{left, right}}, nil
 	case *NotExpr:
 		child, err := bindExpr(columns, e.Expr)
 		if err != nil {
 			return BoundExpr{}, err
 		}
-		return BoundExpr{Op: ExprNot, Type: types.Bool, Args: []BoundExpr{child}}, nil
+		return BoundExpr{Op: ExprNot, Type: schema.Bool, Args: []BoundExpr{child}}, nil
 	case *CaseExpr:
 		return bindCaseExpr(columns, e)
 	case *SubqueryExpr:
@@ -127,7 +128,7 @@ func bindInSubqueryExpr(columns map[string]BoundColumnDef, target BoundExpr, e *
 		return BoundExpr{}, fmt.Errorf("IN subquery: inner must return exactly one column, got %d", len(sub.Rel.Outputs))
 	}
 	sub.OuterRefs = refs
-	return BoundExpr{Op: ExprInSubquery, Type: types.Bool, Args: []BoundExpr{target}, SubPlan: sub, Not: not}, nil
+	return BoundExpr{Op: ExprInSubquery, Type: schema.Bool, Args: []BoundExpr{target}, SubPlan: sub, Not: not}, nil
 }
 
 func bindExistsExpr(columns map[string]BoundColumnDef, e *ExistsExpr) (BoundExpr, error) {
@@ -147,7 +148,7 @@ func bindExistsExpr(columns map[string]BoundColumnDef, e *ExistsExpr) (BoundExpr
 		return BoundExpr{}, fmt.Errorf("EXISTS: inner did not yield a query plan")
 	}
 	sub.OuterRefs = refs
-	return BoundExpr{Op: ExprExists, Type: types.Bool, SubPlan: sub, Not: e.Not}, nil
+	return BoundExpr{Op: ExprExists, Type: schema.Bool, SubPlan: sub, Not: e.Not}, nil
 }
 
 func bindSubqueryExpr(columns map[string]BoundColumnDef, e *SubqueryExpr) (BoundExpr, error) {
@@ -179,13 +180,13 @@ func bindCaseExpr(columns map[string]BoundColumnDef, e *CaseExpr) (BoundExpr, er
 		return BoundExpr{}, fmt.Errorf("CASE requires at least one WHEN clause")
 	}
 	args := make([]BoundExpr, 0, 2*len(e.When)+1)
-	var resultType types.Type
+	var resultType schema.Type
 	for i, wc := range e.When {
 		whenBound, err := bindExpr(columns, wc.When)
 		if err != nil {
 			return BoundExpr{}, fmt.Errorf("CASE WHEN %d: %w", i, err)
 		}
-		if whenBound.Type.Kind != types.KindBool {
+		if whenBound.Type.Kind != schema.KindBool {
 			return BoundExpr{}, fmt.Errorf("CASE WHEN %d: predicate must be boolean, got %s", i, whenBound.Type)
 		}
 		thenBound, err := bindExpr(columns, wc.Then)
@@ -231,13 +232,13 @@ func bindBinaryExpr(columns map[string]BoundColumnDef, e *BinaryExpr) (BoundExpr
 		return BoundExpr{Op: op, Type: typ, Args: []BoundExpr{left, right}}, nil
 	}
 	if e.Op == BinaryConcat {
-		if left.Type.Kind != types.KindText {
+		if left.Type.Kind != schema.KindText {
 			return BoundExpr{}, fmt.Errorf("text expressions require a text left")
 		}
-		if right.Type.Kind != types.KindText {
+		if right.Type.Kind != schema.KindText {
 			return BoundExpr{}, fmt.Errorf("text expressions require a text right")
 		}
-		return BoundExpr{Op: ExprConcat, Type: types.Text, Args: []BoundExpr{left, right}}, nil
+		return BoundExpr{Op: ExprConcat, Type: schema.Text, Args: []BoundExpr{left, right}}, nil
 	}
 	op, err := bindBinaryOp(e.Op)
 	if err != nil {
@@ -246,20 +247,20 @@ func bindBinaryExpr(columns map[string]BoundColumnDef, e *BinaryExpr) (BoundExpr
 	if err := validateWhereComparison(left, op, right); err != nil {
 		return BoundExpr{}, err
 	}
-	return BoundExpr{Op: op, Type: types.Bool, Args: []BoundExpr{left, right}}, nil
+	return BoundExpr{Op: op, Type: schema.Bool, Args: []BoundExpr{left, right}}, nil
 }
 
 func bindJSONPathExpr(op BinaryOp, left, right BoundExpr) (BoundExpr, error) {
-	if left.Type.Kind != types.KindJSON && left.Type.Kind != types.KindText {
+	if left.Type.Kind != schema.KindJSON && left.Type.Kind != schema.KindText {
 		return BoundExpr{}, fmt.Errorf("JSON path operator requires a JSON or text left operand")
 	}
-	if right.Type.Kind != types.KindText && !isIntegerExpr(right) {
+	if right.Type.Kind != schema.KindText && !isIntegerExpr(right) {
 		return BoundExpr{}, fmt.Errorf("JSON path operator requires a text key or integer index")
 	}
-	out := types.JSON
+	out := schema.JSON
 	bound := ExprJSONGet
 	if op == BinaryJSONGetText {
-		out = types.Text
+		out = schema.Text
 		bound = ExprJSONGetText
 	}
 	return BoundExpr{Op: bound, Type: out, Args: []BoundExpr{left, right}}, nil
@@ -278,7 +279,7 @@ func bindBinary(columns map[string]BoundColumnDef, l, r Expr) (BoundExpr, BoundE
 }
 
 func bindScalarCall(columns map[string]BoundColumnDef, call *FuncCall) (BoundExpr, error) {
-	name := types.NormalizeName(call.Name)
+	name := schema.NormalizeName(call.Name)
 	switch name {
 	case "lower", "upper":
 		if len(call.Args) != 1 {
@@ -292,7 +293,7 @@ func bindScalarCall(columns map[string]BoundColumnDef, call *FuncCall) (BoundExp
 		if name == "upper" {
 			op = ExprUpper
 		}
-		return BoundExpr{Op: op, Type: types.Text, Args: []BoundExpr{arg}}, nil
+		return BoundExpr{Op: op, Type: schema.Text, Args: []BoundExpr{arg}}, nil
 	case "substring", "substr":
 		if len(call.Args) < 2 || len(call.Args) > 3 {
 			return BoundExpr{}, fmt.Errorf("substring() requires 2 or 3 arguments")
@@ -319,7 +320,7 @@ func bindScalarCall(columns map[string]BoundColumnDef, call *FuncCall) (BoundExp
 			}
 			args = append(args, length)
 		}
-		return BoundExpr{Op: ExprSubstring, Type: types.Text, Args: args}, nil
+		return BoundExpr{Op: ExprSubstring, Type: schema.Text, Args: args}, nil
 	case "length":
 		if len(call.Args) != 1 {
 			return BoundExpr{}, fmt.Errorf("length() requires exactly one argument")
@@ -329,32 +330,32 @@ func bindScalarCall(columns map[string]BoundColumnDef, call *FuncCall) (BoundExp
 			return BoundExpr{}, err
 		}
 		switch arg.Type.Kind {
-		case types.KindText, types.KindBytes, types.KindJSON:
+		case schema.KindText, schema.KindBytes, schema.KindJSON:
 		default:
 			return BoundExpr{}, fmt.Errorf("length() argument must be text, bytes, or json")
 		}
-		return BoundExpr{Op: ExprLength, Type: types.Int64, Args: []BoundExpr{arg}}, nil
+		return BoundExpr{Op: ExprLength, Type: schema.Int64, Args: []BoundExpr{arg}}, nil
 	case "coalesce":
 		if len(call.Args) == 0 {
 			return BoundExpr{}, fmt.Errorf("coalesce() requires at least one argument")
 		}
 		args := make([]BoundExpr, 0, len(call.Args))
-		var commonType types.Type
+		var commonType schema.Type
 		for _, raw := range call.Args {
 			bound, err := bindExpr(columns, raw)
 			if err != nil {
 				return BoundExpr{}, err
 			}
-			if bound.Type.Kind != types.KindInvalid {
-				if commonType.Kind == types.KindInvalid {
+			if bound.Type.Kind != schema.KindInvalid {
+				if commonType.Kind == schema.KindInvalid {
 					commonType = bound.Type
-				} else if bound.Type.Kind != commonType.Kind || (commonType.Kind == types.KindNamed && bound.Type.Name != commonType.Name) {
+				} else if bound.Type.Kind != commonType.Kind || (commonType.Kind == schema.KindNamed && bound.Type.Name != commonType.Name) {
 					return BoundExpr{}, fmt.Errorf("coalesce() arguments must share a common type")
 				}
 			}
 			args = append(args, bound)
 		}
-		if commonType.Kind == types.KindInvalid {
+		if commonType.Kind == schema.KindInvalid {
 			return BoundExpr{}, fmt.Errorf("coalesce() requires at least one typed argument")
 		}
 		out := args[0]
@@ -378,7 +379,7 @@ func bindScalarCall(columns map[string]BoundColumnDef, call *FuncCall) (BoundExp
 			if err != nil {
 				return BoundExpr{}, err
 			}
-			out = BoundExpr{Op: ExprConcat, Type: types.Text, Args: []BoundExpr{out, right}}
+			out = BoundExpr{Op: ExprConcat, Type: schema.Text, Args: []BoundExpr{out, right}}
 		}
 		return out, nil
 	case "abs":
@@ -390,7 +391,7 @@ func bindScalarCall(columns map[string]BoundColumnDef, call *FuncCall) (BoundExp
 			return BoundExpr{}, err
 		}
 		switch arg.Type.Kind {
-		case types.KindInt16, types.KindInt32, types.KindInt64, types.KindFloat32, types.KindFloat64:
+		case schema.KindInt16, schema.KindInt32, schema.KindInt64, schema.KindFloat32, schema.KindFloat64:
 		default:
 			return BoundExpr{}, fmt.Errorf("abs() argument must be numeric")
 		}
@@ -421,7 +422,7 @@ func bindTextArg(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error
 	if err != nil {
 		return BoundExpr{}, err
 	}
-	if bound.Type.Kind != types.KindText {
+	if bound.Type.Kind != schema.KindText {
 		return BoundExpr{}, fmt.Errorf("text expressions require a text argument")
 	}
 	return bound, nil
@@ -474,13 +475,13 @@ func literalExpr(value Value) BoundExpr {
 	expr := BoundExpr{Op: ExprLiteral, Literal: literalValue(value)}
 	switch value.Kind {
 	case ValueBool:
-		expr.Type = types.Bool
+		expr.Type = schema.Bool
 	case ValueInt:
-		expr.Type = types.Int64
+		expr.Type = schema.Int64
 	case ValueFloat:
-		expr.Type = types.Float64
+		expr.Type = schema.Float64
 	case ValueString:
-		expr.Type = types.Text
+		expr.Type = schema.Text
 	}
 	return expr
 }
@@ -502,20 +503,20 @@ func literalValue(value Value) any {
 	}
 }
 
-func arithmeticResultType(op ExprOp, left BoundExpr, right BoundExpr) (types.Type, error) {
+func arithmeticResultType(op ExprOp, left BoundExpr, right BoundExpr) (schema.Type, error) {
 	if op == ExprModulo || op == ExprIntDivide {
 		if !isIntegerExpr(left) || !isIntegerExpr(right) {
-			return types.Type{}, fmt.Errorf("MOD and DIV require integer operands")
+			return schema.Type{}, fmt.Errorf("MOD and DIV require integer operands")
 		}
-		return types.Int64, nil
+		return schema.Int64, nil
 	}
 	if !isNumericExpr(left) || !isNumericExpr(right) {
-		return types.Type{}, fmt.Errorf("arithmetic expressions require numeric operands")
+		return schema.Type{}, fmt.Errorf("arithmetic expressions require numeric operands")
 	}
 	if classOf(left)&cFloat != 0 || classOf(right)&cFloat != 0 {
-		return types.Float64, nil
+		return schema.Float64, nil
 	}
-	return types.Int64, nil
+	return schema.Int64, nil
 }
 
 type cmpRules struct {
@@ -559,22 +560,22 @@ func validateComparison(left BoundExpr, op ExprOp, right BoundExpr, r cmpRules) 
 	if r.allowFloat && isNumericExpr(left) && isNumericExpr(right) {
 		return nil
 	}
-	if left.Type.Kind == types.KindText && right.Type.Kind == types.KindText {
+	if left.Type.Kind == schema.KindText && right.Type.Kind == schema.KindText {
 		if !r.textOrderingAllowed && isOrderingFilter(op) {
 			return fmt.Errorf("%s text comparisons only support = and !=", r.label)
 		}
 		return nil
 	}
-	if left.Type.Kind == types.KindBool && right.Type.Kind == types.KindBool {
+	if left.Type.Kind == schema.KindBool && right.Type.Kind == schema.KindBool {
 		if isOrderingFilter(op) {
 			return fmt.Errorf("%s bool comparisons only support = and !=", r.label)
 		}
 		return nil
 	}
-	if areXComparable(types.KindDate, left, right) || areXComparable(types.KindTimestamp, left, right) {
+	if areXComparable(schema.KindDate, left, right) || areXComparable(schema.KindTimestamp, left, right) {
 		return nil
 	}
-	if areXComparable(types.KindUUID, left, right) {
+	if areXComparable(schema.KindUUID, left, right) {
 		if isOrderingFilter(op) {
 			return fmt.Errorf("%s uuid comparisons only support = and !=", r.label)
 		}
@@ -588,13 +589,13 @@ func validateComparison(left BoundExpr, op ExprOp, right BoundExpr, r cmpRules) 
 		}
 		return nil
 	}
-	if areXComparable(types.KindBytes, left, right) {
+	if areXComparable(schema.KindBytes, left, right) {
 		if isOrderingFilter(op) {
 			return fmt.Errorf("%s bytes comparisons only support = and !=", r.label)
 		}
 		return nil
 	}
-	if areXComparable(types.KindNamed, left, right) {
+	if areXComparable(schema.KindNamed, left, right) {
 		if isOrderingFilter(op) {
 			return fmt.Errorf("%s enum comparisons only support = and !=", r.label)
 		}
@@ -621,23 +622,23 @@ func havingMismatchError(col BoundExpr, lit BoundExpr) error {
 		return nil
 	}
 	switch col.Type.Kind {
-	case types.KindBool:
+	case schema.KindBool:
 		return fmt.Errorf("HAVING column %q expects bool literal", col.Column)
-	case types.KindInt16, types.KindInt32, types.KindInt64:
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64:
 		return fmt.Errorf("HAVING column %q expects int literal", col.Column)
-	case types.KindFloat32, types.KindFloat64:
+	case schema.KindFloat32, schema.KindFloat64:
 		return fmt.Errorf("HAVING column %q expects numeric literal", col.Column)
-	case types.KindTimestamp:
+	case schema.KindTimestamp:
 		if value, ok := lit.Literal.(string); ok {
 			return fmt.Errorf("HAVING column %q invalid timestamp literal %q", col.Column, value)
 		}
 		return fmt.Errorf("HAVING column %q expects timestamp string literal", col.Column)
-	case types.KindDate:
+	case schema.KindDate:
 		if value, ok := lit.Literal.(string); ok {
 			return fmt.Errorf("HAVING column %q invalid date literal %q", col.Column, value)
 		}
 		return fmt.Errorf("HAVING column %q expects date string literal", col.Column)
-	case types.KindUUID:
+	case schema.KindUUID:
 		if value, ok := lit.Literal.(string); ok {
 			return fmt.Errorf("HAVING column %q invalid uuid literal %q", col.Column, value)
 		}
@@ -647,23 +648,23 @@ func havingMismatchError(col BoundExpr, lit BoundExpr) error {
 	}
 }
 
-func literalKindName(kind types.Kind) string {
+func literalKindName(kind schema.Kind) string {
 	switch kind {
-	case types.KindBool:
+	case schema.KindBool:
 		return "bool"
-	case types.KindInt16, types.KindInt32, types.KindInt64:
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64:
 		return "int64"
-	case types.KindFloat32, types.KindFloat64:
+	case schema.KindFloat32, schema.KindFloat64:
 		return "numeric"
-	case types.KindText, types.KindBytes:
+	case schema.KindText, schema.KindBytes:
 		return "string"
-	case types.KindDate:
+	case schema.KindDate:
 		return "date string"
-	case types.KindTimestamp:
+	case schema.KindTimestamp:
 		return "timestamp string"
-	case types.KindUUID:
+	case schema.KindUUID:
 		return "uuid string"
-	case types.KindNamed:
+	case schema.KindNamed:
 		return "enum string"
 	default:
 		return "compatible"
@@ -674,7 +675,7 @@ func checkInt32LiteralRange(col BoundExpr, lit BoundExpr) error {
 	if col.Op != ExprColumn || lit.Op != ExprLiteral {
 		return nil
 	}
-	if col.Type.Kind != types.KindInt16 && col.Type.Kind != types.KindInt32 {
+	if col.Type.Kind != schema.KindInt16 && col.Type.Kind != schema.KindInt32 {
 		return nil
 	}
 	value, ok := lit.Literal.(int64)
@@ -703,13 +704,13 @@ func validateBetween(target, low, high BoundExpr, r betweenRules) error {
 	if r.allowFloat && isNumericExpr(target) && isNumericExpr(low) && isNumericExpr(high) {
 		return nil
 	}
-	if r.allowText && target.Type.Kind == types.KindText && low.Type.Kind == types.KindText && high.Type.Kind == types.KindText {
+	if r.allowText && target.Type.Kind == schema.KindText && low.Type.Kind == schema.KindText && high.Type.Kind == schema.KindText {
 		return nil
 	}
-	if target.Type.Kind == types.KindDate && textBound(types.KindDate, low) && textBound(types.KindDate, high) {
+	if target.Type.Kind == schema.KindDate && textBound(schema.KindDate, low) && textBound(schema.KindDate, high) {
 		return nil
 	}
-	if target.Type.Kind == types.KindTimestamp && textBound(types.KindTimestamp, low) && textBound(types.KindTimestamp, high) {
+	if target.Type.Kind == schema.KindTimestamp && textBound(schema.KindTimestamp, low) && textBound(schema.KindTimestamp, high) {
 		return nil
 	}
 	return fmt.Errorf("%s", r.mismatch)
@@ -722,32 +723,32 @@ func validateWhereInValue(target BoundExpr, value BoundExpr) error {
 	if isNumericExpr(target) && isNumericExpr(value) {
 		return nil
 	}
-	if target.Type.Kind == types.KindText && value.Type.Kind == types.KindText {
+	if target.Type.Kind == schema.KindText && value.Type.Kind == schema.KindText {
 		return nil
 	}
-	if target.Type.Kind == types.KindBool && value.Type.Kind == types.KindBool {
+	if target.Type.Kind == schema.KindBool && value.Type.Kind == schema.KindBool {
 		return nil
 	}
-	if target.Type.Kind == types.KindDate && textBound(types.KindDate, value) {
+	if target.Type.Kind == schema.KindDate && textBound(schema.KindDate, value) {
 		return nil
 	}
-	if target.Type.Kind == types.KindTimestamp && textBound(types.KindTimestamp, value) {
+	if target.Type.Kind == schema.KindTimestamp && textBound(schema.KindTimestamp, value) {
 		return nil
 	}
-	if target.Type.Kind == types.KindUUID && textBound(types.KindUUID, value) {
+	if target.Type.Kind == schema.KindUUID && textBound(schema.KindUUID, value) {
 		return nil
 	}
-	if target.Type.Kind == types.KindBytes && textBound(types.KindBytes, value) {
+	if target.Type.Kind == schema.KindBytes && textBound(schema.KindBytes, value) {
 		return nil
 	}
-	if target.Type.Kind == types.KindNamed && textBound(types.KindNamed, value) {
+	if target.Type.Kind == schema.KindNamed && textBound(schema.KindNamed, value) {
 		return nil
 	}
 	return fmt.Errorf("WHERE IN operands have incompatible types")
 }
 
 func normalizeBound(target BoundExpr, bound *BoundExpr) {
-	if bound.Op != ExprLiteral || bound.Type.Kind != types.KindText {
+	if bound.Op != ExprLiteral || bound.Type.Kind != schema.KindText {
 		return
 	}
 	value, ok := bound.Literal.(string)
@@ -755,11 +756,11 @@ func normalizeBound(target BoundExpr, bound *BoundExpr) {
 		return
 	}
 	switch target.Type.Kind {
-	case types.KindTimestamp:
+	case schema.KindTimestamp:
 		if v, ok := normalizeTimestampString(value); ok {
 			bound.Literal = v
 		}
-	case types.KindUUID:
+	case schema.KindUUID:
 		if v, ok := normalizeUUIDString(value); ok {
 			bound.Literal = v
 		}
@@ -780,22 +781,22 @@ func normalizeTimestampString(s string) (string, bool) {
 }
 
 func normalizeUUIDString(s string) (string, bool) {
-	u, err := types.ParseUUID(s)
+	u, err := vector.ParseUUID(s)
 	if err != nil {
 		return "", false
 	}
-	return types.FormatUUID(u), true
+	return vector.FormatUUID(u), true
 }
 
 func validateHavingUUIDBound(expr BoundExpr) error {
-	if expr.Type.Kind == types.KindUUID || expr.Op != ExprLiteral || expr.Type.Kind != types.KindText {
+	if expr.Type.Kind == schema.KindUUID || expr.Op != ExprLiteral || expr.Type.Kind != schema.KindText {
 		return nil
 	}
 	value, ok := expr.Literal.(string)
 	if !ok {
 		return nil
 	}
-	if _, err := types.ParseUUID(value); err != nil {
+	if _, err := vector.ParseUUID(value); err != nil {
 		return fmt.Errorf("HAVING invalid uuid literal %q", value)
 	}
 	return nil
@@ -819,23 +820,23 @@ const cNumeric = cInt | cFloat
 
 func classOf(e BoundExpr) tclass {
 	switch e.Type.Kind {
-	case types.KindInt16, types.KindInt32, types.KindInt64:
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64:
 		return cInt
-	case types.KindFloat32, types.KindFloat64:
+	case schema.KindFloat32, schema.KindFloat64:
 		return cFloat
-	case types.KindText:
+	case schema.KindText:
 		return cText
-	case types.KindBool:
+	case schema.KindBool:
 		return cBool
-	case types.KindDate:
+	case schema.KindDate:
 		return cDate
-	case types.KindTimestamp:
+	case schema.KindTimestamp:
 		return cTimestamp
-	case types.KindUUID:
+	case schema.KindUUID:
 		return cUUID
-	case types.KindBytes:
+	case schema.KindBytes:
 		return cBytes
-	case types.KindNamed:
+	case schema.KindNamed:
 		return cNamed
 	default:
 		return 0
@@ -848,11 +849,11 @@ func isNumericExpr(e BoundExpr) bool { return classOf(e)&cNumeric != 0 }
 // textBound reports whether expr is comparable with a target-kind expression.
 // Non-literal exprs must match the target kind exactly. Text literals accept the target
 // only if their value parses (date, timestamp) or the kind is bytes/uuid/named (string-shape).
-func textBound(target types.Kind, expr BoundExpr) bool {
+func textBound(target schema.Kind, expr BoundExpr) bool {
 	if expr.Type.Kind == target {
 		return true
 	}
-	if expr.Op != ExprLiteral || expr.Type.Kind != types.KindText {
+	if expr.Op != ExprLiteral || expr.Type.Kind != schema.KindText {
 		return false
 	}
 	value, ok := expr.Literal.(string)
@@ -860,30 +861,30 @@ func textBound(target types.Kind, expr BoundExpr) bool {
 		return false
 	}
 	switch target {
-	case types.KindDate:
+	case schema.KindDate:
 		_, err := time.Parse("2006-01-02", value)
 		return err == nil
-	case types.KindTimestamp:
+	case schema.KindTimestamp:
 		_, err := time.Parse(time.RFC3339Nano, value)
 		return err == nil
-	case types.KindUUID:
-		_, err := types.ParseUUID(value)
+	case schema.KindUUID:
+		_, err := vector.ParseUUID(value)
 		return err == nil
-	case types.KindBytes, types.KindNamed:
+	case schema.KindBytes, schema.KindNamed:
 		return true
 	}
 	return false
 }
 
-func areXComparable(target types.Kind, left, right BoundExpr) bool {
+func areXComparable(target schema.Kind, left, right BoundExpr) bool {
 	if left.Type.Kind == target {
-		if target == types.KindNamed && right.Type.Kind == types.KindNamed && left.Type.Name != right.Type.Name {
+		if target == schema.KindNamed && right.Type.Kind == schema.KindNamed && left.Type.Name != right.Type.Name {
 			return false
 		}
 		return textBound(target, right)
 	}
 	if right.Type.Kind == target {
-		if target == types.KindNamed && left.Type.Kind == types.KindNamed && left.Type.Name != right.Type.Name {
+		if target == schema.KindNamed && left.Type.Kind == schema.KindNamed && left.Type.Name != right.Type.Name {
 			return false
 		}
 		return textBound(target, left)
@@ -903,7 +904,7 @@ func isOrderingFilter(op ExprOp) bool {
 func buildColumnIndex(columns []BoundColumnDef) map[string]BoundColumnDef {
 	index := make(map[string]BoundColumnDef, len(columns))
 	for _, col := range columns {
-		index[types.NormalizeName(col.Name)] = col
+		index[schema.NormalizeName(col.Name)] = col
 	}
 	return index
 }
@@ -918,9 +919,9 @@ func buildColumnIndexQualified(columns []BoundColumnDef, qualifiers ...string) m
 		if q == "" {
 			continue
 		}
-		prefix := types.NormalizeName(q) + "."
+		prefix := schema.NormalizeName(q) + "."
 		for _, col := range columns {
-			index[prefix+types.NormalizeName(col.Name)] = col
+			index[prefix+schema.NormalizeName(col.Name)] = col
 		}
 	}
 	return index
@@ -939,19 +940,19 @@ func buildJoinedColumnIndex(sources []joinedSource) map[string]BoundColumnDef {
 	index := make(map[string]BoundColumnDef)
 	seenBare := make(map[string]int)
 	for _, s := range sources {
-		alias := types.NormalizeName(s.Alias)
+		alias := schema.NormalizeName(s.Alias)
 		for _, col := range s.Def.Columns {
-			qualified := alias + "." + types.NormalizeName(col.Name)
+			qualified := alias + "." + schema.NormalizeName(col.Name)
 			rebound := col
 			rebound.Name = qualified
 			index[qualified] = rebound
-			seenBare[types.NormalizeName(col.Name)]++
+			seenBare[schema.NormalizeName(col.Name)]++
 		}
 	}
 	for _, s := range sources {
-		alias := types.NormalizeName(s.Alias)
+		alias := schema.NormalizeName(s.Alias)
 		for _, col := range s.Def.Columns {
-			bare := types.NormalizeName(col.Name)
+			bare := schema.NormalizeName(col.Name)
 			if seenBare[bare] != 1 {
 				continue
 			}
@@ -962,12 +963,12 @@ func buildJoinedColumnIndex(sources []joinedSource) map[string]BoundColumnDef {
 }
 
 func findColumn(columns map[string]BoundColumnDef, name string) (BoundColumnDef, bool) {
-	col, ok := columns[types.NormalizeName(name)]
+	col, ok := columns[schema.NormalizeName(name)]
 	return col, ok
 }
 
 func aggregateFuncByName(name string) (AggregateFunc, bool) {
-	switch types.NormalizeName(name) {
+	switch schema.NormalizeName(name) {
 	case "count":
 		return AggregateCount, true
 	case "sum":

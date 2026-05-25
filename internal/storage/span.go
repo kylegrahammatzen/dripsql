@@ -47,8 +47,16 @@ func (s *Span) End() {
 	s.Calls++
 }
 
-func (s *Span) AddRows(n int64)  { if s != nil { s.Rows += n } }
-func (s *Span) AddBytes(n int64) { if s != nil { s.Bytes += n } }
+func (s *Span) AddRows(n int64) {
+	if s != nil {
+		s.Rows += n
+	}
+}
+func (s *Span) AddBytes(n int64) {
+	if s != nil {
+		s.Bytes += n
+	}
+}
 
 func (s *Span) Tree() string {
 	if s == nil {

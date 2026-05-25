@@ -7,13 +7,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 )
 
 type parser struct {
-	lex  lexer
-	buf  [2]token
-	has  [2]bool
+	lex lexer
+	buf [2]token
+	has [2]bool
 }
 
 type parserState struct {
@@ -369,7 +369,6 @@ func tokenName(typ tokenType) string {
 // DDL recursive descent: CREATE TYPE AS ENUM (...) and CREATE TABLE name (cols...) WITH (opts...).
 // Only enum types and column-level NOT NULL are supported; other constraints raise a clear error.
 
-
 func (p *parser) parseCreateType() (*CreateTypeStmt, error) {
 	ifNotExists, err := p.parseIfNotExists()
 	if err != nil {
@@ -509,7 +508,7 @@ func (p *parser) parseColumnDef() (ColumnDef, error) {
 				return ColumnDef{}, err
 			}
 			for _, o := range opts {
-				switch types.NormalizeName(o.Name) {
+				switch schema.NormalizeName(o.Name) {
 				case "codec":
 					if o.Value.Kind != ValueString {
 						return ColumnDef{}, p.errorAt(tok, "codec value must be a string literal")
@@ -751,7 +750,6 @@ func (p *parser) parseDelete() (*DeleteStmt, error) {
 // UPDATE table SET col = lit [, col = lit ...] [WHERE expr]. Assignment values are literals only.
 // Empty WHERE rewrites every row in the table with the supplied assignments.
 
-
 func (p *parser) parseUpdate() (*UpdateStmt, error) {
 	tableName, err := p.parseName()
 	if err != nil {
@@ -828,7 +826,6 @@ func (p *parser) parseExplain() (Stmt, error) {
 // SELECT recursive descent: projection, WHERE (or/and/not), GROUP BY, HAVING, ORDER BY, LIMIT/OFFSET.
 // Scalar precedence ladder: path-op > term (mul/div/mod/div) > expr (concat/plus/minus).
 
-
 func (p *parser) parseWithSelect() (*SelectStmt, error) {
 	ctes, err := p.parseCTEs()
 	if err != nil {
@@ -853,7 +850,7 @@ func (p *parser) parseCTEs() ([]CTE, error) {
 		if err != nil {
 			return nil, err
 		}
-		key := types.NormalizeName(name)
+		key := schema.NormalizeName(name)
 		if _, dup := seen[key]; dup {
 			return nil, fmt.Errorf("duplicate CTE name %q", name)
 		}
@@ -1799,4 +1796,3 @@ func (p *parser) parseOptionalIntClause(word string) (*int64, error) {
 	}
 	return &limit, nil
 }
-

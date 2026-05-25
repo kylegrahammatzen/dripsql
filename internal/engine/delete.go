@@ -9,9 +9,10 @@ import (
 	"time"
 
 	"github.com/kylegrahammatzen/dripsql/internal/exec"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func (db *DB) delete(ctx context.Context, plan *sql.Plan, target commitTarget) (int64, error) {
@@ -66,7 +67,7 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 		if n == 0 {
 			return 0, nil, nil
 		}
-		newDV := make(types.Validity, types.ValidityWords(rows))
+		newDV := make(vector.Validity, vector.ValidityWords(rows))
 		dvPath := versionedDVPath(entry.Path)
 		if err := storage.WriteDVAtPath(dvPath, rows, newDV); err != nil {
 			return 0, nil, err
@@ -88,7 +89,7 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 		var def sql.BoundColumnDef
 		found := false
 		for _, c := range plan.Table.Columns {
-			if types.NormalizeName(c.Name) == name {
+			if schema.NormalizeName(c.Name) == name {
 				def = c
 				found = true
 				break
@@ -111,7 +112,7 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 	// Single scratch is safe: every codec.Decode either copies into a fresh fixed-width
 	// buffer or appends into a fresh VarVec, so the returned Vec never aliases scratch.
 	var scratch []byte
-	decoded := make([]types.Column, len(preds))
+	decoded := make([]vector.Column, len(preds))
 
 	for pi := range pageCount {
 		if err := ctx.Err(); err != nil {
@@ -120,7 +121,7 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 		page := seg.Cols[0].Pages[pi]
 		pageRows := int(page.Rows)
 		rowStart := int(page.RowStart)
-		live := types.NewSelectionMask(pageRows)
+		live := vector.NewSelectionMask(pageRows)
 		liveCount := 0
 		if !hadDV {
 			live.FillAll()
@@ -142,9 +143,9 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 				return 0, nil, fmt.Errorf("page %d col %q: %w", pi, p.def.Name, err)
 			}
 			scratch = s
-			decoded[ci] = types.Column{Name: p.def.Name, Type: p.def.Type, EnumLabels: p.def.Labels, V: v}
+			decoded[ci] = vector.Column{Name: p.def.Name, Type: p.def.Type, EnumLabels: p.def.Labels, V: v}
 		}
-		batch := types.Batch{Len: pageRows, Columns: decoded, Sel: &live}
+		batch := vector.Batch{Len: pageRows, Columns: decoded, Sel: &live}
 		sel, err := exec.EvalPredicate(batch, *plan.Where)
 		if err != nil {
 			return 0, nil, fmt.Errorf("page %d: %w", pi, err)
@@ -164,17 +165,17 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 	return deleted, &storage.ManifestDVUpdate{SegmentPath: entry.Path, DVPath: dvPath, Rows: uint32(rows)}, nil
 }
 
-func cloneOrAllValidDV(seg *storage.Segment, rows int) types.Validity {
+func cloneOrAllValidDV(seg *storage.Segment, rows int) vector.Validity {
 	if seg.DV != nil {
 		return seg.DV.Clone()
 	}
-	return types.NewAllValid(rows)
+	return vector.NewAllValid(rows)
 }
 
 func findSegmentColumn(seg *storage.Segment, name string) (int, error) {
-	want := types.NormalizeName(name)
+	want := schema.NormalizeName(name)
 	for i, c := range seg.Cols {
-		if types.NormalizeName(c.Name) == want {
+		if schema.NormalizeName(c.Name) == want {
 			return i, nil
 		}
 	}
@@ -184,7 +185,7 @@ func findSegmentColumn(seg *storage.Segment, name string) (int, error) {
 func segmentColumnIndex(seg *storage.Segment) map[string]int {
 	out := make(map[string]int, len(seg.Cols))
 	for i, c := range seg.Cols {
-		out[types.NormalizeName(c.Name)] = i
+		out[schema.NormalizeName(c.Name)] = i
 	}
 	return out
 }

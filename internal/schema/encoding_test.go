@@ -1,6 +1,6 @@
 // Encoding invariant tests: wire byte 0 reserved, unknown bytes rejected, round-trip.
 // Wire safety matters because v4 segment files lean on these mappings.
-package types
+package schema
 
 import "testing"
 

@@ -1,6 +1,6 @@
 // Type and VecKindOf tests: Parse normalization, mixed-state rejection, SQL-to-physical mapping.
 // VecKindOf is the bridge SQL-side types use to provision the physical Vec.
-package types
+package schema
 
 import "testing"
 
@@ -45,10 +45,7 @@ func TestType_RejectsMixedKindName(t *testing.T) {
 		t.Fatal("non-named Type with Name must be invalid")
 	}
 	if bad.String() != "int64" {
-		t.Fatalf("non-named Type.String must fall back to Kind: got %q", bad.String())
-	}
-	if _, err := VecKindOf(bad); err == nil {
-		t.Fatal("VecKindOf must reject mixed Kind/Name")
+		t.Fatalf("non-named Type.String must fall back to Kind, got %q", bad.String())
 	}
 }
 
@@ -64,41 +61,3 @@ func TestType_ValidRejectsEmptyNamed(t *testing.T) {
 	}
 }
 
-func TestVecKindOf_Mapping(t *testing.T) {
-	cases := []struct {
-		typ  Type
-		want VecKind
-	}{
-		{Bool, VecBool},
-		{Int16, VecInt16},
-		{Int32, VecInt32},
-		{Int64, VecInt64},
-		{Float32, VecFloat32},
-		{Float64, VecFloat64},
-		{Decimal, VecDecimal64},
-		{Text, VecText},
-		{Bytes, VecBytes},
-		{UUID, VecUUID},
-		{Timestamp, VecTimestamp},
-		{Time, VecTime},
-		{Date, VecDate},
-		{JSON, VecJSON},
-		{Named("status"), VecEnum32},
-	}
-	for _, c := range cases {
-		got, err := VecKindOf(c.typ)
-		if err != nil {
-			t.Errorf("VecKindOf(%v): %v", c.typ, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("VecKindOf(%v)=%v want %v", c.typ, got, c.want)
-		}
-	}
-	if _, err := VecKindOf(Type{}); err == nil {
-		t.Fatal("VecKindOf(zero) must error")
-	}
-	if _, err := VecKindOf(Type{Kind: KindNamed}); err == nil {
-		t.Fatal("VecKindOf(named-empty) must error")
-	}
-}

@@ -7,7 +7,7 @@ import (
 
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func cmp(op sql.ExprOp, col string, lit int64) sql.BoundExpr {
@@ -21,7 +21,7 @@ func cmp(op sql.ExprOp, col string, lit int64) sql.BoundExpr {
 }
 
 func intLeaf(op storage.PredOp, col string, v int64) storage.Pred {
-	return storage.Pred{Op: op, Col: col, Kind: types.VecInt64, I64: v}
+	return storage.Pred{Op: op, Col: col, Kind: vector.VecInt64, I64: v}
 }
 
 func predEq(a, b storage.Pred) bool {

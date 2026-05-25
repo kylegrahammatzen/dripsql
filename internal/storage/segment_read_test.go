@@ -9,12 +9,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestOpenSegment_RoundTrip_IntColumn(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	pages := []types.Batch{
+	pages := []vector.Batch{
 		makeIntBatch(t, "id", 0, 100),
 		makeIntBatch(t, "id", 100, 100),
 	}
@@ -32,7 +32,7 @@ func TestOpenSegment_RoundTrip_IntColumn(t *testing.T) {
 	if seg.Cols[0].Name != "id" {
 		t.Fatalf("col name = %q, want id", seg.Cols[0].Name)
 	}
-	if seg.Cols[0].Kind != types.VecInt64 {
+	if seg.Cols[0].Kind != vector.VecInt64 {
 		t.Fatalf("kind = %v, want Int64", seg.Cols[0].Kind)
 	}
 	if seg.Cols[0].Rows != 200 {
@@ -61,7 +61,7 @@ func TestOpenSegment_RoundTrip_IntColumn(t *testing.T) {
 
 func TestOpenSegment_RoundTrip_TwoColumns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	pages := []types.Batch{
+	pages := []vector.Batch{
 		makeTwoColumnBatch(t, 0, 64),
 		makeTwoColumnBatch(t, 64, 64),
 	}
@@ -111,7 +111,7 @@ func TestOpenSegment_TooSmallErrors(t *testing.T) {
 
 func TestOpenSegment_BadTailMagicErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -124,7 +124,7 @@ func TestOpenSegment_BadTailMagicErrors(t *testing.T) {
 
 func TestOpenSegment_BadHeadMagicErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -137,7 +137,7 @@ func TestOpenSegment_BadHeadMagicErrors(t *testing.T) {
 
 func TestSegment_ReadPage_OutOfRange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 10)}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 10)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -155,7 +155,7 @@ func TestSegment_ReadPage_OutOfRange(t *testing.T) {
 
 func TestSegment_StatsMarshaledIntoFooter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	pages := []types.Batch{makeIntBatch(t, "id", 5, 100)}
+	pages := []vector.Batch{makeIntBatch(t, "id", 5, 100)}
 	if _, err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestParseFooter_RejectsAbsurdLabelCount(t *testing.T) {
 	w := newWireBuffer(64)
 	w.U32(1) // 1 column
 	w.LenPrefixedString("x")
-	w.U8(byte(types.VecText))
+	w.U8(byte(vector.VecText))
 	w.U8(0)
 	w.U32(1_000_000) // huge label count
 	if _, err := parseFooter(w.Bytes()); err == nil {
@@ -203,7 +203,7 @@ func TestParseFooter_RejectsAbsurdLabelCount(t *testing.T) {
 
 func TestParseFooter_RejectsTrailingBytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -218,7 +218,7 @@ func TestParseFooter_RejectsTrailingBytes(t *testing.T) {
 
 func TestOpenSegment_RejectsCorruptPageOffset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -239,7 +239,7 @@ func TestOpenSegment_RejectsCorruptPageOffset(t *testing.T) {
 
 func TestOpenSegment_RejectsPageFlagAllNull(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)

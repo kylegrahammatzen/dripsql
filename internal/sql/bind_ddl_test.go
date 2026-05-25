@@ -1,12 +1,12 @@
 // DDL binder tests: CREATE TYPE -> TypeSpec, CREATE TABLE -> TableSpec with options vocab.
-// Validation runs through types.Validate so option/value pairs that are syntactically valid but
+// Validation runs through schema.Validate so option/value pairs that are syntactically valid but
 // semantically wrong (unknown enum, segment_rows <= 0, etc.) are caught here.
 package sql
 
 import (
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 )
 
 func bindStmt[T Stmt](t *testing.T, src string) T {
@@ -52,10 +52,10 @@ func TestBindCreateTable_ColumnsParseTypes(t *testing.T) {
 	if plan.TableSpec.Name != "users" || len(plan.TableSpec.Columns) != 2 {
 		t.Fatalf("spec = %+v", plan.TableSpec)
 	}
-	if plan.TableSpec.Columns[0].Type.Kind != types.KindInt64 || plan.TableSpec.Columns[0].Nullable {
+	if plan.TableSpec.Columns[0].Type.Kind != schema.KindInt64 || plan.TableSpec.Columns[0].Nullable {
 		t.Fatalf("col 0 = %+v", plan.TableSpec.Columns[0])
 	}
-	if plan.TableSpec.Columns[1].Type.Kind != types.KindText || !plan.TableSpec.Columns[1].Nullable {
+	if plan.TableSpec.Columns[1].Type.Kind != schema.KindText || !plan.TableSpec.Columns[1].Nullable {
 		t.Fatalf("col 1 = %+v", plan.TableSpec.Columns[1])
 	}
 }
@@ -66,7 +66,7 @@ func TestBindCreateTable_NamedTypeColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BindCreateTable: %v", err)
 	}
-	if plan.TableSpec.Columns[0].Type.Kind != types.KindNamed || plan.TableSpec.Columns[0].Type.Name != "eventkind" {
+	if plan.TableSpec.Columns[0].Type.Kind != schema.KindNamed || plan.TableSpec.Columns[0].Type.Name != "eventkind" {
 		t.Fatalf("col = %+v", plan.TableSpec.Columns[0])
 	}
 }
@@ -78,13 +78,13 @@ func TestBindCreateTable_OptionsVocab(t *testing.T) {
 		t.Fatalf("BindCreateTable: %v", err)
 	}
 	opts := plan.TableSpec.Options
-	if opts.Storage != types.StorageColumnar {
+	if opts.Storage != schema.StorageColumnar {
 		t.Fatalf("Storage = %v", opts.Storage)
 	}
-	if opts.Profile != types.ProfileEventAnalytics {
+	if opts.Profile != schema.ProfileEventAnalytics {
 		t.Fatalf("Profile = %v", opts.Profile)
 	}
-	if opts.Compression != types.CompressionBest {
+	if opts.Compression != schema.CompressionBest {
 		t.Fatalf("Compression = %v", opts.Compression)
 	}
 	if opts.SegmentRows.Auto || opts.SegmentRows.Rows != 1000 {
@@ -104,7 +104,7 @@ func TestBindCreateTable_SegmentRowsAuto(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BindCreateTable: %v", err)
 	}
-	if plan.TableSpec.Options.SegmentRows != types.AutoSegmentRows {
+	if plan.TableSpec.Options.SegmentRows != schema.AutoSegmentRows {
 		t.Fatalf("SegmentRows = %v, want Auto", plan.TableSpec.Options.SegmentRows)
 	}
 }

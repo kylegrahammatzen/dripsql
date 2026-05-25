@@ -7,10 +7,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-type ScanFn func(batch types.Batch, sel *types.SelectionMask) error
+type ScanFn func(batch vector.Batch, sel *vector.SelectionMask) error
 
 type ScanOpts struct {
 	Segments []*Segment
@@ -194,10 +194,10 @@ func selectTopKPages(segments []*Segment, tk *TopKPushdown) map[[2]int]bool {
 	return selected
 }
 
-func topKKindEligible(k types.VecKind) bool {
+func topKKindEligible(k vector.VecKind) bool {
 	switch k {
-	case types.VecInt16, types.VecInt32, types.VecInt64,
-		types.VecDate, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt16, vector.VecInt32, vector.VecInt64,
+		vector.VecDate, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		return true
 	}
 	return false
@@ -262,16 +262,16 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 			return fmt.Errorf("scan: column %q has %d pages, expected %d", seg.Cols[ci].Name, len(seg.Cols[ci].Pages), pageCount)
 		}
 	}
-	decoded := make([]types.Column, len(decode))
-	projected := make([]types.Column, len(projIdx))
-	var sel types.SelectionMask
+	decoded := make([]vector.Column, len(decode))
+	projected := make([]vector.Column, len(projIdx))
+	var sel vector.SelectionMask
 	var scratch []byte
 	predOnly := predicateOnlyMask(decodeIdx, projIdx)
 	for i, ci := range decodeIdx {
 		decoded[i].Name = seg.Cols[ci].Name
 		decoded[i].EnumLabels = seg.Cols[ci].EnumLabels
-		if seg.Cols[ci].Kind != types.VecEnum32 {
-			t, err := types.TypeFromVecKind(seg.Cols[ci].Kind, "")
+		if seg.Cols[ci].Kind != vector.VecEnum32 {
+			t, err := vector.TypeFromVecKind(seg.Cols[ci].Kind, "")
 			if err != nil {
 				return fmt.Errorf("scan: col %q: %w", seg.Cols[ci].Name, err)
 			}
@@ -280,7 +280,7 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 	}
 	decodeOne := func(i, ci, pi, pageRows int) error {
 		var (
-			v   types.Vec
+			v   vector.Vec
 			err error
 		)
 		v, scratch, err = seg.ReadPageInto(ci, pi, scratch)
@@ -326,7 +326,7 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 			}
 		}
 		if !encodedDone {
-			batch := types.Batch{Len: pageRows, Columns: decoded}
+			batch := vector.Batch{Len: pageRows, Columns: decoded}
 			if sel.Rows() != pageRows {
 				sel.Resize(pageRows)
 			} else {
@@ -362,7 +362,7 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 		for i, di := range projIdx {
 			projected[i] = decoded[di]
 		}
-		out := types.Batch{Len: pageRows, Columns: projected}
+		out := vector.Batch{Len: pageRows, Columns: projected}
 		if err := fn(out, &sel); err != nil {
 			return err
 		}

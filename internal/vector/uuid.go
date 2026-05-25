@@ -1,6 +1,6 @@
 // UUID16 is the 16-byte UUID value used everywhere DripSQL handles a UUID.
 // Parse accepts canonical 36-char hyphenated form and bare 32-char hex.
-package types
+package vector
 
 import (
 	"encoding/hex"
