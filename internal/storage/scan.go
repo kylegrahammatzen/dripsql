@@ -58,6 +58,18 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 	if opts.TopK != nil && opts.Predicate == nil {
 		topKPages = selectTopKPages(opts.Segments, opts.TopK)
 	}
+	var predNeeded []bool
+	if len(predCols) != 0 {
+		predNeeded = make([]bool, len(decode))
+		for i, name := range decode {
+			for _, p := range predCols {
+				if strings.EqualFold(name, p) {
+					predNeeded[i] = true
+					break
+				}
+			}
+		}
+	}
 	for si, seg := range opts.Segments {
 		if opts.ReadTs != 0 && seg.CommitTs > opts.ReadTs {
 			continue
@@ -85,7 +97,7 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 				pageMask[pi] = topKPages[[2]int{si, pi}]
 			}
 		}
-		if err := scanSegment(seg, decode, decodeIdx, projIdx, bp, pageMask, fn); err != nil {
+		if err := scanSegment(seg, decode, decodeIdx, projIdx, predNeeded, bp, pageMask, fn); err != nil {
 			return err
 		}
 	}
@@ -245,7 +257,7 @@ func resolveSegmentColumns(seg *Segment, decode, projection []string) (decodeIdx
 	return decodeIdx, projIdx, nil
 }
 
-func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp BoundPredicate, pageMask []bool, fn ScanFn) error {
+func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNeeded []bool, bp BoundPredicate, pageMask []bool, fn ScanFn) error {
 	if len(decodeIdx) == 0 {
 		return nil
 	}
@@ -272,6 +284,21 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp Bou
 			decoded[i].Type = t
 		}
 	}
+	decodeOne := func(i, ci, pi, pageRows int) error {
+		var (
+			v   types.Vec
+			err error
+		)
+		v, scratch, err = seg.ReadPageInto(ci, pi, scratch)
+		if err != nil {
+			return fmt.Errorf("scan: col %q page %d: %w", decode[i], pi, err)
+		}
+		if int(v.Len) != pageRows {
+			return fmt.Errorf("scan: col %q page %d rows %d != %d", decode[i], pi, v.Len, pageRows)
+		}
+		decoded[i].V = v
+		return nil
+	}
 	for pi := range pageCount {
 		if pageMask != nil && !pageMask[pi] {
 			continue
@@ -279,8 +306,9 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp Bou
 		if bp != nil && bp.PrunePage(seg, pi) {
 			continue
 		}
-		var pageRows int
-		var pageRowStart uint32
+		ci0 := decodeIdx[0]
+		pageRows := int(seg.Cols[ci0].Pages[pi].Rows)
+		pageRowStart := seg.Cols[ci0].Pages[pi].RowStart
 		encodedDone := false
 		if encEval != nil && hasAny(predOnly) {
 			handled, newScratch, err := encEval.EvalEncoded(seg, pi, &sel, scratch)
@@ -289,9 +317,6 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp Bou
 				return fmt.Errorf("scan: EvalEncoded page %d: %w", pi, err)
 			}
 			if handled {
-				ci0 := decodeIdx[0]
-				pageRows = int(seg.Cols[ci0].Pages[pi].Rows)
-				pageRowStart = seg.Cols[ci0].Pages[pi].RowStart
 				encodedDone = true
 			}
 		}
@@ -299,21 +324,12 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp Bou
 			if encodedDone && predOnly[i] {
 				continue
 			}
-			var (
-				v   types.Vec
-				err error
-			)
-			v, scratch, err = seg.ReadPageInto(ci, pi, scratch)
-			if err != nil {
-				return fmt.Errorf("scan: col %q page %d: %w", decode[i], pi, err)
+			if predNeeded != nil && !predNeeded[i] {
+				continue
 			}
-			if !encodedDone && i == 0 {
-				pageRows = int(v.Len)
-				pageRowStart = seg.Cols[ci].Pages[pi].RowStart
-			} else if int(v.Len) != pageRows {
-				return fmt.Errorf("scan: col %q page %d rows %d != %d", decode[i], pi, v.Len, pageRows)
+			if err := decodeOne(i, ci, pi, pageRows); err != nil {
+				return err
 			}
-			decoded[i].V = v
 		}
 		if !encodedDone {
 			batch := types.Batch{Len: pageRows, Columns: decoded}
@@ -337,6 +353,16 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, bp Bou
 		}
 		if sel.PopCount() == 0 {
 			continue
+		}
+		if predNeeded != nil {
+			for i, ci := range decodeIdx {
+				if predNeeded[i] {
+					continue
+				}
+				if err := decodeOne(i, ci, pi, pageRows); err != nil {
+					return err
+				}
+			}
 		}
 		for i, di := range projIdx {
 			projected[i] = decoded[di]
