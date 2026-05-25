@@ -528,10 +528,11 @@ type cmpRules struct {
 }
 
 var whereCmpRules = cmpRules{
-	label:         "WHERE",
-	intRangeCheck: checkInt32LiteralRange,
-	allowFloat:    true,
-	mismatchError: columnLiteralMismatchError,
+	label:               "WHERE",
+	intRangeCheck:       checkInt32LiteralRange,
+	allowFloat:          true,
+	textOrderingAllowed: true,
+	mismatchError:       columnLiteralMismatchError,
 }
 
 var havingCmpRules = cmpRules{

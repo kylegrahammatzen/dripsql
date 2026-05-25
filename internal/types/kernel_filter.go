@@ -50,16 +50,12 @@ func FilterOrdered[T cmp.Ordered](col []T, valid Validity, lit T, op FilterOp, i
 }
 
 func FilterBytes(col *VarBytes, valid Validity, lit []byte, op FilterOp, in SelectionMask, out *SelectionMask) int {
-	if op != FilterEqual && op != FilterNotEqual {
-		panic("FilterBytes: only Equal / NotEqual supported")
-	}
 	if len(out.words) < len(in.words) {
 		panic("FilterBytes: out mask too small")
 	}
 	out.rows = in.rows
 	var total int
 	rows := in.rows
-	wantEqual := op == FilterEqual
 	for wi, inWord := range in.words {
 		if inWord == 0 {
 			out.words[wi] = 0
@@ -77,8 +73,7 @@ func FilterBytes(col *VarBytes, valid Validity, lit []byte, op FilterOp, in Sele
 		var passWord uint64
 		for i := 0; i < end; i++ {
 			row := base + i
-			match := bytes.Equal(col.Bytes(row), lit)
-			if match == wantEqual {
+			if filterBytesRow(col.Bytes(row), lit, op) {
 				passWord |= uint64(1) << uint(i)
 			}
 		}
@@ -88,6 +83,24 @@ func FilterBytes(col *VarBytes, valid Validity, lit []byte, op FilterOp, in Sele
 	}
 	out.allSet = total == rows
 	return total
+}
+
+func filterBytesRow(row, lit []byte, op FilterOp) bool {
+	switch op {
+	case FilterEqual:
+		return bytes.Equal(row, lit)
+	case FilterNotEqual:
+		return !bytes.Equal(row, lit)
+	case FilterLess:
+		return bytes.Compare(row, lit) < 0
+	case FilterLessEqual:
+		return bytes.Compare(row, lit) <= 0
+	case FilterGreater:
+		return bytes.Compare(row, lit) > 0
+	case FilterGreaterEqual:
+		return bytes.Compare(row, lit) >= 0
+	}
+	return false
 }
 
 func BetweenOrdered[T cmp.Ordered](col []T, valid Validity, lo, hi T, in SelectionMask, out *SelectionMask) int {

@@ -3,6 +3,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -31,6 +32,16 @@ type EqBytes struct {
 	Column string
 	Value  []byte
 }
+type LtBytes struct {
+	Column    string
+	Value     []byte
+	Inclusive bool
+}
+type GtBytes struct {
+	Column    string
+	Value     []byte
+	Inclusive bool
+}
 type IsNull struct {
 	Column string
 }
@@ -48,6 +59,8 @@ func (EqInt64) isPredicate() {}
 func (LtInt64) isPredicate() {}
 func (GtInt64) isPredicate() {}
 func (EqBytes) isPredicate() {}
+func (LtBytes) isPredicate() {}
+func (GtBytes) isPredicate() {}
 func (IsNull) isPredicate()  {}
 func (And) isPredicate()     {}
 func (Or) isPredicate()      {}
@@ -124,6 +137,26 @@ func BindPredicate(p Predicate, lookup SchemaLookup) (BoundPredicate, error) {
 		}
 		clone := append([]byte(nil), p.Value...)
 		return boundEqBytes{column: p.Column, value: clone}, nil
+	case LtBytes:
+		kind, ok := lookup(p.Column)
+		if !ok {
+			return nil, fmt.Errorf("column %q not in schema", p.Column)
+		}
+		if !kind.IsVarBytes() {
+			return nil, fmt.Errorf("column %q kind %v is not varbytes", p.Column, kind)
+		}
+		clone := append([]byte(nil), p.Value...)
+		return boundLtBytes{column: p.Column, value: clone, inclusive: p.Inclusive}, nil
+	case GtBytes:
+		kind, ok := lookup(p.Column)
+		if !ok {
+			return nil, fmt.Errorf("column %q not in schema", p.Column)
+		}
+		if !kind.IsVarBytes() {
+			return nil, fmt.Errorf("column %q kind %v is not varbytes", p.Column, kind)
+		}
+		clone := append([]byte(nil), p.Value...)
+		return boundGtBytes{column: p.Column, value: clone, inclusive: p.Inclusive}, nil
 	case IsNull:
 		if _, ok := lookup(p.Column); !ok {
 			return nil, fmt.Errorf("column %q not in schema", p.Column)
@@ -169,6 +202,10 @@ func PredicateColumns(p Predicate) []string {
 		case GtInt64:
 			name = p.Column
 		case EqBytes:
+			name = p.Column
+		case LtBytes:
+			name = p.Column
+		case GtBytes:
 			name = p.Column
 		case IsNull:
 			name = p.Column
@@ -469,6 +506,52 @@ func (b boundEqBytes) PrunePage(seg *Segment, pageIdx int) bool {
 	return !pb.contains(hashBytesFNV(b.value))
 }
 
+type boundLtBytes struct {
+	column    string
+	value     []byte
+	inclusive bool
+}
+
+func (b boundLtBytes) Eval(batch types.Batch, sel *types.SelectionMask) {
+	ensureMaskSize(sel, batch.Len)
+	col, ok := batch.ColumnByName(b.column)
+	if !ok {
+		return
+	}
+	sel.FillAll()
+	op := types.FilterLess
+	if b.inclusive {
+		op = types.FilterLessEqual
+	}
+	types.FilterBytes(col.V.Var(), col.V.Valid, b.value, op, *sel, sel)
+}
+
+func (boundLtBytes) PruneSegment(*Segment) bool      { return false }
+func (boundLtBytes) PrunePage(*Segment, int) bool    { return false }
+
+type boundGtBytes struct {
+	column    string
+	value     []byte
+	inclusive bool
+}
+
+func (b boundGtBytes) Eval(batch types.Batch, sel *types.SelectionMask) {
+	ensureMaskSize(sel, batch.Len)
+	col, ok := batch.ColumnByName(b.column)
+	if !ok {
+		return
+	}
+	sel.FillAll()
+	op := types.FilterGreater
+	if b.inclusive {
+		op = types.FilterGreaterEqual
+	}
+	types.FilterBytes(col.V.Var(), col.V.Valid, b.value, op, *sel, sel)
+}
+
+func (boundGtBytes) PruneSegment(*Segment) bool      { return false }
+func (boundGtBytes) PrunePage(*Segment, int) bool    { return false }
+
 type boundIsNull struct{ column string }
 
 func (b boundIsNull) Eval(batch types.Batch, sel *types.SelectionMask) {
@@ -722,6 +805,103 @@ func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *types.Selectio
 	}
 	narrowDictEq(indices, code, valid, sel)
 	return true, newScratch, nil
+}
+
+func (b boundLtBytes) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+	return evalEncodedDictOrdered(seg, pageIdx, sel, scratch, b.column, b.value, false, b.inclusive)
+}
+
+func (b boundGtBytes) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+	return evalEncodedDictOrdered(seg, pageIdx, sel, scratch, b.column, b.value, true, b.inclusive)
+}
+
+// evalEncodedDictOrdered narrows sel for dictionary-encoded text under a LT/GT comparison.
+// It builds a 256-bit accept mask by comparing every dict entry against target, then walks
+// the index stream once. Same allocation profile as the eq path.
+func evalEncodedDictOrdered(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte, column string, target []byte, greater, inclusive bool) (bool, []byte, error) {
+	colIdx, ok := findSegmentColumnIdx(seg, column)
+	if !ok {
+		return false, scratch, nil
+	}
+	page := seg.Cols[colIdx].Pages[pageIdx]
+	enc, ok := types.EncodingFromWire(page.Encoding)
+	if !ok || enc != types.EncodingDictionary {
+		return false, scratch, nil
+	}
+	rows := int(page.Rows)
+	ensureMaskSize(sel, rows)
+	if page.Flags&PageFlagAllNull != 0 {
+		return true, scratch, nil
+	}
+	payload, valid, allNull, newScratch, err := seg.ReadPagePayload(colIdx, pageIdx, scratch)
+	if err != nil {
+		return false, newScratch, err
+	}
+	if allNull {
+		return true, newScratch, nil
+	}
+	accept, indices, err := dictAcceptMask(payload, rows, target, greater, inclusive)
+	if err != nil {
+		return false, newScratch, err
+	}
+	narrowDictByMask(indices, accept, valid, sel)
+	return true, newScratch, nil
+}
+
+// dictAcceptMask walks the dictionary header once and returns a 256-bit acceptance mask
+// plus the indices slice. Bit i of accept[i>>6]>>(i&63) is set when dict entry i passes
+// the LT/GT comparison.
+func dictAcceptMask(payload []byte, rows int, target []byte, greater, inclusive bool) (accept [4]uint64, indices []byte, err error) {
+	const dictHeaderSize = 2
+	if len(payload) < dictHeaderSize {
+		return accept, nil, fmt.Errorf("EvalEncoded dict: header truncated")
+	}
+	dictCount := int(binary.LittleEndian.Uint16(payload[0:2]))
+	if dictCount == 0 || dictCount > 256 {
+		return accept, nil, fmt.Errorf("EvalEncoded dict: dictCount %d out of range", dictCount)
+	}
+	pos := dictHeaderSize
+	for i := range dictCount {
+		if pos+4 > len(payload) {
+			return accept, nil, fmt.Errorf("EvalEncoded dict: entry %d length truncated", i)
+		}
+		length := int(binary.LittleEndian.Uint32(payload[pos : pos+4]))
+		pos += 4
+		if pos+length > len(payload) {
+			return accept, nil, fmt.Errorf("EvalEncoded dict: entry %d bytes truncated", i)
+		}
+		cmp := bytes.Compare(payload[pos:pos+length], target)
+		var pass bool
+		if greater {
+			pass = cmp > 0 || (inclusive && cmp == 0)
+		} else {
+			pass = cmp < 0 || (inclusive && cmp == 0)
+		}
+		if pass {
+			accept[i>>6] |= 1 << uint(i&63)
+		}
+		pos += length
+	}
+	if pos+rows != len(payload) {
+		return accept, nil, fmt.Errorf("EvalEncoded dict: indices payload mismatch")
+	}
+	indices = payload[pos : pos+rows]
+	return accept, indices, nil
+}
+
+// narrowDictByMask sets sel[i] when accept[indices[i]] is set, gated by validity.
+func narrowDictByMask(indices []byte, accept [4]uint64, valid types.Validity, sel *types.SelectionMask) {
+	sel.Clear()
+	rows := len(indices)
+	for i := range rows {
+		c := indices[i]
+		if accept[c>>6]&(1<<uint(c&63)) != 0 {
+			sel.Set(i)
+		}
+	}
+	if valid != nil {
+		applyValidity(valid, sel, rows)
+	}
 }
 
 func (b boundEqInt64) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {

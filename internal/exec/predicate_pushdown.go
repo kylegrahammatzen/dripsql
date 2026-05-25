@@ -162,8 +162,17 @@ func loweredComparison(expr sql.BoundExpr) (storage.Predicate, bool) {
 			return storage.GtInt64{Column: col.Column, Value: v - 1}, true
 		}
 	case string:
-		if op == sql.ExprEqual {
+		switch op {
+		case sql.ExprEqual:
 			return storage.EqBytes{Column: col.Column, Value: []byte(v)}, true
+		case sql.ExprLess:
+			return storage.LtBytes{Column: col.Column, Value: []byte(v)}, true
+		case sql.ExprLessEqual:
+			return storage.LtBytes{Column: col.Column, Value: []byte(v), Inclusive: true}, true
+		case sql.ExprGreater:
+			return storage.GtBytes{Column: col.Column, Value: []byte(v)}, true
+		case sql.ExprGreaterEqual:
+			return storage.GtBytes{Column: col.Column, Value: []byte(v), Inclusive: true}, true
 		}
 	}
 	return nil, false

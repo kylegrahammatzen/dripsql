@@ -237,8 +237,17 @@ func tryFilterLeaf(batch types.Batch, sel types.SelectionMask, pred sql.BoundExp
 		}
 		return out, types.FilterOrdered(col.V.F64(), col.V.Valid, lo, leaf.op, sel, &out), true, nil
 	case types.VecText, types.VecBytes, types.VecJSON:
-		if leaf.between || (leaf.op != types.FilterEqual && leaf.op != types.FilterNotEqual) {
-			return types.SelectionMask{}, 0, false, nil
+		if leaf.between {
+			lo, lok := leaf.lo.(string)
+			hi, hok := leaf.hi.(string)
+			if !lok || !hok {
+				return types.SelectionMask{}, 0, false, nil
+			}
+			ge := types.FilterBytes(col.V.Var(), col.V.Valid, []byte(lo), types.FilterGreaterEqual, sel, &out)
+			if ge == 0 {
+				return out, 0, true, nil
+			}
+			return out, types.FilterBytes(col.V.Var(), col.V.Valid, []byte(hi), types.FilterLessEqual, out, &out), true, nil
 		}
 		lit, ok := leaf.lo.(string)
 		if !ok {
