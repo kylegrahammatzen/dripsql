@@ -37,17 +37,17 @@ Snapshot:
 
 | Bench | ns/op | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `Filter_Int64Less` | 2435 | 256 | 1 |
-| `Filter_Int64Between` | 3057 | 256 | 1 |
-| `Filter_Int64AndCompound` | 4289 | 256 | 1 |
-| `Filter_Int64Equal` | 2380 | 256 | 1 |
-| `Sort_FullAsc_Int64_10k` | 1.43 ms | 252 K | 38 |
-| `Sort_FullDesc_Int64_10k` | 1.40 ms | 252 K | 38 |
-| `Sort_TopK_Int64_10k_K100` | 159 us | 7.7 K | 17 |
-| `Sort_TopK_Int64_100k_K100` | 1.09 ms | 29.6 K | 64 |
-| `Sort_TopK_Int64_100k_K100_Off50` | 1.13 ms | 31.0 K | 64 |
-| `Sort_TopK_Int64_100k_K100_NullsEvery10` | 1.09 ms | 29.6 K | 64 |
-| `Sort_FullAsc_Text_10k` | 3.44 ms | 253 K | 43 |
+| `Filter_Int64Less` | 2504 | 256 | 1 |
+| `Filter_Int64Between` | 3215 | 256 | 1 |
+| `Filter_Int64AndCompound` | 5467 | 256 | 1 |
+| `Filter_Int64Equal` | 2620 | 256 | 1 |
+| `Sort_FullAsc_Int64_10k` | 1.51 ms | 252 K | 38 |
+| `Sort_FullDesc_Int64_10k` | 1.52 ms | 252 K | 38 |
+| `Sort_TopK_Int64_10k_K100` | 164 us | 7.7 K | 17 |
+| `Sort_TopK_Int64_100k_K100` | 1.11 ms | 29.6 K | 64 |
+| `Sort_TopK_Int64_100k_K100_Off50` | 1.20 ms | 31.0 K | 64 |
+| `Sort_TopK_Int64_100k_K100_NullsEvery10` | 1.20 ms | 29.6 K | 64 |
+| `Sort_FullAsc_Text_10k` | 3.97 ms | 253 K | 43 |
 
 Streaming top-K stays bounded at `K+Offset` entries regardless of input size.
 The text full-sort now rides a typed `bytes.Compare` fast path, dropping
@@ -69,26 +69,18 @@ Snapshot (hot mode, median ms across timed runs):
 | Query | Rows | Runs | Median (ms) | io | decode | exec |
 | --- | --- | --- | --- | --- | --- | --- |
 | `count` | 100k | 200 | ~0 | 0 | 0 | 0 |
-| `id_lookup` | 100k | 200 | ~0 | 0.03 | 0.05 | 0 |
-| `category_groupby` | 100k | 100 | 5.98 | 1.98 | 2.66 | 1.34 |
-| `category_groupby` | 10M | 10 | 615.53 | 156.63 | 668.55 | ~0 |
-| `top_age` | 100k | 200 | 2.12 | 0.45 | 1.28 | 0.40 |
-| `top_age` | 1M | 50 | 19.15 | 4.32 | 11.22 | 3.62 |
-| `top_age` | 10M | 10 | 249.91 | 52.73 | 150.61 | 46.57 |
+| `id_lookup` | 100k | 200 | ~0 | 0.03 | 0.06 | 0 |
+| `category_groupby` | 100k | 100 | 5.94 | 1.43 | 2.50 | 2.01 |
+| `category_groupby` | 10M | 10 | 608.13 | 118.59 | 569.48 | ~0 |
+| `top_age` | 100k | 200 | 2.27 | 0.49 | 1.36 | 0.42 |
+| `top_age` | 1M | 50 | 26.46 | 5.69 | 16.12 | 4.64 |
+| `top_age` | 10M | 10 | 249.17 | 52.91 | 155.24 | 41.02 |
 
-TPC-H-shaped queries are also available against a synthetic `lineitem`
-dataset (`tpch_q1`, `tpch_q6`). Dates are stored as int64 days since
-1992-01-01, and `l_disc_rev` / `l_disc_price` are precomputed because the
-aggregate-over-expression binder is not wired yet. Q3 (joined `customer`
-/ `orders` / `lineitem`) is a follow-up.
+TPC-H-shaped queries (`tpch_q1`, `tpch_q6`) run against a synthetic `lineitem` with dates stored as int64 days since 1992-01-01 and `l_disc_rev` / `l_disc_price` precomputed because the aggregate-over-expression binder is not wired yet; Q3 (joined `customer` / `orders` / `lineitem`) is a follow-up.
 
-`count` and `id_lookup` short-circuit through the `.sm` numsum sidecar and
-Binary Fuse 8 page-prune respectively, so they resolve without scanning row
-data. `category_groupby` reads its result from the dict-histogram sidecar
-when no `WHERE` is present.
+`count` and `id_lookup` short-circuit through the `.sm` numsum sidecar and Binary Fuse 8 page-prune respectively so they resolve without scanning row data, and `category_groupby` reads from the dict-histogram sidecar when no `WHERE` is present.
 
-The harness also prints min, p95, max, mean, and stddev, and these are
-reference points rather than regression gates.
+The harness also prints min, p95, max, mean, and stddev as reference points rather than regression gates.
 
 ## CLI
 
@@ -138,8 +130,8 @@ What the engine currently supports versus what's still on the list:
 | Correlated subqueries | yes | Outer column refs bind to parent scope; inner plan rebuilt per outer row with values threaded through a shared carrier |
 | Qualified column refs (`tbl.col`, `alias.col`) | yes | Resolve in single-table and joined scopes |
 | Window functions | yes | `ROW_NUMBER/RANK/DENSE_RANK` and aggregate `SUM/COUNT/MIN/MAX/AVG OVER (PARTITION BY ... ORDER BY ...)`; `ROWS` and `RANGE BETWEEN` frame clauses |
-| Predicate-on-encoded execution | partial | FOR-bitpacked int64 equality + LT/GT/BETWEEN, delta-bitpack int64 equality, dictionary-text equality all run on encoded bytes. Dict-text LT/GT still decode first |
-| Lazy footer / sidecar / validation decode | partial | PageStats, sidecars, and `validateColumnDirectory` are deferred to first access; per-column Pages slice still allocated at OpenSegment |
+| Predicate-on-encoded execution | yes | FOR-bitpacked int64 equality + LT/GT/BETWEEN, delta-bitpack int64 equality, dictionary-text equality + LT/GT/LE/GE all run on encoded bytes via a per-page accept mask |
+| Lazy footer / sidecar / validation decode | yes | PageStats, sidecars, and `validateColumnDirectory` all defer to first access |
 | Page-level varbytes pruning | yes | Per-page bloom filter sidecar (`.tbf`), FNV-1a-64 keyed; consulted by `boundEqBytes.PrunePage` after the segment-level dict-hist check |
 | Compaction / vacuum (for DV path) | yes | `DB.Compact` rewrites half-or-more-deleted segments; `DB.Vacuum` drops unreferenced DV files |
 | User-declared codecs in DDL | yes | `CREATE TABLE ... col WITH (codec = 'dictionary' | ... | 'fsst')` overrides cascade |

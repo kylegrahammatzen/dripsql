@@ -1,6 +1,6 @@
 // End-to-end storage benches: write, cold-open, scan, predicate scan, and lazy sidecar
 // load. Page shape mirrors the cmd/bench users dataset (id int64, name text, age int64,
-// category text) so the numbers stack against the workload bench in drip_bench.md.
+// category text) so the numbers stack against the workload bench.
 package storage
 
 import (
