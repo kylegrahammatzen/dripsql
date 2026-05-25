@@ -894,6 +894,45 @@ func (p *parser) expectIdent() (string, error) {
 }
 
 func (p *parser) parseSelect() (*SelectStmt, error) {
+	stmt, err := p.parseSelectBody()
+	if err != nil {
+		return nil, err
+	}
+	if ok, err := p.maybeWord("union"); err != nil {
+		return nil, err
+	} else if ok {
+		all, err := p.maybeWord("all")
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectWord("select"); err != nil {
+			return nil, err
+		}
+		right, err := p.parseSelectBody()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Union = &UnionTail{All: all, Right: right}
+	}
+	orderBy, err := p.parseOptionalOrderBy()
+	if err != nil {
+		return nil, err
+	}
+	limit, err := p.parseOptionalLimit()
+	if err != nil {
+		return nil, err
+	}
+	offset, err := p.parseOptionalOffset()
+	if err != nil {
+		return nil, err
+	}
+	stmt.OrderBy = orderBy
+	stmt.Limit = limit
+	stmt.Offset = offset
+	return stmt, nil
+}
+
+func (p *parser) parseSelectBody() (*SelectStmt, error) {
 	distinct, err := p.maybeWord("distinct")
 	if err != nil {
 		return nil, err
@@ -925,19 +964,6 @@ func (p *parser) parseSelect() (*SelectStmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	orderBy, err := p.parseOptionalOrderBy()
-	if err != nil {
-		return nil, err
-	}
-	limit, err := p.parseOptionalLimit()
-	if err != nil {
-		return nil, err
-	}
-	offset, err := p.parseOptionalOffset()
-	if err != nil {
-		return nil, err
-	}
-
 	return &SelectStmt{
 		From:     from,
 		Distinct: distinct,
@@ -945,9 +971,6 @@ func (p *parser) parseSelect() (*SelectStmt, error) {
 		Where:    where,
 		GroupBy:  groupBy,
 		Having:   having,
-		OrderBy:  orderBy,
-		Limit:    limit,
-		Offset:   offset,
 	}, nil
 }
 
@@ -1557,7 +1580,7 @@ func (p *parser) parseOptionalAlias(stops ...string) (string, error) {
 
 // Stop sets used at each alias call site.
 var (
-	aliasStopsTable  = []string{"join", "inner", "left", "right", "full", "outer", "on", "where", "group", "having", "order", "limit", "offset"}
+	aliasStopsTable  = []string{"join", "inner", "left", "right", "full", "outer", "on", "where", "group", "having", "order", "limit", "offset", "union"}
 	aliasStopsColumn = []string{"from"}
 )
 

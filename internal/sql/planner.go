@@ -131,6 +131,9 @@ func (p *Planner) planSelect(stmt *SelectStmt) (*Plan, error) {
 	if len(stmt.With) > 0 {
 		return p.planSelectWithCTEs(stmt)
 	}
+	if stmt.Union != nil {
+		return p.planSelectUnion(stmt)
+	}
 	if stmt.Distinct {
 		lowered, err := lowerDistinctToGroupBy(stmt)
 		if err != nil {
@@ -148,6 +151,77 @@ func (p *Planner) planSelect(stmt *SelectStmt) (*Plan, error) {
 	}
 	pruneJoinedScans(rel)
 	return &Plan{Kind: PlanQuery, Rel: rel}, nil
+}
+
+func (p *Planner) planSelectUnion(stmt *SelectStmt) (*Plan, error) {
+	tail := stmt.Union
+	leftStmt := *stmt
+	leftStmt.Union = nil
+	leftStmt.OrderBy = nil
+	leftStmt.Limit = nil
+	leftStmt.Offset = nil
+	leftPlan, err := p.planSelect(&leftStmt)
+	if err != nil {
+		return nil, err
+	}
+	rightPlan, err := p.planSelect(tail.Right)
+	if err != nil {
+		return nil, err
+	}
+	if leftPlan.Rel == nil || rightPlan.Rel == nil {
+		return nil, fmt.Errorf("UNION arm did not yield a query plan")
+	}
+	if err := checkUnionShape(leftPlan.Rel.Outputs, rightPlan.Rel.Outputs); err != nil {
+		return nil, err
+	}
+	root := unionRel(leftPlan.Rel, rightPlan.Rel)
+	if !tail.All {
+		root = dedupRel(root)
+	}
+	if len(stmt.OrderBy) > 0 || stmt.Limit != nil || stmt.Offset != nil {
+		outerCols := unionOutputColumns(root.Outputs)
+		root, err = applyOrderLimit(root, stmt, root.Outputs, outerCols)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &Plan{Kind: PlanQuery, Rel: root}, nil
+}
+
+func checkUnionShape(left, right []BoundOutput) error {
+	if len(left) != len(right) {
+		return fmt.Errorf("UNION arms must produce the same number of columns (%d vs %d)", len(left), len(right))
+	}
+	for i := range left {
+		if left[i].Expr.Type.Kind != right[i].Expr.Type.Kind {
+			return fmt.Errorf("UNION column %d types differ: %s vs %s", i+1, left[i].Expr.Type, right[i].Expr.Type)
+		}
+	}
+	return nil
+}
+
+func dedupRel(src *Rel) *Rel {
+	group := make([]BoundExpr, 0, len(src.Outputs))
+	outputs := make([]BoundOutput, 0, len(src.Outputs))
+	for _, out := range src.Outputs {
+		name := outputExprName(out)
+		ref := BoundExpr{Op: ExprColumn, Type: out.Expr.Type, Column: name}
+		group = append(group, ref)
+		outputs = append(outputs, BoundOutput{Alias: name, Expr: ref})
+	}
+	return aggregateRel(src, group, nil, nil, nil, outputs)
+}
+
+func unionOutputColumns(outputs []BoundOutput) map[string]BoundColumnDef {
+	cols := make(map[string]BoundColumnDef, len(outputs))
+	for i, out := range outputs {
+		name := outputExprName(out)
+		if name == "" {
+			name = fmt.Sprintf("col%d", i+1)
+		}
+		cols[types.NormalizeName(name)] = BoundColumnDef{Name: name, Type: out.Expr.Type, ID: ColumnID(i + 1)}
+	}
+	return cols
 }
 
 func (p *Planner) planSelectWithCTEs(stmt *SelectStmt) (*Plan, error) {

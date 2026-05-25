@@ -74,6 +74,13 @@ type SelectStmt struct {
 	OrderBy  []OrderExpr
 	Limit    *int64
 	Offset   *int64
+
+	Union *UnionTail
+}
+
+type UnionTail struct {
+	All   bool
+	Right *SelectStmt
 }
 
 type CTE struct {

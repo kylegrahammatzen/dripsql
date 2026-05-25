@@ -90,6 +90,8 @@ func (r *Rel) format(b *strings.Builder, depth int) {
 			fmt.Fprintf(b, " offset=%d", r.Offset)
 		}
 		b.WriteString("\n")
+	case RelUnion:
+		fmt.Fprintf(b, "%sUnion\n", indent)
 	default:
 		fmt.Fprintf(b, "%sRel(%v)\n", indent, r.Op)
 	}

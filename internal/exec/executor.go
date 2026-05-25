@@ -337,6 +337,20 @@ func buildRelWithOuter(rel *sql.Rel, segments SegmentsFn, outer *correlatedOuter
 			return nil, fmt.Errorf("BuildOperator: RelCTE missing inner rel")
 		}
 		return buildRelWithOuter(rel.Inputs[0], segments, outer)
+	case sql.RelUnion:
+		if len(rel.Inputs) != 2 || rel.Inputs[0] == nil || rel.Inputs[1] == nil {
+			return nil, fmt.Errorf("BuildOperator: RelUnion needs two inputs")
+		}
+		left, err := buildRelWithOuter(rel.Inputs[0], segments, outer)
+		if err != nil {
+			return nil, err
+		}
+		right, err := buildRelWithOuter(rel.Inputs[1], segments, outer)
+		if err != nil {
+			_ = left.Close()
+			return nil, err
+		}
+		return &UnionOp{Left: left, Right: right}, nil
 	case sql.RelWindow:
 		if len(rel.Inputs) != 1 || rel.Inputs[0] == nil {
 			return nil, fmt.Errorf("BuildOperator: RelWindow missing inner rel")

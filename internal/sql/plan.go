@@ -65,6 +65,7 @@ const (
 	RelLimit
 	RelCTE
 	RelWindow
+	RelUnion
 )
 
 type JoinKey struct {
@@ -268,6 +269,10 @@ func sortRel(src *Rel, keys []SortKey, k, offset int64) *Rel {
 
 func limitRel(src *Rel, n, offset int64) *Rel {
 	return &Rel{Op: RelLimit, Outputs: src.Outputs, Inputs: []*Rel{src}, Limit: n, Offset: offset}
+}
+
+func unionRel(left, right *Rel) *Rel {
+	return &Rel{Op: RelUnion, Outputs: left.Outputs, Inputs: []*Rel{left, right}}
 }
 
 type AggregateFunc uint8

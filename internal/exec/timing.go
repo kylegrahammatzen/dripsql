@@ -159,6 +159,21 @@ func buildRelAnalyzed(rel *sql.Rel, segments SegmentsFn) (Operator, *TimingStats
 			return nil, nil, err
 		}
 		return &timingOperator{inner: op, stats: st}, st, nil
+	case sql.RelUnion:
+		if len(rel.Inputs) != 2 {
+			return nil, nil, fmt.Errorf("buildRelAnalyzed: RelUnion needs two inputs")
+		}
+		left, lc, err := buildRelAnalyzed(rel.Inputs[0], segments)
+		if err != nil {
+			return nil, nil, err
+		}
+		right, rc, err := buildRelAnalyzed(rel.Inputs[1], segments)
+		if err != nil {
+			_ = left.Close()
+			return nil, nil, err
+		}
+		st.Children = append(st.Children, lc, rc)
+		return &timingOperator{inner: &UnionOp{Left: left, Right: right}, stats: st}, st, nil
 	}
 	return nil, nil, fmt.Errorf("buildRelAnalyzed: unsupported rel op %v", rel.Op)
 }
@@ -179,6 +194,8 @@ func relTimingLabel(rel *sql.Rel) string {
 		return "Sort"
 	case sql.RelJoin:
 		return rel.JoinKind.String() + "Join"
+	case sql.RelUnion:
+		return "Union"
 	}
 	return fmt.Sprintf("Rel(%v)", rel.Op)
 }
