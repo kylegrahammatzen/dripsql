@@ -915,11 +915,20 @@ func BindAlterTable(stmt *AlterTableStmt) (*Plan, error) {
 		if !typ.Valid() {
 			return nil, fmt.Errorf("ALTER TABLE ADD COLUMN: invalid type %q", stmt.Add.Type)
 		}
+		if stmt.Add.NotNull && !stmt.Add.HasDefault {
+			return nil, fmt.Errorf("ALTER TABLE ADD COLUMN %q NOT NULL requires DEFAULT (pre-existing rows would have no value)", stmt.Add.Name)
+		}
 		return &Plan{
 			Kind: PlanAlterTable,
 			Alter: &AlterPayload{
 				Table: table,
-				Add:   &AlterAddColumn{Name: name, Type: stmt.Add.Type},
+				Add: &AlterAddColumn{
+					Name:       name,
+					Type:       stmt.Add.Type,
+					NotNull:    stmt.Add.NotNull,
+					HasDefault: stmt.Add.HasDefault,
+					Default:    stmt.Add.Default,
+				},
 			},
 		}, nil
 	case stmt.Drop != nil:

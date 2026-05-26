@@ -35,6 +35,16 @@ type BoundColumnDef struct {
 	Labels   []string
 	Nullable bool
 	Codec    schema.Encoding
+	Default  BoundDefault
+}
+
+type BoundDefault struct {
+	Set   bool
+	Null  bool
+	I64   int64
+	F64   float64
+	Bytes []byte
+	Bool  bool
 }
 
 type BoundTableDef struct {

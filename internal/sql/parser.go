@@ -127,7 +127,40 @@ func (p *parser) parseAlter() (Stmt, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &AlterTableStmt{Table: tableName, Add: &AlterAddColumn{Name: name, Type: typeName}}, nil
+		add := &AlterAddColumn{Name: name, Type: typeName}
+		// Optional NOT NULL and DEFAULT modifiers in either order.
+		for {
+			tok, err := p.peek()
+			if err != nil {
+				return nil, err
+			}
+			if tok.typ != tokIdent {
+				break
+			}
+			switch tok.lit {
+			case "not":
+				if _, err := p.next(); err != nil {
+					return nil, err
+				}
+				if err := p.expectWord("null"); err != nil {
+					return nil, err
+				}
+				add.NotNull = true
+			case "default":
+				if _, err := p.next(); err != nil {
+					return nil, err
+				}
+				val, err := p.parseValue()
+				if err != nil {
+					return nil, err
+				}
+				add.HasDefault = true
+				add.Default = val
+			default:
+				return &AlterTableStmt{Table: tableName, Add: add}, nil
+			}
+		}
+		return &AlterTableStmt{Table: tableName, Add: add}, nil
 	case "drop":
 		if err := p.expectWord("column"); err != nil {
 			return nil, err

@@ -15,17 +15,12 @@ const (
 	bakFileName = fileName + bakSuffix
 )
 
-// Load reads the catalog at root and returns a validated *File. Returns an empty File
-// when no catalog exists. Sweeps stale .tmp files. Recovers from .bak if the main file
-// is missing but a backup is present. Migrates v1 in place and rewrites the file as v2.
 func Load(root string) (*File, error) {
 	path := filepath.Join(root, fileName)
 	tmpPath := filepath.Join(root, tmpFileName)
 	bakPath := filepath.Join(root, bakFileName)
 
-	// A stale .tmp implies a crash mid-save. The .json file is either the prior
-	// committed version (rename never happened) or the new one (rename succeeded after
-	// fsync). Either way the .tmp is garbage.
+	// A stale .tmp is always garbage left from a crashed save.
 	_ = os.Remove(tmpPath)
 
 	raw, err := os.ReadFile(path)

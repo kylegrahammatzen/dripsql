@@ -1,7 +1,5 @@
-// Migration from the v1 catalog shape to v2. The integer-to-string tables here are frozen
-// snapshots of the v1 iota values; they MUST NOT be edited after merge or existing
-// databases will load with the wrong meaning. New enum values are added by extending the
-// live iotas elsewhere, not by touching these tables.
+// v1 catalog -> v2 migration with frozen iota-to-string tables.
+// Never edit these tables after merge or existing databases load with wrong meanings.
 package catalog
 
 import (
@@ -64,7 +62,7 @@ type legacySegmentRows struct {
 	Rows int  `json:"Rows"`
 }
 
-// v1Kinds is the schema.Kind iota mapping as of catalog v1. Frozen at merge time.
+// Frozen snapshot of schema.Kind iota values as of v1.
 var v1Kinds = map[uint8]string{
 	1:  "bool",
 	2:  "int16",
@@ -83,9 +81,8 @@ var v1Kinds = map[uint8]string{
 	15: "named",
 }
 
-// v1Encodings is the schema.Encoding iota mapping as of catalog v1. Frozen at merge time.
-// 0 (EncInvalid) maps to the empty string -- the migration treats it as "no override" and
-// omits the column from storage_policy.column_codecs.
+// Frozen snapshot of schema.Encoding iota values as of v1.
+// EncInvalid maps to empty so the migrator drops it from storage_policy.column_codecs.
 var v1Encodings = map[uint8]string{
 	0:  "",
 	1:  "plain",
@@ -125,9 +122,7 @@ var v1Compression = map[uint8]string{
 	4: "best",
 }
 
-// isV1 reports whether the raw catalog bytes look like a v1 file. The decisive marker is
-// the absence of a top-level "format_version" key. Empty payloads are treated as fresh
-// catalogs, not v1.
+// v1 has no format_version key and an empty payload is treated as a fresh v2.
 func isV1(raw []byte) bool {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &probe); err != nil {
@@ -140,8 +135,6 @@ func isV1(raw []byte) bool {
 	return !hasFormatVersion
 }
 
-// migrateV1 converts a raw v1 catalog payload into a v2 *File. The caller is responsible
-// for persisting the result and preserving the original under catalog.json.bak.
 func migrateV1(raw []byte) (*File, error) {
 	var legacy legacyFile
 	if err := json.Unmarshal(raw, &legacy); err != nil {

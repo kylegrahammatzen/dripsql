@@ -86,9 +86,7 @@ func findSegmentColumn(seg *Segment, name string) (*SegmentColumn, bool) {
 	return nil, false
 }
 
-// findSegmentColumnByID prefers a column id match when both the segment carries the
-// identity sidecar and the caller supplied a non-zero id. Falls back to name match so
-// legacy segments still resolve and so callers without an id stay correct.
+// Prefers a column id match so renames survive, with name fallback for legacy segments.
 func findSegmentColumnByID(seg *Segment, name string, colID uint64) (*SegmentColumn, bool) {
 	if colID != 0 && seg.TableID != 0 {
 		for i := range seg.Cols {

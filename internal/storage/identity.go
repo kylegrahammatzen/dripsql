@@ -1,7 +1,5 @@
-// SegmentIdentity is the per-segment self-description that lets a reader resolve
-// columns by stable catalog identity rather than position. Stored as an optional
-// sidecar section so existing dsv4 segments keep loading; absence means "legacy
-// positional, fall back to ordinal mapping in the engine".
+// Optional sidecar that records the table_id, schema_generation, and per-chunk column_id list.
+// Absence means a legacy dsv4 segment that the engine still resolves positionally.
 package storage
 
 import (

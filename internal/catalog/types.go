@@ -1,5 +1,5 @@
-// Persisted catalog file types. The on-disk shape is a deliberate contract, not a
-// reflection dump of binder structs. All enum-shaped fields are strings.
+// Persisted catalog file types stable across versions.
+// Enum-shaped fields are stored as short canonical strings, not iota integers.
 package catalog
 
 import (
@@ -39,9 +39,7 @@ type Table struct {
 	NextColumnID        ColumnID      `json:"next_column_id"`
 	CreatedAtGeneration Generation    `json:"created_at_generation"`
 	UpdatedAtGeneration Generation    `json:"updated_at_generation"`
-	// LegacyPath signals that this table's segment data lives under the v1 directory
-	// layout (segments/<normalized_name>). New tables use the table_id-keyed layout
-	// (tables/<padded_table_id>) so RENAME TABLE can be metadata only later.
+	// LegacyPath means data lives under v1 segments/<name>/ rather than tables/<id>/.
 	LegacyPath          bool          `json:"legacy_path,omitempty"`
 	Columns             []Column      `json:"columns"`
 	PrimaryKey          []ColumnID    `json:"primary_key"`
@@ -71,7 +69,7 @@ type StoragePolicy struct {
 	ColumnCodecs  []ColumnCodec `json:"column_codecs"`
 }
 
-// Mode is "auto" or "fixed". Rows is meaningful only when Mode == "fixed".
+// Mode is "auto" or "fixed" and Rows is meaningful only in "fixed".
 type SegmentRows struct {
 	Mode string `json:"mode"`
 	Rows int    `json:"rows,omitempty"`
@@ -96,8 +94,7 @@ type Index struct {
 	Unique  bool       `json:"unique"`
 }
 
-// MarshalJSON forces empty slices to render as [] rather than null. The catalog file is
-// human-read often enough that null in the slice slots is a sustained source of noise.
+// Force empty slices to render as [] so hand-read catalogs never carry stray nulls.
 func (f File) MarshalJSON() ([]byte, error) {
 	type alias File
 	out := alias(f)

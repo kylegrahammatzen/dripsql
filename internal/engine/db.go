@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -316,6 +317,7 @@ func (db *DB) boundTable(entry *catalog.Table) sql.BoundTableDef {
 			Nullable: col.Nullable,
 			Labels:   labels,
 			Codec:    codecForColumn(entry.StoragePolicy, col.ColumnID),
+			Default:  decodeColumnDefault(col, t),
 		})
 	}
 	return sql.BoundTableDef{
@@ -431,8 +433,7 @@ func (db *DB) alterTable(p *sql.AlterPayload) error {
 	return fmt.Errorf("ALTER TABLE: unsupported operation")
 }
 
-// wideningCasts enumerates the type widenings the scan path can perform on read. Any
-// other change requires a segment rewrite and is rejected here.
+// Any cast not in this set requires a segment rewrite and is rejected up front.
 var wideningCasts = map[[2]schema.Kind]struct{}{
 	{schema.KindInt32, schema.KindInt64}:     {},
 	{schema.KindFloat32, schema.KindFloat64}: {},
@@ -502,6 +503,14 @@ func (db *DB) addColumn(tab *catalog.Table, p *sql.AlterAddColumn) error {
 	if err != nil {
 		return err
 	}
+	var defaultRaw *json.RawMessage
+	if p.HasDefault {
+		raw, err := encodeDefaultLiteral(p.Default, typ)
+		if err != nil {
+			return fmt.Errorf("ALTER TABLE ADD COLUMN %q: %w", p.Name, err)
+		}
+		defaultRaw = &raw
+	}
 	prevGen := db.catalog.Generation
 	prevSchemaVersion := tab.SchemaVersion
 	prevUpdated := tab.UpdatedAtGeneration
@@ -519,9 +528,10 @@ func (db *DB) addColumn(tab *catalog.Table, p *sql.AlterAddColumn) error {
 		ColumnID:          colID,
 		Name:              name,
 		Type:              typeStr,
-		Nullable:          true,
+		Nullable:          !p.NotNull,
 		Ordinal:           ordinal,
 		AddedAtGeneration: newGen,
+		InitialDefault:    defaultRaw,
 	})
 	tab.NextColumnID = colID + 1
 	tab.SchemaVersion++
@@ -538,6 +548,43 @@ func (db *DB) addColumn(tab *catalog.Table, p *sql.AlterAddColumn) error {
 		return err
 	}
 	return nil
+}
+
+// json null stays distinct from a nil RawMessage so loaders can tell "default is NULL" from "no default".
+func encodeDefaultLiteral(v sql.Value, t schema.Type) (json.RawMessage, error) {
+	if v.Kind == sql.ValueNull {
+		return json.RawMessage("null"), nil
+	}
+	switch t.Kind {
+	case schema.KindBool:
+		if v.Kind != sql.ValueBool {
+			return nil, fmt.Errorf("DEFAULT for bool column must be a bool literal")
+		}
+		if v.Bool {
+			return json.RawMessage("true"), nil
+		}
+		return json.RawMessage("false"), nil
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64,
+		schema.KindTimestamp, schema.KindTime, schema.KindDate:
+		if v.Kind != sql.ValueInt {
+			return nil, fmt.Errorf("DEFAULT for %s column must be an integer literal", t)
+		}
+		return json.Marshal(v.Int)
+	case schema.KindFloat32, schema.KindFloat64, schema.KindDecimal:
+		switch v.Kind {
+		case sql.ValueFloat:
+			return json.Marshal(v.Float)
+		case sql.ValueInt:
+			return json.Marshal(float64(v.Int))
+		}
+		return nil, fmt.Errorf("DEFAULT for %s column must be a numeric literal", t)
+	case schema.KindText, schema.KindBytes, schema.KindUUID, schema.KindJSON:
+		if v.Kind != sql.ValueString {
+			return nil, fmt.Errorf("DEFAULT for %s column must be a string literal", t)
+		}
+		return json.Marshal(v.String)
+	}
+	return nil, fmt.Errorf("DEFAULT not supported for type %s", t)
 }
 
 func (db *DB) dropColumn(tab *catalog.Table, p *sql.AlterDropColumn) error {

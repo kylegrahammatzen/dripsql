@@ -1,8 +1,8 @@
-// Engine-side shim over internal/catalog. Converts between the persisted catalog.Table
-// shape and the schema.TableSpec shape the binder produces and the runtime consumes.
+// Engine glue between persisted catalog.Table and binder-side schema.TableSpec.
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/kylegrahammatzen/dripsql/internal/catalog"
@@ -11,8 +11,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
 )
 
-// indexTypes/indexTables build by-name maps over the catalog file's slices. Maps share
-// pointers with the file so mutations under db.mu are visible through both.
+// Maps share pointers with the catalog file so mutations under db.mu are visible through both.
 func indexTypes(f *catalog.File) map[string]*catalog.Type {
 	out := make(map[string]*catalog.Type, len(f.Types))
 	for i := range f.Types {
@@ -29,9 +28,6 @@ func indexTables(f *catalog.File) map[string]*catalog.Table {
 	return out
 }
 
-// optionsFromPolicy maps a catalog StoragePolicy back to the in-memory TableOptions
-// shape that BoundTableDef carries. Returns zero-valued TableOptions on any unknown
-// enum so callers always receive a well-formed value.
 func optionsFromPolicy(p catalog.StoragePolicy, cols []catalog.Column) schema.TableOptions {
 	out := schema.TableOptions{}
 	if v, ok := schema.ParseStorageKindStrict(p.Storage); ok {
@@ -73,9 +69,7 @@ func columnName(cols []catalog.Column, id catalog.ColumnID) string {
 	return ""
 }
 
-// segmentIdentity builds a SegmentIdentity for a fresh write. ColumnIDs follow the
-// declaration order of def.Columns so the segment's footer columns line up with the
-// catalog identity at index i.
+// ColumnIDs are ordered to match the segment writer so footer column index lines up with the identity table.
 func (db *DB) segmentIdentity(def sql.BoundTableDef) storage.SegmentIdentity {
 	ids := make([]uint64, len(def.Columns))
 	for i, c := range def.Columns {
@@ -88,7 +82,44 @@ func (db *DB) segmentIdentity(def sql.BoundTableDef) storage.SegmentIdentity {
 	}
 }
 
-// codecForColumn returns the configured Encoding for a column, or EncInvalid if none.
+func decodeColumnDefault(col catalog.Column, t schema.Type) sql.BoundDefault {
+	if col.InitialDefault == nil {
+		return sql.BoundDefault{}
+	}
+	raw := []byte(*col.InitialDefault)
+	if string(raw) == "null" {
+		return sql.BoundDefault{Set: true, Null: true}
+	}
+	switch t.Kind {
+	case schema.KindBool:
+		var b bool
+		if err := json.Unmarshal(raw, &b); err != nil {
+			return sql.BoundDefault{}
+		}
+		return sql.BoundDefault{Set: true, Bool: b}
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64,
+		schema.KindTimestamp, schema.KindTime, schema.KindDate, schema.KindDecimal:
+		var n int64
+		if err := json.Unmarshal(raw, &n); err != nil {
+			return sql.BoundDefault{}
+		}
+		return sql.BoundDefault{Set: true, I64: n}
+	case schema.KindFloat32, schema.KindFloat64:
+		var f float64
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return sql.BoundDefault{}
+		}
+		return sql.BoundDefault{Set: true, F64: f}
+	case schema.KindText, schema.KindBytes, schema.KindUUID, schema.KindJSON:
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return sql.BoundDefault{}
+		}
+		return sql.BoundDefault{Set: true, Bytes: []byte(s)}
+	}
+	return sql.BoundDefault{}
+}
+
 func codecForColumn(p catalog.StoragePolicy, id catalog.ColumnID) schema.Encoding {
 	for _, cc := range p.ColumnCodecs {
 		if cc.ColumnID != id {
@@ -101,9 +132,6 @@ func codecForColumn(p catalog.StoragePolicy, id catalog.ColumnID) schema.Encodin
 	return schema.EncInvalid
 }
 
-// buildTable converts a binder-side schema.TableSpec into a persisted catalog.Table,
-// allocating stable column IDs from the per-table next_column_id. The catalog file is
-// not yet aware of the new table; the caller commits it under registerTable.
 func buildTable(file *catalog.File, spec schema.TableSpec, gen catalog.Generation) (catalog.Table, error) {
 	tab := catalog.Table{
 		TableID:             file.NextTableID,

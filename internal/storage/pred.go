@@ -58,9 +58,7 @@ func (op PredOp) String() string {
 type Pred struct {
 	Op   PredOp
 	Col  string
-	// ColID is the stable catalog id for Col. Set when the engine builds the Pred so
-	// that segments carrying the identity sidecar can resolve renamed columns by id
-	// instead of by name. Zero falls back to name match (legacy or no-id callers).
+	// ColID is set by the engine so renames resolve by id when the segment carries identity.
 	ColID uint64
 	Kind  vector.VecKind
 
@@ -132,9 +130,7 @@ func (p Pred) Columns() []string {
 	return names
 }
 
-// ColumnIDs returns the catalog ids referenced by p, parallel to Columns. Entries are
-// zero for leaves built without an id (legacy callers); scan resolves by name in that
-// case.
+// Returned ids are parallel to Columns, zero for leaves built without an id.
 func (p Pred) ColumnIDs() []uint64 {
 	_, ids := p.columnRefs()
 	return ids

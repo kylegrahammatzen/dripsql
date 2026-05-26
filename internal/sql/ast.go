@@ -37,22 +37,18 @@ type AlterRenameColumn struct {
 	To   string
 }
 
-// AlterAddColumn carries the column to be appended to the table. The first cut only
-// accepts nullable columns with no explicit default; pre-existing segments project NULL
-// for the new column id at scan time.
 type AlterAddColumn struct {
-	Name string
-	Type string
+	Name       string
+	Type       string
+	NotNull    bool
+	HasDefault bool
+	Default    Value
 }
 
-// AlterDropColumn tombstones an active column. The bytes stay on disk; the catalog
-// stops exposing it to binders and scans.
 type AlterDropColumn struct {
 	Name string
 }
 
-// AlterColumnType widens the logical type of an existing column. Only widenings the
-// scan layer knows how to cast are accepted today (int32 -&gt; int64, float32 -&gt; float64).
 type AlterColumnType struct {
 	Name string
 	Type string

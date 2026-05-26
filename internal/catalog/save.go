@@ -9,9 +9,7 @@ import (
 	"runtime"
 )
 
-// Save serializes f and writes it to catalog.json atomically. The prior catalog.json is
-// preserved as catalog.json.bak. Pattern is: write .tmp, fsync, rename current to .bak,
-// rename .tmp to .json, fsync parent (POSIX only).
+// Atomic save flow is write .tmp, fsync, rename current to .bak, rename .tmp to .json, fsync parent on POSIX.
 func Save(root string, f *File) error {
 	if err := Validate(f); err != nil {
 		return err
