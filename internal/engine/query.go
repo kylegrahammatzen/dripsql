@@ -107,11 +107,8 @@ func (db *DB) openSegmentsAt(table string, readTs uint64) ([]*storage.Segment, e
 	for _, entry := range view.Entries {
 		key := segCacheKey{path: entry.Path, dvPath: entry.DeletionVectorPath}
 		working[key] = struct{}{}
-		if elem, ok := db.segCache[key]; ok {
-			db.segLRU.MoveToBack(elem)
-			seg := elem.Value.(*segCacheEntry).seg
-			// Cached *os.File is still valid after a manifest rewrite. CommitTs may differ
-			// so refresh from the current entry.
+		if seg, ok := db.segments.touch(key); ok {
+			// CommitTs may differ after a manifest rewrite even when the file handle is still valid.
 			seg.CommitTs = entry.CommitTs
 			segs = append(segs, seg)
 			continue
@@ -121,36 +118,11 @@ func (db *DB) openSegmentsAt(table string, readTs uint64) ([]*storage.Segment, e
 			return nil, fmt.Errorf("engine: open segment %q: %w", entry.Path, err)
 		}
 		seg.CommitTs = entry.CommitTs
-		ce := &segCacheEntry{key: key, seg: seg}
-		db.segCache[key] = db.segLRU.PushBack(ce)
+		db.segments.add(key, seg)
 		segs = append(segs, seg)
 	}
-	db.evictColdSegments(working)
+	db.segments.evictExcept(working)
 	return segs, nil
-}
-
-// evictColdSegments closes the oldest cached segments that are not in the current
-// query's working set, until the cache fits under db.segCacheLimit. Segments needed
-// by the in-progress query stay open. Called while db.mu is held.
-func (db *DB) evictColdSegments(working map[segCacheKey]struct{}) {
-	limit := db.segCacheLimit()
-	for db.segLRU.Len() > limit {
-		evicted := false
-		for e := db.segLRU.Front(); e != nil; e = e.Next() {
-			entry := e.Value.(*segCacheEntry)
-			if _, used := working[entry.key]; used {
-				continue
-			}
-			_ = entry.seg.Close()
-			db.segLRU.Remove(e)
-			delete(db.segCache, entry.key)
-			evicted = true
-			break
-		}
-		if !evicted {
-			return
-		}
-	}
 }
 
 func columnNames(batch vector.Batch) []string {

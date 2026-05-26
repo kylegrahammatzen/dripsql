@@ -3,7 +3,6 @@
 package engine
 
 import (
-	"container/list"
 	"context"
 	"fmt"
 	"os"
@@ -27,8 +26,7 @@ type DB struct {
 	plans         *sql.PlanCache
 	manifests     map[string]*storage.Manifest
 	segCount      map[string]uint64
-	segCache      map[segCacheKey]*list.Element
-	segLRU        *list.List
+	segments      *segmentCache
 	closed        bool
 	lastWriteSpan atomic.Pointer[storage.Span]
 	wal           *storage.WAL
@@ -56,11 +54,6 @@ func (db *DB) SetCacheSize(n int) {
 
 func (db *DB) SetReadOnly(on bool) { db.readOnly.Store(on) }
 
-type segCacheEntry struct {
-	key segCacheKey
-	seg *storage.Segment
-}
-
 // Default keeps us well below the Windows default-handle ceiling without thrashing on typical workloads.
 const defaultSegCacheLimit = 256
 
@@ -83,11 +76,6 @@ func (db *DB) publishWriteSpan(s *storage.Span) {
 		return
 	}
 	db.lastWriteSpan.Store(s)
-}
-
-type segCacheKey struct {
-	path   string
-	dvPath string
 }
 
 type Result struct {
@@ -139,10 +127,9 @@ func Open(path string) (*DB, error) {
 		plans:        sql.NewPlanCache(256),
 		manifests:    make(map[string]*storage.Manifest),
 		segCount:     make(map[string]uint64),
-		segCache:     make(map[segCacheKey]*list.Element),
-		segLRU:       list.New(),
 		pinnedReadTs: make(map[uint64]int),
 	}
+	db.segments = newSegmentCache(db.segCacheLimit)
 	var maxCommitTs uint64
 	for name := range tablesByName {
 		m, err := db.manifestFor(name)
@@ -169,14 +156,7 @@ func (db *DB) Close() error {
 		return nil
 	}
 	db.closed = true
-	var firstErr error
-	for e := db.segLRU.Front(); e != nil; e = e.Next() {
-		if err := e.Value.(*segCacheEntry).seg.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	db.segCache = nil
-	db.segLRU = nil
+	firstErr := db.segments.close()
 	for _, m := range db.manifests {
 		if err := m.Close(); err != nil && firstErr == nil {
 			firstErr = err

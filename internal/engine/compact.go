@@ -191,14 +191,7 @@ func (db *DB) retireFullyDeletedSegments(table string, cutoff uint64) (int, erro
 		return 0, nil
 	}
 	for _, p := range paths {
-		for k, elem := range db.segCache {
-			if k.path != p {
-				continue
-			}
-			_ = elem.Value.(*segCacheEntry).seg.Close()
-			db.segLRU.Remove(elem)
-			delete(db.segCache, k)
-		}
+		db.segments.removeByPath(p)
 	}
 	commitTs := db.nextCommitTs.Add(1)
 	if err := m.Retire(commitTs, paths); err != nil {
