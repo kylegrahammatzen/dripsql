@@ -46,17 +46,17 @@ go test ./internal/exec -bench=. -benchmem -run=^$ -count=10
 
 | Bench | ns/op | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `Filter_Int64Less` | _pending_ | | |
-| `Filter_Int64Between` | _pending_ | | |
-| `Filter_Int64AndCompound` | _pending_ | | |
-| `Filter_Int64Equal` | _pending_ | | |
-| `Sort_FullAsc_Int64_10k` | _pending_ | | |
-| `Sort_FullDesc_Int64_10k` | _pending_ | | |
-| `Sort_TopK_Int64_10k_K100` | _pending_ | | |
-| `Sort_TopK_Int64_100k_K100` | _pending_ | | |
-| `Sort_TopK_Int64_100k_K100_Off50` | _pending_ | | |
-| `Sort_TopK_Int64_100k_K100_NullsEvery10` | _pending_ | | |
-| `Sort_FullAsc_Text_10k` | _pending_ | | |
+| `Filter_Int64Less` | 2494 | 256 | 1 |
+| `Filter_Int64Between` | 3288 | 256 | 1 |
+| `Filter_Int64AndCompound` | 5378 | 256 | 1 |
+| `Filter_Int64Equal` | 2684 | 256 | 1 |
+| `Sort_FullAsc_Int64_10k` | 1.49 ms | 252 K | 38 |
+| `Sort_FullDesc_Int64_10k` | 1.59 ms | 252 K | 38 |
+| `Sort_TopK_Int64_10k_K100` | 194 us | 7.7 K | 17 |
+| `Sort_TopK_Int64_100k_K100` | 1.19 ms | 29.6 K | 64 |
+| `Sort_TopK_Int64_100k_K100_Off50` | 1.23 ms | 31.0 K | 64 |
+| `Sort_TopK_Int64_100k_K100_NullsEvery10` | 1.19 ms | 29.6 K | 64 |
+| `Sort_FullAsc_Text_10k` | 3.74 ms | 253 K | 43 |
 
 ## Storage microbenchmarks
 
@@ -67,22 +67,24 @@ go test ./internal/storage/codec -bench=. -benchmem -run=^$ -count=10
 
 | Bench | ns/op | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `Storage_ScanFull` | _pending_ | | |
-| `Storage_ScanEqInt64Hit` | _pending_ | | |
-| `Storage_ScanEqInt64Miss` | _pending_ | | |
-| `Storage_ScanEqBytesHit` | _pending_ | | |
-| `Storage_WriteSegment_Int64Random` | _pending_ | | |
-| `Storage_WriteSegment_Int64Constant` | _pending_ | | |
-| `Storage_WriteSegment_Int64Monotonic` | _pending_ | | |
-| `Storage_WriteSegment_Int64SparseNulls` | _pending_ | | |
-| `Storage_WriteSegment_Float64Plain` | _pending_ | | |
-| `Storage_WriteSegment_Float64Decimal` | _pending_ | | |
-| `Storage_WriteSegment_TextLowCardinality` | _pending_ | | |
-| `Codec_Decode/for_int64` | _pending_ | | |
-| `Codec_Decode/delta_int64` | _pending_ | | |
-| `Codec_Decode/pcodec_int64` | _pending_ | | |
-| `Codec_Decode/constant_int64` | _pending_ | | |
-| `Codec_Decode/sequence_int64` | _pending_ | | |
-| `Codec_Decode/plain_int64` | _pending_ | | |
-| `Codec_Decode/dict_text_lowcard` | _pending_ | | |
-| `Codec_Decode/plain_text` | _pending_ | | |
+| `Storage_ScanFull` | 288 us | 467 K | 70 |
+| `Storage_ScanEqInt64Hit` | 305 us | 467 K | 72 |
+| `Storage_ScanEqInt64Miss` | 730 | 232 | 6 |
+| `Storage_ScanEqBytesHit` | 323 us | 465 K | 71 |
+| `Storage_WriteSegment_Int64Random` | 3.58 ms | 294 K | 91 |
+| `Storage_WriteSegment_Int64Constant` | 2.71 ms | 150 K | 85 |
+| `Storage_WriteSegment_Int64Monotonic` | 2.97 ms | 277 K | 98 |
+| `Storage_WriteSegment_Int64SparseNulls` | 2.51 ms | 132 K | 53 |
+| `Storage_WriteSegment_Float64Plain` | 4.43 ms | 263 K | 81 |
+| `Storage_WriteSegment_Float64Decimal` | 3.53 ms | 287 K | 119 |
+| `Storage_WriteSegment_TextLowCardinality` | 16.5 ms | 2.99 M | 307 K |
+| `Codec_Decode/for_int64` | 30 us | 87 K | 16 K |
+| `Codec_Decode/delta_int64` | 26 us | 31 K | 33 K |
+| `Codec_Decode/pcodec_int64` | 27 us | 60 K | 16 K |
+| `Codec_Decode/constant_int64` | 5.5 us | 1.5 K | 0 |
+| `Codec_Decode/sequence_int64` | 1.6 us | 9.8 K | 0 |
+| `Codec_Decode/plain_int64` | 190 | 87 K | 0 |
+| `Codec_Decode/dict_text_lowcard` | 12 us | 181 K | 33 K |
+| `Codec_Decode/plain_text` | 63 us | 503 K | 55 K |
+
+`Storage_ScanEqInt64Miss` is the page-prune fast path resolving in sub-microsecond via the Binary Fuse 8 `.bf` sidecar. Sidecar loaders all sit below 25us and run once per segment open.
