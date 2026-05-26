@@ -8,5 +8,3 @@ bench-db/
 demo-db/
 *.pprof
 *.exe
-.bench/
-!.bench/README.md

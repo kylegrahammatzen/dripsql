@@ -24,22 +24,32 @@ go run ./cmd/bench -query <name> -rows <N> -runs <R> -mode hot -json
 | `-mode` | `hot` or `cold-soft` (close and reopen DB between runs) |
 | `-json` | Emit results as JSON for downstream tooling |
 
-## Snapshot (hot mode, median ms across timed runs)
+## Comparing workload runs
 
-| Query | Rows | Runs | Median ms | io | decode | exec |
+```
+go run ./cmd/bench -query top_age -rows 1000000 -runs 50 -mode hot -json > head.json
+go run ./cmd/bench compare base.json head.json -threshold 10
+```
+
+`compare` reads JSON or JSONL outputs from the workload driver and reports median deltas with a simple threshold verdict. Keep comparison artifacts fresh because workload variance and implementation details move quickly.
+
+## Snapshot (hot mode, median wall time across timed runs)
+
+| Query | Rows | Runs | Median | io | decode | exec |
 | --- | --- | --- | --- | --- | --- | --- |
-| `count` | 100k | 200 | ~0 | 0 | 0 | 0 |
-| `id_lookup` | 100k | 200 | ~0 | 0.03 | 0.06 | 0 |
-| `category_groupby` | 100k | 100 | 5.94 | 1.43 | 2.50 | 2.01 |
-| `category_groupby` | 10M | 10 | 608.13 | 118.59 | 569.48 | ~0 |
-| `top_age` | 100k | 200 | 2.27 | 0.49 | 1.36 | 0.42 |
-| `top_age` | 1M | 50 | 26.46 | 5.69 | 16.12 | 4.64 |
-| `top_age` | 10M | 10 | 249.17 | 52.91 | 155.24 | 41.02 |
+| `count` | 100k | 200 | <1 us | <1 us | <1 us | <1 us |
+| `id_lookup` | 100k | 200 | <1 us | 30 us | 49 us | <1 us |
+| `category_groupby` | 100k | 100 | 5.93 ms | 1.74 ms | 2.40 ms | 1.78 ms |
+| `category_groupby` | 10M | 10 | 622.19 ms | 147.01 ms | 593.72 ms | <1 us |
+| `top_age` | 100k | 200 | 2.14 ms | 441 us | 1.29 ms | 413 us |
+| `top_age` | 1M | 50 | 28.03 ms | 6.05 ms | 15.92 ms | 6.06 ms |
+| `top_age` | 10M | 10 | 257.08 ms | 54.96 ms | 151.15 ms | 50.96 ms |
 
 - `count` and `id_lookup` short-circuit via the `.sm` numsum and Binary Fuse 8 sidecars.
 - `count(*)` stays on the metadata-only path even after `DELETE` by popcounting the segment's deletion vector instead of scanning pages.
 - `category_groupby` reads from the dict-histogram sidecar when no `WHERE` is present.
 - TPC-H Q1 and Q6 run against a synthetic `lineitem` with dates as int64 days since 1992-01-01.
+- `<1 us` means the workload driver reported a zero microsecond median, which is below the harness measurement floor rather than literal zero work.
 
 ## Exec microbenchmarks
 
@@ -47,19 +57,19 @@ go run ./cmd/bench -query <name> -rows <N> -runs <R> -mode hot -json
 go test ./internal/exec '-bench=.' '-benchmem' '-run=^$' '-count=10'
 ```
 
-| Bench | ns/op | B/op | allocs/op |
+| Bench | Time | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `Filter_Int64Less` | 2494 | 256 | 1 |
-| `Filter_Int64Between` | 3288 | 256 | 1 |
-| `Filter_Int64AndCompound` | 5378 | 256 | 1 |
-| `Filter_Int64Equal` | 2684 | 256 | 1 |
-| `Sort_FullAsc_Int64_10k` | 1.49 ms | 252 K | 38 |
-| `Sort_FullDesc_Int64_10k` | 1.59 ms | 252 K | 38 |
-| `Sort_TopK_Int64_10k_K100` | 194 us | 7.7 K | 17 |
-| `Sort_TopK_Int64_100k_K100` | 1.19 ms | 29.6 K | 64 |
-| `Sort_TopK_Int64_100k_K100_Off50` | 1.23 ms | 31.0 K | 64 |
-| `Sort_TopK_Int64_100k_K100_NullsEvery10` | 1.19 ms | 29.6 K | 64 |
-| `Sort_FullAsc_Text_10k` | 3.74 ms | 253 K | 43 |
+| `Filter_Int64Less` | 2.55 us | 256 | 1 |
+| `Filter_Int64Between` | 3.10 us | 256 | 1 |
+| `Filter_Int64AndCompound` | 4.34 us | 256 | 1 |
+| `Filter_Int64Equal` | 2.44 us | 256 | 1 |
+| `Sort_FullAsc_Int64_10k` | 1.45 ms | 251 K | 33 |
+| `Sort_FullDesc_Int64_10k` | 1.42 ms | 251 K | 33 |
+| `Sort_TopK_Int64_10k_K100` | 97.8 us | 6.4 K | 12 |
+| `Sort_TopK_Int64_100k_K100` | 733 us | 17.1 K | 15 |
+| `Sort_TopK_Int64_100k_K100_Off50` | 762 us | 18.5 K | 15 |
+| `Sort_TopK_Int64_100k_K100_NullsEvery10` | 775 us | 17.1 K | 15 |
+| `Sort_FullAsc_Text_10k` | 3.44 ms | 251 K | 38 |
 
 ## Storage microbenchmarks
 
@@ -68,27 +78,28 @@ go test ./internal/storage '-bench=.' '-benchmem' '-run=^$' '-count=10'
 go test ./internal/storage/codec '-bench=.' '-benchmem' '-run=^$' '-count=10'
 ```
 
-| Bench | ns/op | B/op | allocs/op |
+| Bench | Time | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `Storage_ScanFull` | 288 us | 467 K | 70 |
-| `Storage_ScanEqInt64Hit` | 305 us | 467 K | 72 |
-| `Storage_ScanEqInt64Miss` | 730 | 232 | 6 |
-| `Storage_ScanEqBytesHit` | 323 us | 465 K | 71 |
-| `Storage_WriteSegment_Int64Random` | 3.58 ms | 294 K | 91 |
-| `Storage_WriteSegment_Int64Constant` | 2.71 ms | 150 K | 85 |
-| `Storage_WriteSegment_Int64Monotonic` | 2.97 ms | 277 K | 98 |
-| `Storage_WriteSegment_Int64SparseNulls` | 2.51 ms | 132 K | 53 |
-| `Storage_WriteSegment_Float64Plain` | 4.43 ms | 263 K | 81 |
-| `Storage_WriteSegment_Float64Decimal` | 3.53 ms | 287 K | 119 |
-| `Storage_WriteSegment_TextLowCardinality` | 16.5 ms | 2.99 M | 307 K |
-| `Codec_Decode/for_int64` | 30 us | 87 K | 16 K |
-| `Codec_Decode/delta_int64` | 26 us | 31 K | 33 K |
-| `Codec_Decode/pcodec_int64` | 27 us | 60 K | 16 K |
-| `Codec_Decode/constant_int64` | 5.5 us | 1.5 K | 0 |
-| `Codec_Decode/sequence_int64` | 1.6 us | 9.8 K | 0 |
-| `Codec_Decode/plain_int64` | 190 | 87 K | 0 |
-| `Codec_Decode/dict_text_lowcard` | 12 us | 181 K | 33 K |
-| `Codec_Decode/plain_text` | 63 us | 503 K | 55 K |
+| `Storage_ScanFull` | 279 us | 467 K | 70 |
+| `Storage_ScanEqInt64Hit` | 289 us | 467 K | 72 |
+| `Storage_ScanEqInt64Miss` | 671 ns | 232 | 6 |
+| `Storage_ScanEqBytesHit` | 318 us | 465 K | 71 |
+| `Storage_ScanLtInt64AllMatchUnprojected` | 65 us | 132 K | 27 |
+| `Storage_WriteSegment_Int64Random` | 2.99 ms | 294 K | 91 |
+| `Storage_WriteSegment_Int64Constant` | 2.20 ms | 150 K | 85 |
+| `Storage_WriteSegment_Int64Monotonic` | 2.28 ms | 277 K | 98 |
+| `Storage_WriteSegment_Int64SparseNulls` | 1.94 ms | 132 K | 53 |
+| `Storage_WriteSegment_Float64Plain` | 3.29 ms | 263 K | 81 |
+| `Storage_WriteSegment_Float64Decimal` | 3.56 ms | 287 K | 119 |
+| `Storage_WriteSegment_TextLowCardinality` | 16.6 ms | 2.99 M | 307 K |
+| `Codec_Decode/for_int64` | 26 us | 16 K | 1 |
+| `Codec_Decode/delta_int64` | 22 us | 33 K | 2 |
+| `Codec_Decode/pcodec_int64` | 22 us | 16 K | 1 |
+| `Codec_Decode/constant_int64` | 5.3 us | 0 | 0 |
+| `Codec_Decode/sequence_int64` | 1.6 us | 0 | 0 |
+| `Codec_Decode/plain_int64` | 160 ns | 0 | 0 |
+| `Codec_Decode/dict_text_lowcard` | 9.7 us | 33 K | 5 |
+| `Codec_Decode/plain_text` | 48 us | 55 K | 3 |
 
 `Storage_ScanEqInt64Miss` is the page-prune fast path resolving in sub-microsecond via the Binary Fuse 8 `.bf` sidecar. Sidecar loaders all sit below 25us and run once per segment open.
 
@@ -113,4 +124,4 @@ go test '-run=^$' '-bench=Benchmark(Filter_|Storage_ScanFull)|Codec_Decode/plain
 
 - Runs in ~10s instead of 10 min.
 - Anchor the regex with `Benchmark(...)` because a bare `Filter` also matches things like `Storage_LoadIntFilter`.
-- Reserve this form for "did I regress" iteration and use the full-sweep form above when capturing a `.bench/final.txt` baseline.
+- Reserve this form for "did I regress" iteration and use the full-sweep form above when capturing a fresh baseline.

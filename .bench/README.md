@@ -1,31 +1,26 @@
-# Bench artifacts
+# Benchmark Logs
 
-This directory captures the pre-recode benchmark baseline plus per-phase artifacts produced by the recode.
+This directory keeps curated benchmark captures that are useful as local history.
 
-## Capture conditions (T00 baseline)
+Keep only fresh, intentional artifacts here. Prefer timestamped names so every run is traceable.
 
-- Date: 2026-05-25
-- Host CPU: AMD Ryzen 7 3700X 8-Core (16 logical processors, SMT on)
-- OS: Microsoft Windows 11 Home, build 26200
-- Go: go1.26.0 windows/amd64
-- Power plan: unknown (admin-only query failed, plan defaults to Balanced unless changed)
-- Git SHA at micro-bench capture: 1a7622b (post Phase 1 ceremony sweep)
-- Bench protocol: -count=10 -benchtime=1s, benchstat-readable
+## Capture A Workload
 
-## Files
+```
+go run ./cmd/bench -query top_age -rows 1000000 -runs 50 -mode hot -json > .bench/workload-YYYYMMDD-HHMMSS.json
+```
 
-- baseline.txt: micro-bench output (`go test ./internal/exec ./internal/storage ./internal/storage/codec ./internal/types -bench=. -benchmem`)
-- baseline_workload.json: workload bench JSONL (one object per query+rows pair from `cmd/bench`)
-- phase<N>.txt: per-phase verification snapshot, captured at each Phase Verify task
+Use JSONL when recording several workload queries into one file.
 
-## Sequencing note
+```
+go run ./cmd/bench -query count -rows 100000 -runs 200 -mode hot -json > .bench/workload-YYYYMMDD-HHMMSS.jsonl
+go run ./cmd/bench -query top_age -rows 1000000 -runs 50 -mode hot -json >> .bench/workload-YYYYMMDD-HHMMSS.jsonl
+```
 
-T00a (micro-bench baseline) ran on the pre-Phase-1 tree but its launch raced the Phase 1 ceremony commits, so the captured binary reflects pre-Phase-1 code while the working tree has moved on. Phase 1 is provably zero-behavior-change so this is not load-bearing.
+## Compare Runs
 
-T00b (workload baseline) ran after Phase 1 commits because the bench harness rebuilds on each invocation, again Phase 1 being zero-behavior keeps the numbers comparable to a strict pre-recode capture.
+```
+go run ./cmd/bench compare .bench/base.jsonl .bench/head.jsonl -threshold 10
+```
 
-Skipped queries in T00b are logged at the bottom of baseline_workload.json or noted here if they exceeded the 240s per-call timeout.
-
-## Variance gate
-
-Per `drip_recode.md` §9: comparison via `benchstat`, variance ≤10% on this Windows host.
+Do not treat old captures as permanent truth. Use them as history, then refresh the docs from a new run when performance work lands.
