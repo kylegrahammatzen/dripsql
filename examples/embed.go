@@ -1,30 +1,14 @@
-// Minimal embed example showing Open, Exec, and QueryRow for a single scalar read.
-// Build and run with `go run ./examples/embed -db /tmp/embed_demo`.
 package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
-	"log"
 
 	"github.com/kylegrahammatzen/dripsql"
 )
 
-func main() {
-	if err := run(context.Background()); err != nil {
-		log.Fatal(err)
-	}
-}
-
-func run(ctx context.Context) error {
-	dbPath := flag.String("db", "", "directory to open as the database (required)")
-	flag.Parse()
-	if *dbPath == "" {
-		return fmt.Errorf("missing -db <path>")
-	}
-
-	db, err := dripsql.Open(*dbPath)
+func runEmbed(ctx context.Context, dbPath string) error {
+	db, err := dripsql.Open(dbPath)
 	if err != nil {
 		return err
 	}

@@ -133,6 +133,18 @@ go run ./cmd/cli -db <path> -exec "SELECT count(*) FROM events"
 Each invocation runs a single SQL string against the required `-db`
 directory, which is created automatically if it does not exist.
 
+## Examples
+
+```
+go run ./examples -db <path> <name>
+```
+
+| Name | Source | Demonstrates |
+| --- | --- | --- |
+| `embed` | `examples/embed.go` | `Open`, `Exec`, `QueryRow` with a parameterized argument |
+| `read_only` | `examples/read_only.go` | `SetReadOnly` plus the `ErrReadOnly` sentinel via `errors.Is` |
+| `transactions` | `examples/transactions.go` | `Update` closure that commits on nil and rolls back on error |
+
 ## Feature coverage
 
 What the engine currently supports versus what's still on the list:
