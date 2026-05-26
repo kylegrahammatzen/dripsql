@@ -83,6 +83,26 @@ func (b *Batch) SetSel(sel *SelectionMask) error {
 	return nil
 }
 
+// ForVisible calls fn for each visible row index, honoring batch.Sel when present and short-circuiting on the first error.
+func ForVisible(batch Batch, fn func(row int) error) error {
+	if batch.Sel == nil {
+		for row := range batch.Len {
+			if err := fn(row); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	var loopErr error
+	batch.Sel.IterSet(func(row int) {
+		if loopErr != nil {
+			return
+		}
+		loopErr = fn(row)
+	})
+	return loopErr
+}
+
 func (b Batch) ColumnByName(name string) (*Column, bool) {
 	trimmed := strings.TrimSpace(name)
 	for i := range b.Columns {

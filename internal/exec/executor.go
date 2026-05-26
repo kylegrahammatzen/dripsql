@@ -11,6 +11,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type SegmentsFn func(def sql.BoundTableDef) ([]*storage.Segment, error)
@@ -208,31 +209,15 @@ func drainValues(op Operator) ([]any, error) {
 			return nil, fmt.Errorf("IN subquery must return one column, got %d", len(batch.Columns))
 		}
 		col := &batch.Columns[0]
-		iter := batch.Sel
-		if iter == nil {
-			for row := range batch.Len {
-				v, verr := col.ValueAt(row)
-				if verr != nil {
-					return nil, verr
-				}
-				out = append(out, v)
-			}
-			continue
-		}
-		var iterErr error
-		iter.IterSet(func(row int) {
-			if iterErr != nil {
-				return
-			}
+		if err := vector.ForVisible(batch, func(row int) error {
 			v, verr := col.ValueAt(row)
 			if verr != nil {
-				iterErr = verr
-				return
+				return verr
 			}
 			out = append(out, v)
-		})
-		if iterErr != nil {
-			return nil, iterErr
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
@@ -282,37 +267,17 @@ func drainScalar(op Operator) (any, error) {
 			return nil, fmt.Errorf("scalar subquery must return one column, got %d", len(batch.Columns))
 		}
 		col := &batch.Columns[0]
-		iter := batch.Sel
-		if iter == nil {
-			for row := range batch.Len {
-				rows++
-				if rows > 1 {
-					return nil, fmt.Errorf("scalar subquery returned more than one row")
-				}
-				v, verr := col.ValueAt(row)
-				if verr != nil {
-					return nil, verr
-				}
-				captured = v
-			}
-			continue
-		}
-		var iterErr error
-		iter.IterSet(func(row int) {
-			if iterErr != nil {
-				return
-			}
+		iterErr := vector.ForVisible(batch, func(row int) error {
 			rows++
 			if rows > 1 {
-				iterErr = fmt.Errorf("scalar subquery returned more than one row")
-				return
+				return fmt.Errorf("scalar subquery returned more than one row")
 			}
 			v, verr := col.ValueAt(row)
 			if verr != nil {
-				iterErr = verr
-				return
+				return verr
 			}
 			captured = v
+			return nil
 		})
 		if iterErr != nil {
 			return nil, iterErr

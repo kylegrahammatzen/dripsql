@@ -175,38 +175,16 @@ func columnNames(batch vector.Batch) []string {
 }
 
 func appendBatchRows(rows *Rows, batch vector.Batch) error {
-	rowValues := func(row int) ([]any, error) {
-		out := make([]any, len(batch.Columns))
+	return vector.ForVisible(batch, func(row int) error {
+		vals := make([]any, len(batch.Columns))
 		for i, c := range batch.Columns {
 			v, err := c.ValueAt(row)
 			if err != nil {
-				return nil, err
-			}
-			out[i] = v
-		}
-		return out, nil
-	}
-	if batch.Sel == nil {
-		for row := range batch.Len {
-			vals, err := rowValues(row)
-			if err != nil {
 				return err
 			}
-			rows.Values = append(rows.Values, vals)
-		}
-		return nil
-	}
-	var loopErr error
-	batch.Sel.IterSet(func(row int) {
-		if loopErr != nil {
-			return
-		}
-		vals, err := rowValues(row)
-		if err != nil {
-			loopErr = err
-			return
+			vals[i] = v
 		}
 		rows.Values = append(rows.Values, vals)
+		return nil
 	})
-	return loopErr
 }
