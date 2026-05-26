@@ -10,6 +10,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
+// ScanFn batches are valid only until the callback returns.
 type ScanFn func(batch vector.Batch, sel *vector.SelectionMask) error
 
 type ScanOpts struct {
@@ -292,7 +293,12 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 			v   vector.Vec
 			err error
 		)
-		scratch, err = seg.readPageIntoValidated(ci, pi, scratch, &v)
+		if seg.Cols[ci].Kind.FixedWidth() > 0 {
+			scratch, err = seg.readPageIntoValidated(ci, pi, scratch, &decoded[i].V)
+			v = decoded[i].V
+		} else {
+			scratch, err = seg.readPageIntoValidated(ci, pi, scratch, &v)
+		}
 		if err != nil {
 			return fmt.Errorf("scan: col %q page %d: %w", decode[i], pi, err)
 		}
@@ -319,7 +325,7 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 			}
 			sel.FillAll()
 			encodedDone = true
-		} else if pred != nil && hasAny(predOnly) {
+		} else if pred != nil && (hasAny(predOnly) || shouldApplyEncodedBeforeDecode(pred)) {
 			handled, newScratch, err := pred.ApplyEncoded(seg, pi, &sel, scratch)
 			scratch = newScratch
 			if err != nil {
@@ -405,4 +411,12 @@ func hasAny(mask []bool) bool {
 		}
 	}
 	return false
+}
+
+func shouldApplyEncodedBeforeDecode(pred *CompiledPred) bool {
+	if pred == nil {
+		return false
+	}
+	_, ok := pred.bp.(boundEqBytes)
+	return ok
 }
