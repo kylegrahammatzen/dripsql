@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/bits"
 	"slices"
 
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
@@ -249,7 +250,7 @@ func (s *SortOp) buildFastInt64() error {
 		s.refs = make([]rowRef16, 0, total)
 	}
 	s.keys = make([]int64, total)
-	s.nulls = make([]uint64, (total+63)/64)
+	var nulls []uint64
 
 	keyCol := s.Keys[0].Expr.Column
 
@@ -267,7 +268,10 @@ func (s *SortOp) buildFastInt64() error {
 				s.refs = append(s.refs, rowRef16{bufIdx: uint16(bi), row: uint16(row)})
 			}
 			if valid != nil && !valid.IsValid(row) {
-				bitSet(s.nulls, idx)
+				if nulls == nil {
+					nulls = make([]uint64, (total+63)/64)
+				}
+				bitSet(nulls, idx)
 			} else {
 				s.keys[idx] = readInt64SortKey(col.V, row)
 			}
@@ -276,7 +280,12 @@ func (s *SortOp) buildFastInt64() error {
 	}
 
 	desc := s.Keys[0].Desc
-	s.fullSortFastInt64(int(idx), desc)
+	if nulls != nil {
+		s.nulls = nulls
+		s.fullSortFastInt64(int(idx), desc)
+	} else {
+		s.fullSortFastInt64NoNull(int(idx), desc)
+	}
 	return nil
 }
 
@@ -287,6 +296,48 @@ func (s *SortOp) fullSortFastInt64(total int, desc bool) {
 	}
 	slices.SortFunc(s.order, func(a, b uint32) int {
 		return cmpInt64Sort(s.keys[a], bitIsSet(s.nulls, a), a, s.keys[b], bitIsSet(s.nulls, b), b, desc)
+	})
+}
+
+func (s *SortOp) fullSortFastInt64NoNull(total int, desc bool) {
+	s.order = make([]uint32, total)
+	for i := range s.order {
+		s.order[i] = uint32(i)
+	}
+	if desc {
+		slices.SortFunc(s.order, func(a, b uint32) int {
+			ak, bk := s.keys[a], s.keys[b]
+			if ak > bk {
+				return -1
+			}
+			if ak < bk {
+				return 1
+			}
+			if a < b {
+				return -1
+			}
+			if a > b {
+				return 1
+			}
+			return 0
+		})
+		return
+	}
+	slices.SortFunc(s.order, func(a, b uint32) int {
+		ak, bk := s.keys[a], s.keys[b]
+		if ak < bk {
+			return -1
+		}
+		if ak > bk {
+			return 1
+		}
+		if a < b {
+			return -1
+		}
+		if a > b {
+			return 1
+		}
+		return 0
 	})
 }
 
@@ -321,8 +372,9 @@ func (s *SortOp) buildFastText() error {
 	} else {
 		s.refs = make([]rowRef16, 0, total)
 	}
-	s.nulls = make([]uint64, (total+63)/64)
+	var nulls []uint64
 	s.textVars = make([]*vector.VarBytes, len(s.bufs))
+	prefixes := make([]uint32, total)
 
 	keyCol := s.Keys[0].Expr.Column
 	idx := uint32(0)
@@ -331,7 +383,8 @@ func (s *SortOp) buildFastText() error {
 		if !ok {
 			return fmt.Errorf("sort: column %q not in batch", keyCol)
 		}
-		s.textVars[bi] = col.V.Var()
+		vb := col.V.Var()
+		s.textVars[bi] = vb
 		valid := col.V.Valid
 		bb.sel.IterSet(func(row int) {
 			if useWide {
@@ -340,11 +393,17 @@ func (s *SortOp) buildFastText() error {
 				s.refs = append(s.refs, rowRef16{bufIdx: uint16(bi), row: uint16(row)})
 			}
 			if valid != nil && !valid.IsValid(row) {
-				bitSet(s.nulls, idx)
+				if nulls == nil {
+					nulls = make([]uint64, (total+63)/64)
+				}
+				bitSet(nulls, idx)
+			} else {
+				prefixes[idx] = bits.ReverseBytes32(vb.Prefix(row))
 			}
 			idx++
 		})
 	}
+	s.nulls = nulls
 
 	desc := s.Keys[0].Desc
 	s.order = make([]uint32, total)
@@ -352,8 +411,8 @@ func (s *SortOp) buildFastText() error {
 		s.order[i] = uint32(i)
 	}
 	slices.SortFunc(s.order, func(a, b uint32) int {
-		anull := bitIsSet(s.nulls, a)
-		bnull := bitIsSet(s.nulls, b)
+		anull := s.nulls != nil && bitIsSet(s.nulls, a)
+		bnull := s.nulls != nil && bitIsSet(s.nulls, b)
 		if anull != bnull {
 			c := 1
 			if anull {
@@ -365,6 +424,19 @@ func (s *SortOp) buildFastText() error {
 			return c
 		}
 		if !anull {
+			ap, bp := prefixes[a], prefixes[b]
+			if ap < bp {
+				if desc {
+					return 1
+				}
+				return -1
+			}
+			if ap > bp {
+				if desc {
+					return -1
+				}
+				return 1
+			}
 			abi, arow := s.resolveRef(a)
 			bbi, brow := s.resolveRef(b)
 			c := bytes.Compare(s.textVars[abi].Bytes(arow), s.textVars[bbi].Bytes(brow))

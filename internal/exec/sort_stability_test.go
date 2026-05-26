@@ -141,3 +141,52 @@ func TestSort_TopKMatchesFullSortWithOffsetAndNulls(t *testing.T) {
 		}
 	}
 }
+
+func TestSort_TextPrefixFallbackOrdersSharedPrefixes(t *testing.T) {
+	values := []string{"aaab2", "aaab10", "aaab1", "aaaa", "aaab", "", "aaac", "aaab1"}
+	wantValues := []string{"", "aaaa", "aaab", "aaab1", "aaab1", "aaab10", "aaab2", "aaac"}
+	wantTags := []int64{5, 3, 4, 2, 7, 1, 0, 6}
+
+	text := vector.NewVarVec(vector.VecText, len(values), 0)
+	tags := vector.NewVec(vector.VecInt64, len(values))
+	for i, value := range values {
+		text.Var().AppendString(i, value)
+		tags.I64()[i] = int64(i)
+	}
+	batch, err := vector.NewBatch([]vector.Column{
+		{Name: "s", Type: schema.Text, V: text},
+		{Name: "tag", Type: schema.Int64, V: tags},
+	})
+	if err != nil {
+		t.Fatalf("NewBatch failed %v", err)
+	}
+	sel := vector.NewSelectionMask(len(values))
+	sel.FillAll()
+	batch.Sel = &sel
+
+	op := &SortOp{
+		Source: &bufferSource{batches: []vector.Batch{batch}},
+		Keys:   []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: schema.Text, Column: "s"}}},
+	}
+	if err := op.Open(context.Background()); err != nil {
+		t.Fatalf("Open failed %v", err)
+	}
+	out, ok, err := op.Next()
+	if err != nil || !ok {
+		t.Fatalf("Next returned ok %v err %v", ok, err)
+	}
+	if err := op.Close(); err != nil {
+		t.Fatalf("Close failed %v", err)
+	}
+
+	outText := out.Columns[0].V.Var()
+	outTags := out.Columns[1].V.I64()
+	for i, want := range wantValues {
+		if got := outText.String(i); got != want {
+			t.Fatalf("row %d value got %q want %q", i, got, want)
+		}
+		if got := outTags[i]; got != wantTags[i] {
+			t.Fatalf("row %d tag got %d want %d", i, got, wantTags[i])
+		}
+	}
+}
