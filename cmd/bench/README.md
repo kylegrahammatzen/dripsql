@@ -38,12 +38,12 @@ Use fresh JSON or JSONL artifacts because `compare` reports median deltas agains
 | Query | Rows | Runs | Median | io | decode | exec |
 | --- | --- | --- | --- | --- | --- | --- |
 | `count` | 100k | 200 | <1 us | <1 us | <1 us | <1 us |
-| `id_lookup` | 100k | 200 | <1 us | 30 us | 49 us | <1 us |
-| `category_groupby` | 100k | 100 | 5.93 ms | 1.74 ms | 2.40 ms | 1.78 ms |
-| `category_groupby` | 10M | 10 | 622.19 ms | 147.01 ms | 593.72 ms | <1 us |
-| `top_age` | 100k | 200 | 2.14 ms | 441 us | 1.29 ms | 413 us |
-| `top_age` | 1M | 50 | 28.03 ms | 6.05 ms | 15.92 ms | 6.06 ms |
-| `top_age` | 10M | 10 | 257.08 ms | 54.96 ms | 151.15 ms | 50.96 ms |
+| `id_lookup` | 100k | 200 | <1 us | 25.3 us | 50.3 us | <1 us |
+| `category_groupby` | 100k | 100 | 6.69 ms | 2.26 ms | 2.69 ms | 1.74 ms |
+| `category_groupby` | 10M | 10 | 602.72 ms | 119.44 ms | 257.71 ms | 225.56 ms |
+| `top_age` | 100k | 200 | 2.00 ms | 445 us | 1.03 ms | 521 us |
+| `top_age` | 1M | 50 | 24.72 ms | 5.69 ms | 13.65 ms | 5.38 ms |
+| `top_age` | 10M | 10 | 171.73 ms | 33.43 ms | 104.06 ms | 34.24 ms |
 
 - `count` and `id_lookup` short-circuit via the `.sm` numsum and Binary Fuse 8 sidecars.
 - `count(*)` stays on the metadata-only path even after `DELETE` by popcounting the segment's deletion vector instead of scanning pages.
