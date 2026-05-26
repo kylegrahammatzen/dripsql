@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
@@ -34,6 +35,10 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 	}
 	def := db.boundTable(db.tables[schema.NormalizeName(table)])
 	codecs := columnCodecs(def)
+	activeIDs := make(map[uint64]struct{}, len(def.Columns))
+	for _, c := range def.Columns {
+		activeIDs[uint64(c.ID)] = struct{}{}
+	}
 	rewritten := 0
 	stmt := storage.NewSpan("COMPACT " + table)
 	defer func() {
@@ -41,22 +46,27 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		db.publishWriteSpan(stmt)
 	}()
 	for _, entry := range view.Entries {
-		if entry.Path == "" || entry.DeletionVectorPath == "" {
+		if entry.Path == "" {
 			continue
 		}
 		if err := ctx.Err(); err != nil {
 			return rewritten, err
 		}
 		seg := segByPath[entry.Path]
-		if seg == nil || seg.DV == nil {
+		if seg == nil {
 			continue
 		}
 		rows := int(seg.Rows())
-		liveCount := rows - seg.DV.NullCount(rows)
-		if liveCount*2 > rows {
+		liveCount := rows
+		if seg.DV != nil {
+			liveCount = rows - seg.DV.NullCount(rows)
+		}
+		halfDeleted := seg.DV != nil && liveCount*2 <= rows
+		hasDroppedColumn := segmentHasInactiveColumn(seg, activeIDs)
+		if !halfDeleted && !hasDroppedColumn {
 			continue
 		}
-		liveBatch, err := readSegmentLiveRows(seg)
+		liveBatch, err := readSegmentLiveRows(seg, def)
 		if err != nil {
 			return rewritten, fmt.Errorf("compact %s: %w", entry.Path, err)
 		}
@@ -255,8 +265,52 @@ func (db *DB) vacuumTableLocked(table string) (int, error) {
 // Caller must ensure the segment's live row count fits in a single batch
 // (StandardBatchRows). Compact only invokes this when liveCount <= rows/2, and rows
 // is bounded by the seal-time page size.
-func readSegmentLiveRows(seg *storage.Segment) (vector.Batch, error) {
-	opts := storage.ScanOpts{Segments: []*storage.Segment{seg}}
+// segmentHasInactiveColumn flags segments whose footer still carries a column id that
+// the current catalog has tombstoned, so they get rewritten next compaction pass.
+func segmentHasInactiveColumn(seg *storage.Segment, activeIDs map[uint64]struct{}) bool {
+	if seg.TableID == 0 {
+		return false
+	}
+	for _, c := range seg.Cols {
+		if c.ColumnID == 0 {
+			continue
+		}
+		if _, ok := activeIDs[c.ColumnID]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+func readSegmentLiveRows(seg *storage.Segment, def sql.BoundTableDef) (vector.Batch, error) {
+	names := make([]string, len(def.Columns))
+	ids := make([]uint64, len(def.Columns))
+	kinds := make([]vector.VecKind, len(def.Columns))
+	defaults := make([]storage.ScanDefault, len(def.Columns))
+	for i, c := range def.Columns {
+		names[i] = c.Name
+		ids[i] = uint64(c.ID)
+		k, err := vector.VecKindOf(c.Type)
+		if err != nil {
+			return vector.Batch{}, fmt.Errorf("compact: column %q vec kind: %w", c.Name, err)
+		}
+		kinds[i] = k
+		defaults[i] = storage.ScanDefault{
+			Set:   c.Default.Set,
+			Null:  c.Default.Null,
+			I64:   c.Default.I64,
+			F64:   c.Default.F64,
+			Bytes: c.Default.Bytes,
+			Bool:  c.Default.Bool,
+		}
+	}
+	opts := storage.ScanOpts{
+		Segments:       []*storage.Segment{seg},
+		Columns:        names,
+		ColumnIDs:      ids,
+		ColumnKinds:    kinds,
+		ColumnDefaults: defaults,
+	}
 	var collected []vector.Column
 	var totalRows int
 	err := storage.Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error {
