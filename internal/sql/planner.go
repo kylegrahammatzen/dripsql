@@ -925,7 +925,7 @@ func parseCodecName(name string) (schema.Encoding, error) {
 	if name == "" {
 		return schema.EncodingAuto, nil
 	}
-	enc, ok := schema.EncodingFromName(name)
+	enc, ok := schema.ParseEncoding(name)
 	if !ok {
 		return schema.EncodingAuto, fmt.Errorf("unknown codec %q", name)
 	}

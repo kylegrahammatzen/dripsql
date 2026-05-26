@@ -590,8 +590,8 @@ func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.Selecti
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
-	enc, ok := schema.EncodingFromWire(page.Encoding)
-	if !ok {
+	enc := schema.Encoding(page.Encoding)
+	if !enc.Valid() {
 		return false, scratch, nil
 	}
 	switch enc {
@@ -691,8 +691,8 @@ func evalEncodedDictOrdered(seg *Segment, pageIdx int, sel *vector.SelectionMask
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
-	enc, ok := schema.EncodingFromWire(page.Encoding)
-	if !ok || enc != schema.EncodingDictionary {
+	enc := schema.Encoding(page.Encoding)
+	if !enc.Valid() || enc != schema.EncodingDictionary {
 		return false, scratch, nil
 	}
 	rows := int(page.Rows)
@@ -777,8 +777,8 @@ func (b boundEqInt64) EvalEncoded(seg *Segment, pageIdx int, sel *vector.Selecti
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
-	enc, ok := schema.EncodingFromWire(page.Encoding)
-	if !ok {
+	enc := schema.Encoding(page.Encoding)
+	if !enc.Valid() {
 		return false, scratch, nil
 	}
 	switch enc {
@@ -909,8 +909,8 @@ func evalEncodedFORRange(seg *Segment, pageIdx int, sel *vector.SelectionMask, s
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
-	enc, ok := schema.EncodingFromWire(page.Encoding)
-	if !ok || enc != schema.EncodingFORBitPack {
+	enc := schema.Encoding(page.Encoding)
+	if !enc.Valid() || enc != schema.EncodingFORBitPack {
 		return false, scratch, nil
 	}
 	rows := int(page.Rows)

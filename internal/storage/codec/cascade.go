@@ -45,8 +45,6 @@ func mustLookup(e schema.Encoding) Codec {
 }
 
 // Encode runs every applicable candidate and keeps the smallest payload.
-// The winner's bytes are copied into ctx.Scratch.best so later candidates can
-// safely overwrite ctx.Scratch.trial. Last candidate wins ties.
 func Encode(v vector.Vec, ctx *EncodeContext) (schema.Encoding, []byte, error) {
 	if ctx == nil {
 		ctx = &EncodeContext{Scratch: NewScratchPool()}

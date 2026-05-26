@@ -13,7 +13,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-func (db *DB) tryMetadataAggregate(plan *sql.Plan) (*Rows, bool, error) {
+func (db *DB) answerFromMetadata(plan *sql.Plan) (*Rows, bool, error) {
 	if plan == nil || plan.Kind != sql.PlanQuery || plan.Rel == nil {
 		return nil, false, nil
 	}

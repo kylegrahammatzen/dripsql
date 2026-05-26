@@ -5,18 +5,18 @@ package schema
 import "testing"
 
 func TestEncoding_WireRejectsAutoAndUnknown(t *testing.T) {
-	if _, ok := EncodingFromWire(0); ok {
+	if Encoding(0).Valid() {
 		t.Fatal("wire byte 0 must be rejected (EncodingAuto)")
 	}
 	for b := byte(13); b < 16; b++ {
-		if _, ok := EncodingFromWire(b); ok {
+		if Encoding(b).Valid() {
 			t.Fatalf("wire byte %d must be rejected as unknown", b)
 		}
 	}
 	for e := EncodingFlat; e <= EncodingPcodec; e++ {
-		got, ok := EncodingFromWire(e.Wire())
-		if !ok || got != e {
-			t.Fatalf("round-trip failed for %v: got=%v ok=%v", e, got, ok)
+		got := Encoding(e.Wire())
+		if !got.Valid() || got != e {
+			t.Fatalf("round-trip failed for %v: got=%v valid=%v", e, got, got.Valid())
 		}
 	}
 	defer func() {

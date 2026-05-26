@@ -17,7 +17,7 @@ func (db *DB) runQuery(ctx context.Context, plan *sql.Plan) (*Rows, error) {
 	if plan != nil && plan.Kind == sql.PlanExplain {
 		return db.runExplain(ctx, plan)
 	}
-	if rows, ok, err := db.tryMetadataAggregate(plan); err != nil {
+	if rows, ok, err := db.answerFromMetadata(plan); err != nil {
 		return nil, err
 	} else if ok {
 		return rows, nil

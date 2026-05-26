@@ -52,8 +52,8 @@ func TestEngine_UserCodec_PlainForcedOnDictionaryFriendlyColumn(t *testing.T) {
 		t.Fatal("label column not in segment")
 	}
 	page := seg.Cols[labelCol].Pages[0]
-	got, ok := schema.EncodingFromWire(page.Encoding)
-	if !ok {
+	got := schema.Encoding(page.Encoding)
+	if !got.Valid() {
 		t.Fatalf("page encoding %d unknown", page.Encoding)
 	}
 	if got != schema.EncodingFlat {

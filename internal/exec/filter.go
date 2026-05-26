@@ -74,7 +74,7 @@ func filterPredicate(batch vector.Batch, sel vector.SelectionMask, pred sql.Boun
 	case sql.ExprNot:
 		return filterNotPred(batch, sel, pred, scratch, outer, subBuild)
 	}
-	out, count, ok, err := tryFilterLeaf(batch, sel, pred, scratch)
+	out, count, ok, err := applyLeaf(batch, sel, pred, scratch)
 	if err != nil {
 		return filterResult{}, err
 	}
@@ -131,9 +131,7 @@ func filterNotPred(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundE
 	return filterResult{sel: child.sel, count: count}, nil
 }
 
-// filterLeaf is a normalized col-op-lit / col BETWEEN lo AND hi shape produced from a
-// BoundExpr predicate. tryFilterLeaf dispatches on the column kind once and routes both
-// the comparison and BETWEEN forms through the same per-kind branch.
+// Normalized col-op-lit and col-BETWEEN-lo-AND-hi shape so applyLeaf dispatches on column kind once.
 type filterLeaf struct {
 	col     sql.BoundExpr
 	lo, hi  any
@@ -162,7 +160,7 @@ func makeFilterLeaf(pred sql.BoundExpr) (filterLeaf, bool) {
 	return filterLeaf{}, false
 }
 
-func tryFilterLeaf(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, scratch *vector.SelectionMask) (vector.SelectionMask, int, bool, error) {
+func applyLeaf(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, scratch *vector.SelectionMask) (vector.SelectionMask, int, bool, error) {
 	leaf, ok := makeFilterLeaf(pred)
 	if !ok || leaf.lo == nil {
 		return vector.SelectionMask{}, 0, false, nil

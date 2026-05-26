@@ -64,15 +64,13 @@ func (e Encoding) Wire() uint8 {
 	return uint8(e)
 }
 
-func EncodingFromWire(b uint8) (Encoding, bool) {
-	if b == 0 || Encoding(b) > encodingMax {
-		return EncodingAuto, false
-	}
-	return Encoding(b), true
+// Wire bytes never carry the auto sentinel and must fall within the registered enum range.
+func (e Encoding) Valid() bool {
+	return e != EncodingAuto && e <= encodingMax
 }
 
-// "auto" is rejected so DDL cannot smuggle the sentinel onto the wire and "plain" aliases "flat".
-func EncodingFromName(name string) (Encoding, bool) {
+// ParseEncoding rejects "auto" so DDL cannot smuggle the sentinel onto the wire and accepts "plain" as an alias for "flat".
+func ParseEncoding(name string) (Encoding, bool) {
 	switch NormalizeName(name) {
 	case "plain", "flat":
 		return EncodingFlat, true

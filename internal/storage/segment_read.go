@@ -360,8 +360,8 @@ func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (vector.Vec,
 		innerPayload = scratch[need:]
 	}
 
-	enc, ok := schema.EncodingFromWire(page.Encoding)
-	if !ok {
+	enc := schema.Encoding(page.Encoding)
+	if !enc.Valid() {
 		return vector.Vec{}, scratch, fmt.Errorf("ReadPage: unknown encoding wire byte %d", page.Encoding)
 	}
 	c, err := codec.Lookup(enc)
