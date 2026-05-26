@@ -16,9 +16,14 @@ type ScanFn func(batch vector.Batch, sel *vector.SelectionMask) error
 type ScanOpts struct {
 	Segments []*Segment
 	Columns  []string
-	Pred     *Pred
-	TopK     *TopKPushdown
-	ReadTs   uint64
+	// ColumnIDs is an optional parallel slice carrying the stable catalog id for each
+	// projection column. When len(ColumnIDs) == len(Columns) and a segment carries the
+	// identity sidecar, the scan resolves columns by id rather than by name so renames
+	// in the catalog stay metadata only.
+	ColumnIDs []uint64
+	Pred      *Pred
+	TopK      *TopKPushdown
+	ReadTs    uint64
 }
 
 // TopKPushdown is storage-owned scan metadata for ORDER BY ... LIMIT/OFFSET over a single
@@ -81,7 +86,7 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 		if opts.ReadTs != 0 && seg.CommitTs > opts.ReadTs {
 			continue
 		}
-		decodeIdx, projIdx, err := resolveSegmentColumns(seg, decode, projection)
+		decodeIdx, projIdx, err := resolveSegmentColumns(seg, decode, projection, decodeIDs(decode, projection, opts.Columns, opts.ColumnIDs))
 		if err != nil {
 			return fmt.Errorf("Scan: %w", err)
 		}
@@ -227,18 +232,50 @@ func unionNames(a, b []string) []string {
 	return out
 }
 
-func resolveSegmentColumns(seg *Segment, decode, projection []string) (decodeIdx, projIdx []int, err error) {
+// decodeIDs builds the id slice that lines up with the decode set produced from
+// projection + predicate columns. Predicate columns have no id today so their slot
+// stays zero and falls back to name match in resolveSegmentColumns.
+func decodeIDs(decode, projection, projNames []string, projIDs []uint64) []uint64 {
+	if len(projIDs) != len(projNames) || len(projIDs) == 0 {
+		return nil
+	}
+	byName := make(map[string]uint64, len(projNames))
+	for i, n := range projNames {
+		byName[strings.ToLower(n)] = projIDs[i]
+	}
+	out := make([]uint64, len(decode))
+	for i, n := range decode {
+		out[i] = byName[strings.ToLower(n)]
+	}
+	_ = projection
+	return out
+}
+
+func resolveSegmentColumns(seg *Segment, decode, projection []string, decodeIDs []uint64) (decodeIdx, projIdx []int, err error) {
+	useID := seg.TableID != 0 && len(decodeIDs) == len(decode)
 	decodeIdx = make([]int, len(decode))
 	for i, name := range decode {
 		found := -1
-		for j := range seg.Cols {
-			if strings.EqualFold(seg.Cols[j].Name, name) {
-				found = j
-				break
+		if useID && decodeIDs[i] != 0 {
+			for j := range seg.Cols {
+				if seg.Cols[j].ColumnID == decodeIDs[i] {
+					found = j
+					break
+				}
 			}
-		}
-		if found < 0 {
-			return nil, nil, fmt.Errorf("column %q missing in segment", name)
+			if found < 0 {
+				return nil, nil, fmt.Errorf("column id %d missing in segment %s", decodeIDs[i], seg.path)
+			}
+		} else {
+			for j := range seg.Cols {
+				if strings.EqualFold(seg.Cols[j].Name, name) {
+					found = j
+					break
+				}
+			}
+			if found < 0 {
+				return nil, nil, fmt.Errorf("column %q missing in segment", name)
+			}
 		}
 		decodeIdx[i] = found
 	}

@@ -521,22 +521,24 @@ func intLikeType(t schema.Type) bool {
 	return false
 }
 
-func scanColumnNames(rel *sql.Rel) ([]string, error) {
+func scanColumnNames(rel *sql.Rel) ([]string, []uint64, error) {
 	names := make([]string, 0, len(rel.Columns))
+	ids := make([]uint64, 0, len(rel.Columns))
 	for _, id := range rel.Columns {
 		found := false
 		for _, c := range rel.Table.Columns {
 			if c.ID == id {
 				names = append(names, c.Name)
+				ids = append(ids, uint64(c.ID))
 				found = true
 				break
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("BuildOperator: unknown ColumnID %d in scan for table %q", id, rel.Table.Name)
+			return nil, nil, fmt.Errorf("BuildOperator: unknown ColumnID %d in scan for table %q", id, rel.Table.Name)
 		}
 	}
-	return names, nil
+	return names, ids, nil
 }
 
 func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, outer *correlatedOuter) (Operator, error) {
@@ -549,11 +551,11 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, ou
 	if err != nil {
 		return nil, fmt.Errorf("BuildOperator: resolve segments: %w", err)
 	}
-	names, err := scanColumnNames(rel)
+	names, ids, err := scanColumnNames(rel)
 	if err != nil {
 		return nil, err
 	}
-	opts := storage.ScanOpts{Segments: segs, Columns: names, TopK: topK}
+	opts := storage.ScanOpts{Segments: segs, Columns: names, ColumnIDs: ids, TopK: topK}
 	var residual *sql.BoundExpr
 	if rel.Where != nil {
 		push, res := splitWhere(*rel.Where)
