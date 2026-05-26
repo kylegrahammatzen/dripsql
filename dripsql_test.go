@@ -18,8 +18,8 @@ func openTestDB(t *testing.T) *DB {
 	return db
 }
 
-// Streaming Rows must advance with Next, copy typed values with Scan, and report no error at clean exhaustion.
-func TestRows_StreamingScan(t *testing.T) {
+// Rows cursor must advance with Next, copy typed values with Scan, and report no error at clean exhaustion.
+func TestRows_CursorScan(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, name text NOT NULL)")
@@ -130,16 +130,10 @@ func TestPlaceholders_BindAcrossTypesAndPaths(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, kind text NOT NULL)")
 	mustExec(t, db, "INSERT INTO t (id, kind) VALUES (1, 'a'), (2, 'b'), (3, 'a'), (4, 'c')")
 
-	rows, err := db.Query(ctx, "SELECT count(*) FROM t WHERE id >= ? AND kind = ?", int64(2), "a")
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
 	var got int64
-	rows.Next()
-	if err := rows.Scan(&got); err != nil {
-		t.Fatalf("Scan: %v", err)
+	if err := db.QueryRow(ctx, "SELECT count(*) FROM t WHERE id >= ? AND kind = ?", int64(2), "a").Scan(&got); err != nil {
+		t.Fatalf("QueryRow: %v", err)
 	}
-	rows.Close()
 	if got != 1 {
 		t.Errorf("count = %d, want 1 (id=3,kind=a matches)", got)
 	}

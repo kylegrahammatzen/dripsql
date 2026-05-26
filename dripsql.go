@@ -152,6 +152,12 @@ type Row struct {
 
 // Scan copies the single row into dst pointers and returns ErrNoRows or ErrTooManyRows without mutating dst when the result does not have exactly one row.
 func (r *Row) Scan(dst ...any) error {
+	if r == nil || r.rows == nil {
+		if r != nil && r.err != nil {
+			return r.err
+		}
+		return ErrNoRows
+	}
 	if r.err != nil {
 		return r.err
 	}
