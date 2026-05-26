@@ -12,6 +12,7 @@
       "next_column_id": 2,
       "created_at_generation": 2,
       "updated_at_generation": 2,
+      "legacy_path": true,
       "columns": [
         {
           "column_id": 1,
@@ -44,6 +45,7 @@
       "next_column_id": 3,
       "created_at_generation": 2,
       "updated_at_generation": 2,
+      "legacy_path": true,
       "columns": [
         {
           "column_id": 1,

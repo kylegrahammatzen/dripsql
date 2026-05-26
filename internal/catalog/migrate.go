@@ -204,6 +204,7 @@ func migrateTable(lt legacyTableRec, gen Generation) (Table, error) {
 		TableID:             TableID(lt.ID),
 		Name:                lt.Spec.Name,
 		SchemaVersion:       1,
+		LegacyPath:          true,
 		CreatedAtGeneration: gen,
 		UpdatedAtGeneration: gen,
 		Columns:             make([]Column, 0, len(lt.Spec.Columns)),

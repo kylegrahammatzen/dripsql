@@ -12,6 +12,7 @@
       "next_column_id": 6,
       "created_at_generation": 1,
       "updated_at_generation": 1,
+      "legacy_path": true,
       "columns": [
         {
           "column_id": 1,

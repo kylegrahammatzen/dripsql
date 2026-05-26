@@ -70,7 +70,7 @@ func TestEngine_Vacuum_RemovesUnreferencedDV(t *testing.T) {
 	if _, err := db.Exec(ctx, "UPDATE t SET id = 8 WHERE id = 2"); err != nil {
 		t.Fatal(err)
 	}
-	tableDir := filepath.Join(dir, "segments", "t")
+	tableDir := filepath.Join(dir, "tables", "0000000000000001")
 	before, err := countMatching(tableDir, ".dv.")
 	if err != nil {
 		t.Fatal(err)

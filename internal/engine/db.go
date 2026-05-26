@@ -185,7 +185,11 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) tableDir(name string) string {
-	return filepath.Join(db.root, "segments", schema.NormalizeName(name))
+	key := schema.NormalizeName(name)
+	if t, ok := db.tables[key]; ok && !t.LegacyPath {
+		return filepath.Join(db.root, "tables", fmt.Sprintf("%016x", uint64(t.TableID)))
+	}
+	return filepath.Join(db.root, "segments", key)
 }
 
 func (db *DB) manifestFor(name string) (*storage.Manifest, error) {

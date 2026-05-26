@@ -73,7 +73,7 @@ func TestWAL_RecoverDeletesOrphanSegment(t *testing.T) {
 
 	// Simulate a crashed UPDATE: an orphan segment file exists, and the WAL has an
 	// intent for it with no matching commit. Recovery should delete the file.
-	tableDir := filepath.Join(dir, "segments", "t")
+	tableDir := filepath.Join(dir, "tables", "0000000000000001")
 	orphan := filepath.Join(tableDir, "999999.dsv4")
 	if err := os.WriteFile(orphan, []byte("garbage"), 0o644); err != nil {
 		t.Fatalf("write orphan: %v", err)

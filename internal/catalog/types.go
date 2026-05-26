@@ -39,6 +39,10 @@ type Table struct {
 	NextColumnID        ColumnID      `json:"next_column_id"`
 	CreatedAtGeneration Generation    `json:"created_at_generation"`
 	UpdatedAtGeneration Generation    `json:"updated_at_generation"`
+	// LegacyPath signals that this table's segment data lives under the v1 directory
+	// layout (segments/<normalized_name>). New tables use the table_id-keyed layout
+	// (tables/<padded_table_id>) so RENAME TABLE can be metadata only later.
+	LegacyPath          bool          `json:"legacy_path,omitempty"`
 	Columns             []Column      `json:"columns"`
 	PrimaryKey          []ColumnID    `json:"primary_key"`
 	Constraints         []Constraint  `json:"constraints"`
