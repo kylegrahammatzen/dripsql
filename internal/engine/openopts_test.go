@@ -1,17 +1,19 @@
-// OpenWith + OpenOpts.AutoRetention: DB.Vacuum auto-runs VacuumRetention with a
-// caller-configured lag so operators don't have to recompute the cutoff each cycle.
+// DB.SetAutoRetention + SetRetentionLag make DB.Vacuum auto-run VacuumRetention with the configured lag.
+// Operators do not have to recompute the cutoff each cycle.
 package engine
 
 import (
 	"testing"
 )
 
-func TestOpenOpts_AutoRetentionRunsInsideVacuum(t *testing.T) {
+func TestAutoRetention_RunsInsideVacuum(t *testing.T) {
 	dir := t.TempDir()
-	db, err := OpenWith(dir, OpenOpts{AutoRetention: true, RetentionLag: 1})
+	db, err := Open(dir)
 	if err != nil {
-		t.Fatalf("OpenWith: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
+	db.SetAutoRetention(true)
+	db.SetRetentionLag(1)
 	t.Cleanup(func() { db.Close() })
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
 	mustExec(t, db, "INSERT INTO t (id) VALUES (1)")
@@ -36,8 +38,8 @@ func TestOpenOpts_AutoRetentionRunsInsideVacuum(t *testing.T) {
 	}
 }
 
-func TestOpenOpts_DefaultDoesNotRetire(t *testing.T) {
-	db := openTestDB(t) // defaults: no AutoRetention
+func TestAutoRetention_DefaultDoesNotRetire(t *testing.T) {
+	db := openTestDB(t)
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
 	mustExec(t, db, "INSERT INTO t (id) VALUES (1)")
 	mustExec(t, db, "DELETE FROM t WHERE id = 1")

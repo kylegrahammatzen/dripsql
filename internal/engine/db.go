@@ -87,16 +87,7 @@ type Rows struct {
 	Values  [][]any
 }
 
-type OpenOpts struct {
-	AutoRetention bool
-	RetentionLag  uint64
-}
-
 func Open(path string) (*DB, error) {
-	return OpenWith(path, OpenOpts{})
-}
-
-func OpenWith(path string, opts OpenOpts) (*DB, error) {
 	if path == "" {
 		return nil, fmt.Errorf("engine: database path is required")
 	}
@@ -119,8 +110,6 @@ func OpenWith(path string, opts OpenOpts) (*DB, error) {
 		segLRU:       list.New(),
 		pinnedReadTs: make(map[uint64]int),
 	}
-	db.autoRetention.Store(opts.AutoRetention)
-	db.retentionLag.Store(opts.RetentionLag)
 	var maxCommitTs uint64
 	for name := range tablesByName {
 		m, err := db.manifestFor(name)
