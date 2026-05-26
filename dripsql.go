@@ -18,8 +18,8 @@ var (
 	ErrClosed      = engine.ErrClosed
 	ErrReadOnly    = engine.ErrReadOnly
 	ErrTxDone      = engine.ErrTxDone
-	ErrNoRows      = errors.New("dripsql: query returned no rows")
-	ErrTooManyRows = errors.New("dripsql: query returned more than one row")
+	ErrNoRows      = errors.New("query returned no rows")
+	ErrTooManyRows = errors.New("query returned more than one row")
 )
 
 // Open opens or creates the database directory at path.

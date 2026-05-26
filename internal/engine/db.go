@@ -20,9 +20,9 @@ import (
 
 // Sentinels callers branch on with errors.Is.
 var (
-	ErrClosed   = errors.New("dripsql: database is closed")
-	ErrReadOnly = errors.New("dripsql: database is read-only")
-	ErrTxDone   = errors.New("dripsql: transaction already committed or rolled back")
+	ErrClosed   = errors.New("database is closed")
+	ErrReadOnly = errors.New("database is read-only")
+	ErrTxDone   = errors.New("transaction already committed or rolled back")
 )
 
 type DB struct {
