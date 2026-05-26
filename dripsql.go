@@ -68,6 +68,12 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 
 func (db *DB) Vacuum() (int, error) { return db.e.Vacuum() }
 
+// SetAutoRetention toggles whether Vacuum also runs VacuumRetention with the current lag.
+func (db *DB) SetAutoRetention(on bool) { db.e.SetAutoRetention(on) }
+
+// SetRetentionLag sets the retention cutoff in commit-ts ticks for VacuumRetention.
+func (db *DB) SetRetentionLag(lag uint64) { db.e.SetRetentionLag(lag) }
+
 // Result reports counts from a single Exec call.
 type Result struct {
 	Statements   int

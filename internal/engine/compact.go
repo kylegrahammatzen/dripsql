@@ -112,14 +112,15 @@ func (db *DB) Vacuum() (int, error) {
 			return total, err
 		}
 	}
-	if db.opts.AutoRetention && db.opts.RetentionLag > 0 {
-		cur := db.nextCommitTs.Load()
-		if cur > db.opts.RetentionLag {
-			cutoff := cur - db.opts.RetentionLag
-			retired, err := db.vacuumRetentionLocked(cutoff)
-			total += retired
-			if err != nil {
-				return total, err
+	if db.autoRetention.Load() {
+		if lag := db.retentionLag.Load(); lag > 0 {
+			cur := db.nextCommitTs.Load()
+			if cur > lag {
+				retired, err := db.vacuumRetentionLocked(cur - lag)
+				total += retired
+				if err != nil {
+					return total, err
+				}
 			}
 		}
 	}

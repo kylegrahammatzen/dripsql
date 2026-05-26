@@ -35,8 +35,18 @@ type DB struct {
 	nextTxnID     uint64
 	nextCommitTs  atomic.Uint64
 	pinnedReadTs  map[uint64]int
-	opts          OpenOpts
+
+	autoRetention atomic.Bool
+	retentionLag  atomic.Uint64
 }
+
+// SetAutoRetention toggles whether Vacuum runs VacuumRetention with the current lag.
+// Safe to call from any goroutine; Vacuum reads the latest value on entry.
+func (db *DB) SetAutoRetention(on bool) { db.autoRetention.Store(on) }
+
+// SetRetentionLag sets the retention cutoff in commit-ts ticks for VacuumRetention.
+// Safe to call from any goroutine; Vacuum reads the latest value on entry.
+func (db *DB) SetRetentionLag(lag uint64) { db.retentionLag.Store(lag) }
 
 type segCacheEntry struct {
 	key segCacheKey
@@ -108,8 +118,9 @@ func OpenWith(path string, opts OpenOpts) (*DB, error) {
 		segCache:     make(map[segCacheKey]*list.Element),
 		segLRU:       list.New(),
 		pinnedReadTs: make(map[uint64]int),
-		opts:         opts,
 	}
+	db.autoRetention.Store(opts.AutoRetention)
+	db.retentionLag.Store(opts.RetentionLag)
 	var maxCommitTs uint64
 	for name := range tablesByName {
 		m, err := db.manifestFor(name)
