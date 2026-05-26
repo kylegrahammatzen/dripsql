@@ -262,6 +262,9 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 	if len(decodeIdx) == 0 {
 		return nil
 	}
+	if err := seg.ValidateColumns(); err != nil {
+		return err
+	}
 	pageCount := len(seg.Cols[decodeIdx[0]].Pages)
 	for _, ci := range decodeIdx[1:] {
 		if len(seg.Cols[ci].Pages) != pageCount {
@@ -289,7 +292,7 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 			v   vector.Vec
 			err error
 		)
-		v, scratch, err = seg.ReadPageInto(ci, pi, scratch)
+		scratch, err = seg.readPageIntoValidated(ci, pi, scratch, &v)
 		if err != nil {
 			return fmt.Errorf("scan: col %q page %d: %w", decode[i], pi, err)
 		}

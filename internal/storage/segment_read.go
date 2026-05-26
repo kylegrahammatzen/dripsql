@@ -316,21 +316,27 @@ func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (vector.Vec,
 	if err := s.ValidateColumns(); err != nil {
 		return vector.Vec{}, scratch, err
 	}
+	var v vector.Vec
+	scratch, err := s.readPageIntoValidated(colIdx, pageIdx, scratch, &v)
+	return v, scratch, err
+}
+
+func (s *Segment) readPageIntoValidated(colIdx, pageIdx int, scratch []byte, dst *vector.Vec) ([]byte, error) {
 	if colIdx < 0 || colIdx >= len(s.Cols) {
-		return vector.Vec{}, scratch, fmt.Errorf("ReadPage: col %d out of range [0, %d)", colIdx, len(s.Cols))
+		return scratch, fmt.Errorf("ReadPage: col %d out of range [0, %d)", colIdx, len(s.Cols))
 	}
 	col := &s.Cols[colIdx]
 	if pageIdx < 0 || pageIdx >= len(col.Pages) {
-		return vector.Vec{}, scratch, fmt.Errorf("ReadPage: page %d out of range [0, %d)", pageIdx, len(col.Pages))
+		return scratch, fmt.Errorf("ReadPage: page %d out of range [0, %d)", pageIdx, len(col.Pages))
 	}
 	page := col.Pages[pageIdx]
 	rows := int(page.Rows)
 	kind := vector.VecKind(page.Kind)
 
 	if page.Flags&PageFlagAllNull != 0 {
-		v := allocVecForKind(kind, rows)
-		v.Valid = allInvalidValidity(rows)
-		return v, scratch, nil
+		*dst = allocVecForKind(kind, rows)
+		dst.Valid = allInvalidValidity(rows)
+		return scratch, nil
 	}
 
 	if cap(scratch) < int(page.PayloadLength) {
@@ -340,7 +346,7 @@ func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (vector.Vec,
 	}
 	ioStart := nowNanos()
 	if _, err := s.f.ReadAt(scratch, int64(page.PayloadOffset)); err != nil {
-		return vector.Vec{}, scratch, fmt.Errorf("ReadPage: read payload: %w", err)
+		return scratch, fmt.Errorf("ReadPage: read payload: %w", err)
 	}
 	addIORead(nowNanos() - ioStart)
 
@@ -350,11 +356,11 @@ func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (vector.Vec,
 		words := vector.ValidityWords(rows)
 		need := words * 8
 		if len(scratch) < need {
-			return vector.Vec{}, scratch, fmt.Errorf("ReadPage: validity prefix truncated: have %d need %d", len(scratch), need)
+			return scratch, fmt.Errorf("ReadPage: validity prefix truncated: have %d need %d", len(scratch), need)
 		}
 		v, _, err := vector.UnmarshalValidity(scratch[:need], rows, int(page.NullCount), nil)
 		if err != nil {
-			return vector.Vec{}, scratch, fmt.Errorf("ReadPage: validity: %w", err)
+			return scratch, fmt.Errorf("ReadPage: validity: %w", err)
 		}
 		validity = v
 		innerPayload = scratch[need:]
@@ -362,20 +368,19 @@ func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (vector.Vec,
 
 	enc := schema.Encoding(page.Encoding)
 	if !enc.Valid() {
-		return vector.Vec{}, scratch, fmt.Errorf("ReadPage: unknown encoding wire byte %d", page.Encoding)
+		return scratch, fmt.Errorf("ReadPage: unknown encoding wire byte %d", page.Encoding)
 	}
 	c, err := codec.Lookup(enc)
 	if err != nil {
-		return vector.Vec{}, scratch, err
+		return scratch, err
 	}
-	var v vector.Vec
 	decStart := nowNanos()
-	if err := c.Decode(innerPayload, kind, rows, int(page.NullCount), &v); err != nil {
-		return vector.Vec{}, scratch, fmt.Errorf("ReadPage: decode: %w", err)
+	if err := c.Decode(innerPayload, kind, rows, int(page.NullCount), dst); err != nil {
+		return scratch, fmt.Errorf("ReadPage: decode: %w", err)
 	}
 	addDecode(nowNanos() - decStart)
-	v.Valid = validity
-	return v, scratch, nil
+	dst.Valid = validity
+	return scratch, nil
 }
 
 // ReadPagePayload reads a page's raw payload bytes and parses the validity prefix without
