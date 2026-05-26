@@ -1,4 +1,4 @@
-﻿// ALP-RD codec for float64 that decimal-ALP rejects.
+// ALP-RD codec for float64 that decimal-ALP rejects.
 // Round-trip is bitwise-exact, so NaN, Inf, and -0 are preserved.
 package codec
 
@@ -34,7 +34,19 @@ func (c alpRDCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if rows == 0 {
 		return nil, ErrSkip
 	}
+	if maxLen, ok := ctxMaxEncodedLen(ctx); ok {
+		if alpRDWireSize(rows, 1, 1) > maxLen {
+			return nil, ErrSkip
+		}
+	}
 	src := v.F64()
+	if maxLen, ok := ctxMaxEncodedLen(ctx); ok {
+		dict, dictEntries, n, ok := buildALPRDDictWithin(src, rows, maxLen)
+		if !ok {
+			return nil, ErrSkip
+		}
+		return c.encodeWithDict(src, rows, dict, dictEntries, n, ctx)
+	}
 	dict := make(map[uint16]uint16, 16)
 	dictEntries := make([]uint16, 0, 16)
 	indices := make([]uint64, rows)
@@ -55,12 +67,63 @@ func (c alpRDCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 		indices[i] = uint64(idx)
 		tails[i] = tail
 	}
+	return c.encodeWithRows(rows, dictEntries, indices, tails, ctx)
+}
+
+func buildALPRDDictWithin(src []float64, rows int, maxLen int) (map[uint16]uint16, []uint16, int, bool) {
+	dict := make(map[uint16]uint16, 16)
+	dictEntries := make([]uint16, 0, 16)
+	n := 0
+	for _, x := range src {
+		bits := math.Float64bits(x)
+		head := uint16(bits >> alpRDTailBits)
+		if _, ok := dict[head]; ok {
+			continue
+		}
+		if len(dictEntries) >= alpRDMaxDictSize {
+			return nil, nil, 0, false
+		}
+		dict[head] = uint16(len(dictEntries))
+		dictEntries = append(dictEntries, head)
+		width := bitsForN(len(dictEntries))
+		if width == 0 {
+			width = 1
+		}
+		n = alpRDWireSize(rows, len(dictEntries), width)
+		if n > maxLen {
+			return nil, nil, 0, false
+		}
+	}
+	return dict, dictEntries, n, true
+}
+
+func (c alpRDCodec) encodeWithDict(src []float64, rows int, dict map[uint16]uint16, dictEntries []uint16, n int, ctx *EncodeContext) ([]byte, error) {
+	indices := make([]uint64, rows)
+	tails := make([]uint64, rows)
+	for i, x := range src {
+		bits := math.Float64bits(x)
+		head := uint16(bits >> alpRDTailBits)
+		indices[i] = uint64(dict[head])
+		tails[i] = bits & ((uint64(1) << alpRDTailBits) - 1)
+	}
+	return c.encodeWithRows(rows, dictEntries, indices, tails, ctx, n)
+}
+
+func (c alpRDCodec) encodeWithRows(rows int, dictEntries []uint16, indices []uint64, tails []uint64, ctx *EncodeContext, knownSize ...int) ([]byte, error) {
 	dictWidth := bitsForN(len(dictEntries))
 	if dictWidth == 0 {
 		dictWidth = 1
 	}
 	tailWidth := alpRDTailBits
-	n := alpRDHeaderSize + len(dictEntries)*2 + PackedSize(rows, dictWidth) + PackedSize(rows, tailWidth)
+	n := 0
+	if len(knownSize) > 0 {
+		n = knownSize[0]
+	} else {
+		n = alpRDWireSize(rows, len(dictEntries), dictWidth)
+	}
+	if maxLen, ok := ctxMaxEncodedLen(ctx); ok && n > maxLen {
+		return nil, ErrSkip
+	}
 	scratch := ctxTrial(ctx)
 	if cap(scratch) < n {
 		scratch = make([]byte, n)
@@ -82,6 +145,10 @@ func (c alpRDCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	tailBytes := PackedSize(rows, tailWidth)
 	Pack(tailWidth, tails, scratch[pos:pos+tailBytes])
 	return scratch, nil
+}
+
+func alpRDWireSize(rows int, dictEntries int, dictWidth int) int {
+	return alpRDHeaderSize + dictEntries*2 + PackedSize(rows, dictWidth) + PackedSize(rows, alpRDTailBits)
 }
 
 func (alpRDCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {

@@ -1,4 +1,4 @@
-﻿// Plain codec: zero-transform byte layout per Vec kind.
+// Plain codec: zero-transform byte layout per Vec kind.
 // Wire is native little-endian for fixed widths. Project targets are amd64/arm64.
 package codec
 
@@ -35,6 +35,9 @@ func (c plainCodec) plainSize(v vector.Vec) (int, bool) {
 func (c plainCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	n, ok := c.plainSize(v)
 	if !ok {
+		return nil, ErrSkip
+	}
+	if maxLen, ok := ctxMaxEncodedLen(ctx); ok && n > maxLen {
 		return nil, ErrSkip
 	}
 	scratch := ctxTrial(ctx)

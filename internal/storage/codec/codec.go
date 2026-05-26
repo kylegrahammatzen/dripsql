@@ -1,4 +1,4 @@
-﻿// Codec interface plus the EncodeContext / ScratchPool / ErrSkip plumbing the
+// Codec interface plus the EncodeContext / ScratchPool / ErrSkip plumbing the
 // cascade and codec implementations share. Codecs self-register via init().
 package codec
 
@@ -15,8 +15,9 @@ import (
 var ErrSkip = errors.New("codec: not applicable to this Vec")
 
 type EncodeContext struct {
-	Scratch *ScratchPool
-	Facts   *PageFacts
+	Scratch       *ScratchPool
+	Facts         *PageFacts
+	MaxEncodedLen int
 }
 
 // Codecs may mutate trial, u64s, and dictMap. Best is reserved for the
@@ -80,6 +81,13 @@ func ctxU64s(ctx *EncodeContext, n int) []uint64 {
 		return make([]uint64, n)
 	}
 	return ctx.Scratch.U64s(n)
+}
+
+func ctxMaxEncodedLen(ctx *EncodeContext) (int, bool) {
+	if ctx == nil || ctx.MaxEncodedLen <= 0 {
+		return 0, false
+	}
+	return ctx.MaxEncodedLen, true
 }
 
 type Codec interface {

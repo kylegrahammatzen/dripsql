@@ -1,4 +1,4 @@
-﻿// Cascade tests: kind-driven candidate sets and Pick chooses minimum-size.
+// Cascade tests: kind-driven candidate sets and Pick chooses minimum-size.
 package codec
 
 import (
@@ -148,5 +148,69 @@ func TestCascade_Pick_TieFavorsPlain_ZeroRows(t *testing.T) {
 	}
 	if size != 0 {
 		t.Fatalf("zero-row size = %d, want 0", size)
+	}
+}
+
+func TestCascade_FactsPickDictionaryForLowCardinalityText(t *testing.T) {
+	v := vector.NewVarVec(vector.VecText, 2048, 0)
+	vb := v.Var()
+	tokens := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
+	for i := range int(v.Len) {
+		vb.AppendString(i, tokens[i%len(tokens)])
+	}
+	indices, entries, dictBytes, ok := buildDict(v)
+	if !ok {
+		t.Fatal("buildDict must accept low cardinality text")
+	}
+	facts := &PageFacts{Rows: int(v.Len), Kind: v.Kind, VarBytes: &VarBytesFacts{
+		DictFits:    true,
+		DictBytes:   dictBytes,
+		DictEntries: entries,
+		DictIndices: indices,
+	}}
+	enc, payload, err := Encode(v, &EncodeContext{Scratch: NewScratchPool(), Facts: facts})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if enc != schema.EncDict {
+		t.Fatalf("Encode with dictionary facts = %v, want %v", enc, schema.EncDict)
+	}
+	c, err := Lookup(enc)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	var dst vector.Vec
+	if err := c.Decode(payload, v.Kind, int(v.Len), 0, &dst); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	for i := range int(v.Len) {
+		if got, want := string(dst.Var().Bytes(i)), string(v.Var().Bytes(i)); got != want {
+			t.Fatalf("row %d = %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestCascade_FactsKeepConstantWinnerForRepeatedText(t *testing.T) {
+	v := vector.NewVarVec(vector.VecText, 2048, 0)
+	vb := v.Var()
+	for i := range int(v.Len) {
+		vb.AppendString(i, "alpha")
+	}
+	indices, entries, dictBytes, ok := buildDict(v)
+	if !ok {
+		t.Fatal("buildDict must accept repeated text")
+	}
+	facts := &PageFacts{Rows: int(v.Len), Kind: v.Kind, VarBytes: &VarBytesFacts{
+		DictFits:    true,
+		DictBytes:   dictBytes,
+		DictEntries: entries,
+		DictIndices: indices,
+	}}
+	enc, _, err := Encode(v, &EncodeContext{Scratch: NewScratchPool(), Facts: facts})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if enc != schema.EncConstant {
+		t.Fatalf("Encode with repeated text facts = %v, want %v", enc, schema.EncConstant)
 	}
 }

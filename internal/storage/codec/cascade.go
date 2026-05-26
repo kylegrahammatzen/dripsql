@@ -1,4 +1,4 @@
-﻿// Cascade picks the smallest-encoded codec for a Vec via Encode-or-ErrSkip.
+// Cascade picks the smallest-encoded codec for a Vec via Encode-or-ErrSkip.
 // Last candidate wins ties. Plain is always last so ties favor it.
 package codec
 
@@ -30,7 +30,7 @@ func Candidates(k vector.VecKind) []Codec {
 	case k == vector.VecFloat32 || k == vector.VecFloat64:
 		base = append(base, mustLookup(schema.EncALP))
 		if k == vector.VecFloat64 {
-			base = append(base, mustLookup(schema.EncALPRD), mustLookup(schema.EncPcodec))
+			base = append(base, mustLookup(schema.EncPcodec), mustLookup(schema.EncALPRD))
 		}
 	}
 	return append(base, mustLookup(schema.EncPlain))
@@ -53,12 +53,29 @@ func Encode(v vector.Vec, ctx *EncodeContext) (schema.Encoding, []byte, error) {
 		ctx.Scratch = NewScratchPool()
 	}
 	sp := ctx.Scratch
+	prevMaxEncodedLen := ctx.MaxEncodedLen
+	defer func() {
+		ctx.MaxEncodedLen = prevMaxEncodedLen
+	}()
 	sp.best = sp.best[:0]
 	haveBest := false
 	var bestEnc schema.Encoding
+	if c, ok := dominantFactCodec(v, ctx); ok {
+		p, err := c.Encode(v, ctx)
+		if err != nil {
+			return 0, nil, fmt.Errorf("cascade encode: %v: %w", c.Encoding(), err)
+		}
+		sp.SaveTrial(p)
+		return c.Encoding(), p, nil
+	}
 
 	for _, c := range Candidates(v.Kind) {
 		sp.trial = sp.trial[:0]
+		if haveBest {
+			ctx.MaxEncodedLen = len(sp.best)
+		} else {
+			ctx.MaxEncodedLen = 0
+		}
 		p, err := c.Encode(v, ctx)
 		if errors.Is(err, ErrSkip) {
 			continue
@@ -77,6 +94,22 @@ func Encode(v vector.Vec, ctx *EncodeContext) (schema.Encoding, []byte, error) {
 		return 0, nil, fmt.Errorf("cascade encode: no codec accepted kind %v", v.Kind)
 	}
 	return bestEnc, sp.best, nil
+}
+
+func dominantFactCodec(v vector.Vec, ctx *EncodeContext) (Codec, bool) {
+	if ctx == nil || ctx.Facts == nil || ctx.Facts.VarBytes == nil || !v.Kind.IsVarBytes() {
+		return nil, false
+	}
+	f := ctx.Facts.VarBytes
+	rows := int(v.Len)
+	if !f.DictFits || len(f.DictEntries) <= 1 || len(f.DictIndices) != rows {
+		return nil, false
+	}
+	dictSize := dictHeaderSize + f.DictBytes + rows
+	if dictSize > 4*rows {
+		return nil, false
+	}
+	return mustLookup(schema.EncDict), true
 }
 
 // Thin wrapper for callers that only need the chosen codec and a size.

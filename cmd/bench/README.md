@@ -89,9 +89,9 @@ go test ./internal/storage/codec '-bench=.' '-benchmem' '-run=^$' '-count=10'
 | `Storage_WriteSegment_Int64Constant` | 2.20 ms | 150 K | 85 |
 | `Storage_WriteSegment_Int64Monotonic` | 2.28 ms | 277 K | 98 |
 | `Storage_WriteSegment_Int64SparseNulls` | 1.94 ms | 132 K | 53 |
-| `Storage_WriteSegment_Float64Plain` | 3.29 ms | 263 K | 81 |
-| `Storage_WriteSegment_Float64Decimal` | 3.56 ms | 287 K | 119 |
-| `Storage_WriteSegment_TextLowCardinality` | 16.6 ms | 2.99 M | 307 K |
+| `Storage_WriteSegment_Float64Plain` | 2.30 ms | 115 K | 80 |
+| `Storage_WriteSegment_Float64Decimal` | 2.11 ms | 97 K | 60 |
+| `Storage_WriteSegment_TextLowCardinality` | 2.52 ms | 426 K | 206 |
 | `Codec_Decode/for_int64` | 26 us | 16 K | 1 |
 | `Codec_Decode/delta_int64` | 22 us | 33 K | 2 |
 | `Codec_Decode/pcodec_int64` | 22 us | 16 K | 1 |
