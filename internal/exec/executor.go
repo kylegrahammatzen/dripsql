@@ -521,24 +521,30 @@ func intLikeType(t schema.Type) bool {
 	return false
 }
 
-func scanColumnNames(rel *sql.Rel) ([]string, []uint64, error) {
+func scanColumnNames(rel *sql.Rel) ([]string, []uint64, []vector.VecKind, error) {
 	names := make([]string, 0, len(rel.Columns))
 	ids := make([]uint64, 0, len(rel.Columns))
+	kinds := make([]vector.VecKind, 0, len(rel.Columns))
 	for _, id := range rel.Columns {
 		found := false
 		for _, c := range rel.Table.Columns {
 			if c.ID == id {
 				names = append(names, c.Name)
 				ids = append(ids, uint64(c.ID))
+				k, err := vector.VecKindOf(c.Type)
+				if err != nil {
+					return nil, nil, nil, fmt.Errorf("BuildOperator: column %q vec kind: %w", c.Name, err)
+				}
+				kinds = append(kinds, k)
 				found = true
 				break
 			}
 		}
 		if !found {
-			return nil, nil, fmt.Errorf("BuildOperator: unknown ColumnID %d in scan for table %q", id, rel.Table.Name)
+			return nil, nil, nil, fmt.Errorf("BuildOperator: unknown ColumnID %d in scan for table %q", id, rel.Table.Name)
 		}
 	}
-	return names, ids, nil
+	return names, ids, kinds, nil
 }
 
 func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, outer *correlatedOuter) (Operator, error) {
@@ -551,11 +557,11 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, ou
 	if err != nil {
 		return nil, fmt.Errorf("BuildOperator: resolve segments: %w", err)
 	}
-	names, ids, err := scanColumnNames(rel)
+	names, ids, kinds, err := scanColumnNames(rel)
 	if err != nil {
 		return nil, err
 	}
-	opts := storage.ScanOpts{Segments: segs, Columns: names, ColumnIDs: ids, TopK: topK}
+	opts := storage.ScanOpts{Segments: segs, Columns: names, ColumnIDs: ids, ColumnKinds: kinds, TopK: topK}
 	var residual *sql.BoundExpr
 	if rel.Where != nil {
 		push, res := splitWhere(*rel.Where)
@@ -568,14 +574,17 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, ou
 				}
 				kept := make([]string, 0, len(names))
 				keptIDs := make([]uint64, 0, len(names))
+				keptKinds := make([]vector.VecKind, 0, len(names))
 				for i, id := range rel.Columns {
 					if _, ok := drop[id]; !ok {
 						kept = append(kept, names[i])
 						keptIDs = append(keptIDs, ids[i])
+						keptKinds = append(keptKinds, kinds[i])
 					}
 				}
 				opts.Columns = kept
 				opts.ColumnIDs = keptIDs
+				opts.ColumnKinds = keptKinds
 			}
 		}
 		residual = res

@@ -94,24 +94,42 @@ func (p *parser) parseAlter() (Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := p.expectWord("rename"); err != nil {
-		return nil, err
-	}
-	if err := p.expectWord("column"); err != nil {
-		return nil, err
-	}
-	from, err := p.parseName()
+	op, err := p.expect(tokIdent)
 	if err != nil {
 		return nil, err
 	}
-	if err := p.expectWord("to"); err != nil {
-		return nil, err
+	switch op.lit {
+	case "rename":
+		if err := p.expectWord("column"); err != nil {
+			return nil, err
+		}
+		from, err := p.parseName()
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectWord("to"); err != nil {
+			return nil, err
+		}
+		to, err := p.parseName()
+		if err != nil {
+			return nil, err
+		}
+		return &AlterTableStmt{Table: tableName, Rename: &AlterRenameColumn{From: from, To: to}}, nil
+	case "add":
+		if err := p.expectWord("column"); err != nil {
+			return nil, err
+		}
+		name, err := p.parseName()
+		if err != nil {
+			return nil, err
+		}
+		typeName, err := p.parseName()
+		if err != nil {
+			return nil, err
+		}
+		return &AlterTableStmt{Table: tableName, Add: &AlterAddColumn{Name: name, Type: typeName}}, nil
 	}
-	to, err := p.parseName()
-	if err != nil {
-		return nil, err
-	}
-	return &AlterTableStmt{Table: tableName, Rename: &AlterRenameColumn{From: from, To: to}}, nil
+	return nil, p.errorAt(op, "unsupported ALTER TABLE op %q", op.lit)
 }
 
 func (p *parser) parseCreate() (Stmt, error) {

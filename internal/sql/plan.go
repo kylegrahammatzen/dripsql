@@ -15,6 +15,7 @@ type SchemaVersion uint64
 type AlterPayload struct {
 	Table  string
 	Rename *AlterRenameColumn
+	Add    *AlterAddColumn
 }
 
 type TypeDef struct {

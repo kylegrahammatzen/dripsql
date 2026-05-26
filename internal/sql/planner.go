@@ -886,24 +886,44 @@ func BindAlterTable(stmt *AlterTableStmt) (*Plan, error) {
 	if table == "" {
 		return nil, fmt.Errorf("ALTER TABLE requires a table name")
 	}
-	if stmt.Rename == nil {
-		return nil, fmt.Errorf("ALTER TABLE: only RENAME COLUMN is supported")
+	switch {
+	case stmt.Rename != nil:
+		from := schema.NormalizeName(stmt.Rename.From)
+		to := schema.NormalizeName(stmt.Rename.To)
+		if from == "" || to == "" {
+			return nil, fmt.Errorf("ALTER TABLE RENAME COLUMN requires both from and to names")
+		}
+		if from == to {
+			return nil, fmt.Errorf("ALTER TABLE RENAME COLUMN: from and to are identical (%q)", from)
+		}
+		return &Plan{
+			Kind: PlanAlterTable,
+			Alter: &AlterPayload{
+				Table:  table,
+				Rename: &AlterRenameColumn{From: from, To: to},
+			},
+		}, nil
+	case stmt.Add != nil:
+		name := schema.NormalizeName(stmt.Add.Name)
+		if name == "" {
+			return nil, fmt.Errorf("ALTER TABLE ADD COLUMN requires a name")
+		}
+		typ, err := schema.ParseType(stmt.Add.Type)
+		if err != nil {
+			return nil, fmt.Errorf("ALTER TABLE ADD COLUMN: %w", err)
+		}
+		if !typ.Valid() {
+			return nil, fmt.Errorf("ALTER TABLE ADD COLUMN: invalid type %q", stmt.Add.Type)
+		}
+		return &Plan{
+			Kind: PlanAlterTable,
+			Alter: &AlterPayload{
+				Table: table,
+				Add:   &AlterAddColumn{Name: name, Type: stmt.Add.Type},
+			},
+		}, nil
 	}
-	from := schema.NormalizeName(stmt.Rename.From)
-	to := schema.NormalizeName(stmt.Rename.To)
-	if from == "" || to == "" {
-		return nil, fmt.Errorf("ALTER TABLE RENAME COLUMN requires both from and to names")
-	}
-	if from == to {
-		return nil, fmt.Errorf("ALTER TABLE RENAME COLUMN: from and to are identical (%q)", from)
-	}
-	return &Plan{
-		Kind: PlanAlterTable,
-		Alter: &AlterPayload{
-			Table:  table,
-			Rename: &AlterRenameColumn{From: from, To: to},
-		},
-	}, nil
+	return nil, fmt.Errorf("ALTER TABLE: unsupported operation")
 }
 
 func BindCreateTable(stmt *CreateTableStmt) (*Plan, error) {

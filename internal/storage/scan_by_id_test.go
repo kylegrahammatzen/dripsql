@@ -40,7 +40,7 @@ func TestScan_ByColumnID_SurvivesRename(t *testing.T) {
 	}
 }
 
-func TestScan_ByColumnID_ErrorsOnUnknownID(t *testing.T) {
+func TestScan_ByColumnID_SynthesisesNullForUnknownID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	id := SegmentIdentity{TableID: 1, SchemaGeneration: 1, ColumnIDs: []uint64{1}}
 	if _, err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 3)}, nil, id); err != nil {
@@ -52,13 +52,31 @@ func TestScan_ByColumnID_ErrorsOnUnknownID(t *testing.T) {
 	}
 	defer seg.Close()
 
+	rows := 0
+	nulls := 0
 	err = Scan(ScanOpts{
-		Segments:  []*Segment{seg},
-		Columns:   []string{"id"},
-		ColumnIDs: []uint64{999},
-	}, func(b vector.Batch, sel *vector.SelectionMask) error { return nil })
-	if err == nil {
-		t.Fatal("expected error when requested column id is missing in a segment with identity")
+		Segments:    []*Segment{seg},
+		Columns:     []string{"id", "added_later"},
+		ColumnIDs:   []uint64{1, 999},
+		ColumnKinds: []vector.VecKind{vector.VecInt64, vector.VecInt64},
+	}, func(b vector.Batch, sel *vector.SelectionMask) error {
+		rows += b.Len
+		col := b.Columns[1]
+		if col.Name != "added_later" {
+			t.Fatalf("synthesised column name = %q, want %q", col.Name, "added_later")
+		}
+		for r := 0; r < b.Len; r++ {
+			if col.V.Valid == nil || !col.V.Valid.IsValid(r) {
+				nulls++
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if rows != 3 || nulls != 3 {
+		t.Fatalf("rows=%d nulls=%d, want 3/3", rows, nulls)
 	}
 }
 

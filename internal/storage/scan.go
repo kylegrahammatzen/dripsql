@@ -21,9 +21,13 @@ type ScanOpts struct {
 	// identity sidecar, the scan resolves columns by id rather than by name so renames
 	// in the catalog stay metadata only.
 	ColumnIDs []uint64
-	Pred      *Pred
-	TopK      *TopKPushdown
-	ReadTs    uint64
+	// ColumnKinds is an optional parallel slice carrying the vector kind per projection
+	// column. Required to synthesise NULL vectors for columns that were added after a
+	// segment was written; the engine populates it so scan can fill from BoundColumnDef.
+	ColumnKinds []vector.VecKind
+	Pred        *Pred
+	TopK        *TopKPushdown
+	ReadTs      uint64
 }
 
 // TopKPushdown is storage-owned scan metadata for ORDER BY ... LIMIT/OFFSET over a single
@@ -91,6 +95,7 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 			predIDs = opts.Pred.ColumnIDs()
 		}
 		decodeIdx, projIdx, err := resolveSegmentColumns(seg, decode, projection, decodeIDs(decode, opts.Columns, opts.ColumnIDs, predCols, predIDs))
+		synthKinds := decodeSynthKinds(decode, opts.Columns, opts.ColumnKinds)
 		if err != nil {
 			return fmt.Errorf("Scan: %w", err)
 		}
@@ -108,7 +113,7 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 				pageMask[pi] = topKPages[[2]int{si, pi}]
 			}
 		}
-		if err := scanSegment(seg, decode, decodeIdx, projIdx, predNeeded, compiled, pageMask, fn); err != nil {
+		if err := scanSegment(seg, decode, decodeIdx, projIdx, predNeeded, synthKinds, compiled, pageMask, fn); err != nil {
 			return err
 		}
 	}
@@ -272,6 +277,29 @@ func decodeIDs(decode []string, projNames []string, projIDs []uint64, predNames 
 	return out
 }
 
+// resolveSegmentColumns returns -1 in decodeIdx for columns that are known by stable id
+// but absent from the segment. The caller (scanSegment) treats those as synthetic and
+// fills them with NULL vectors. Falling back to name match (legacy segments without an
+// identity sidecar) still errors on miss because we have no synthesis contract there.
+// decodeSynthKinds returns a slice parallel to decode giving the vector kind to use
+// when a column is synthesised because it is absent from a segment. Slots for columns
+// the caller did not provide a kind for stay invalid; the caller only synthesises when
+// the slot is valid.
+func decodeSynthKinds(decode []string, projNames []string, projKinds []vector.VecKind) []vector.VecKind {
+	if len(projKinds) != len(projNames) || len(projKinds) == 0 {
+		return nil
+	}
+	byName := make(map[string]vector.VecKind, len(projNames))
+	for i, n := range projNames {
+		byName[strings.ToLower(n)] = projKinds[i]
+	}
+	out := make([]vector.VecKind, len(decode))
+	for i, n := range decode {
+		out[i] = byName[strings.ToLower(n)]
+	}
+	return out
+}
+
 func resolveSegmentColumns(seg *Segment, decode, projection []string, decodeIDs []uint64) (decodeIdx, projIdx []int, err error) {
 	useID := seg.TableID != 0 && len(decodeIDs) == len(decode)
 	decodeIdx = make([]int, len(decode))
@@ -283,9 +311,6 @@ func resolveSegmentColumns(seg *Segment, decode, projection []string, decodeIDs 
 					found = j
 					break
 				}
-			}
-			if found < 0 {
-				return nil, nil, fmt.Errorf("column id %d missing in segment %s", decodeIDs[i], seg.path)
 			}
 		} else {
 			for j := range seg.Cols {
@@ -317,15 +342,31 @@ func resolveSegmentColumns(seg *Segment, decode, projection []string, decodeIDs 
 	return decodeIdx, projIdx, nil
 }
 
-func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNeeded []bool, pred *CompiledPred, pageMask []bool, fn ScanFn) error {
+func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNeeded []bool, synthKinds []vector.VecKind, pred *CompiledPred, pageMask []bool, fn ScanFn) error {
 	if len(decodeIdx) == 0 {
 		return nil
 	}
 	if err := seg.ValidateColumns(); err != nil {
 		return err
 	}
-	pageCount := len(seg.Cols[decodeIdx[0]].Pages)
-	for _, ci := range decodeIdx[1:] {
+	anchor := -1
+	for _, ci := range decodeIdx {
+		if ci >= 0 {
+			anchor = ci
+			break
+		}
+	}
+	if anchor < 0 {
+		if len(seg.Cols) == 0 {
+			return nil
+		}
+		anchor = 0
+	}
+	pageCount := len(seg.Cols[anchor].Pages)
+	for _, ci := range decodeIdx {
+		if ci < 0 {
+			continue
+		}
 		if len(seg.Cols[ci].Pages) != pageCount {
 			return fmt.Errorf("scan: column %q has %d pages, expected %d", seg.Cols[ci].Name, len(seg.Cols[ci].Pages), pageCount)
 		}
@@ -340,6 +381,18 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 		// only RENAME the segment still has the old name in its footer; downstream
 		// operators bind to the catalog name and would otherwise miss the column.
 		decoded[i].Name = decode[i]
+		if ci < 0 {
+			kind := vector.VecInt64
+			if i < len(synthKinds) && synthKinds[i] != 0 {
+				kind = synthKinds[i]
+			}
+			t, err := vector.TypeFromVecKind(kind, "")
+			if err != nil {
+				return fmt.Errorf("scan: synthesised col %q: %w", decode[i], err)
+			}
+			decoded[i].Type = t
+			continue
+		}
 		decoded[i].EnumLabels = seg.Cols[ci].EnumLabels
 		if seg.Cols[ci].Kind != vector.VecEnum32 {
 			t, err := vector.TypeFromVecKind(seg.Cols[ci].Kind, "")
@@ -376,9 +429,8 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 		if pred != nil && pred.SkipsPage(seg, pi) {
 			continue
 		}
-		ci0 := decodeIdx[0]
-		pageRows := int(seg.Cols[ci0].Pages[pi].Rows)
-		pageRowStart := seg.Cols[ci0].Pages[pi].RowStart
+		pageRows := int(seg.Cols[anchor].Pages[pi].Rows)
+		pageRowStart := seg.Cols[anchor].Pages[pi].RowStart
 		encodedDone := false
 		if pred != nil && pred.MatchesPage(seg, pi) {
 			if sel.Rows() != pageRows {
@@ -401,6 +453,26 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 				continue
 			}
 			if predNeeded != nil && !predNeeded[i] {
+				continue
+			}
+			if ci < 0 {
+				// Column is known by id but absent from this segment because it was
+				// added after the segment was written. Fill with an all-null vec of
+				// the requested kind so downstream operators see the column shape.
+				kind := decoded[i].V.Kind
+				if kind == 0 {
+					if i < len(synthKinds) && synthKinds[i] != 0 {
+						kind = synthKinds[i]
+					} else {
+						kind = vector.VecInt64
+					}
+				}
+				v := vector.NewVec(kind, pageRows)
+				v.Valid = vector.NewValidity(pageRows)
+				for r := 0; r < pageRows; r++ {
+					v.Valid.SetInvalid(r)
+				}
+				decoded[i].V = v
 				continue
 			}
 			if err := decodeOne(i, ci, pi, pageRows); err != nil {

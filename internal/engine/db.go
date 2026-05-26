@@ -414,13 +414,20 @@ func (db *DB) alterTable(p *sql.AlterPayload) error {
 	if p == nil {
 		return fmt.Errorf("ALTER TABLE: nil payload")
 	}
-	if p.Rename == nil {
-		return fmt.Errorf("ALTER TABLE: unsupported operation")
-	}
 	tab, ok := db.tables[schema.NormalizeName(p.Table)]
 	if !ok {
 		return fmt.Errorf("table %q does not exist", p.Table)
 	}
+	switch {
+	case p.Rename != nil:
+		return db.renameColumn(tab, p)
+	case p.Add != nil:
+		return db.addColumn(tab, p.Add)
+	}
+	return fmt.Errorf("ALTER TABLE: unsupported operation")
+}
+
+func (db *DB) renameColumn(tab *catalog.Table, p *sql.AlterPayload) error {
 	from := schema.NormalizeName(p.Rename.From)
 	to := schema.NormalizeName(p.Rename.To)
 	var target *catalog.Column
@@ -451,6 +458,68 @@ func (db *DB) alterTable(p *sql.AlterPayload) error {
 	db.version = sql.SchemaVersion(newGen)
 	if err := catalog.Save(db.root, db.catalog); err != nil {
 		target.Name = prevName
+		tab.SchemaVersion = prevSchemaVersion
+		tab.UpdatedAtGeneration = prevUpdated
+		db.catalog.Generation = prevGen
+		db.version = sql.SchemaVersion(prevGen)
+		return err
+	}
+	return nil
+}
+
+func (db *DB) addColumn(tab *catalog.Table, p *sql.AlterAddColumn) error {
+	name := schema.NormalizeName(p.Name)
+	for i := range tab.Columns {
+		c := &tab.Columns[i]
+		if c.DroppedAtGeneration != nil {
+			continue
+		}
+		if schema.NormalizeName(c.Name) == name {
+			return fmt.Errorf("column %q already exists in table %q", p.Name, tab.Name)
+		}
+	}
+	typ, err := schema.ParseType(p.Type)
+	if err != nil {
+		return fmt.Errorf("ALTER TABLE ADD COLUMN: %w", err)
+	}
+	if typ.Kind == schema.KindNamed {
+		if _, ok := db.types[schema.NormalizeName(typ.Name)]; !ok {
+			return fmt.Errorf("ALTER TABLE ADD COLUMN: unknown type %q", typ.Name)
+		}
+	}
+	typeStr, err := schema.TypeString(typ)
+	if err != nil {
+		return err
+	}
+	prevGen := db.catalog.Generation
+	prevSchemaVersion := tab.SchemaVersion
+	prevUpdated := tab.UpdatedAtGeneration
+	prevNextColumnID := tab.NextColumnID
+	prevCols := tab.Columns
+	newGen := prevGen + 1
+	colID := tab.NextColumnID
+	ordinal := 0
+	for _, c := range tab.Columns {
+		if c.DroppedAtGeneration == nil && c.Ordinal >= ordinal {
+			ordinal = c.Ordinal + 1
+		}
+	}
+	tab.Columns = append(tab.Columns, catalog.Column{
+		ColumnID:          colID,
+		Name:              name,
+		Type:              typeStr,
+		Nullable:          true,
+		Ordinal:           ordinal,
+		AddedAtGeneration: newGen,
+	})
+	tab.NextColumnID = colID + 1
+	tab.SchemaVersion++
+	tab.UpdatedAtGeneration = newGen
+	db.catalog.Generation = newGen
+	db.version = sql.SchemaVersion(newGen)
+	if err := catalog.Save(db.root, db.catalog); err != nil {
+		tab.Columns = prevCols
+		tab.NextColumnID = prevNextColumnID
 		tab.SchemaVersion = prevSchemaVersion
 		tab.UpdatedAtGeneration = prevUpdated
 		db.catalog.Generation = prevGen

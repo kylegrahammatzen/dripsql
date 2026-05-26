@@ -27,11 +27,20 @@ type CreateTableStmt struct {
 type AlterTableStmt struct {
 	Table  string
 	Rename *AlterRenameColumn
+	Add    *AlterAddColumn
 }
 
 type AlterRenameColumn struct {
 	From string
 	To   string
+}
+
+// AlterAddColumn carries the column to be appended to the table. The first cut only
+// accepts nullable columns with no explicit default; pre-existing segments project NULL
+// for the new column id at scan time.
+type AlterAddColumn struct {
+	Name string
+	Type string
 }
 
 type InsertStmt struct {
