@@ -157,7 +157,14 @@ func buildInsertVec(ic sql.InsertColumn, def sql.BoundColumnDef, rows int) (vect
 		return vector.Vec{}, fmt.Errorf("got %d values for %d rows", len(ic.Values), rows)
 	}
 	if ic.NullCount > 0 && !def.Nullable {
-		return vector.Vec{}, fmt.Errorf("null value but column is NOT NULL")
+		firstNull := 0
+		for i, v := range ic.Values {
+			if v.Kind == sql.ValueNull {
+				firstNull = i
+				break
+			}
+		}
+		return vector.Vec{}, fmt.Errorf("row %d is null but column is NOT NULL", firstNull)
 	}
 	vk, err := vector.VecKindOf(def.Type)
 	if err != nil {
@@ -202,7 +209,7 @@ func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, 
 		dst := v.BoolBits()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueBool {
-				return fmt.Errorf("bool column got %v", val.Kind)
+				return fmt.Errorf("expected bool, got %v", val.Kind)
 			}
 			if val.Bool {
 				dst[row>>3] |= 1 << (row & 7)
@@ -213,7 +220,7 @@ func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, 
 		dst := v.I16()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueInt {
-				return fmt.Errorf("int column got %v", val.Kind)
+				return fmt.Errorf("expected int, got %v", val.Kind)
 			}
 			dst[row] = int16(val.Int)
 			return nil
@@ -222,7 +229,7 @@ func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, 
 		dst := v.I32()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueInt {
-				return fmt.Errorf("int column got %v", val.Kind)
+				return fmt.Errorf("expected int, got %v", val.Kind)
 			}
 			dst[row] = int32(val.Int)
 			return nil
@@ -231,7 +238,7 @@ func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, 
 		dst := v.I64()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueInt {
-				return fmt.Errorf("int column got %v", val.Kind)
+				return fmt.Errorf("expected int, got %v", val.Kind)
 			}
 			dst[row] = val.Int
 			return nil
@@ -245,7 +252,7 @@ func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, 
 			case sql.ValueFloat:
 				dst[row] = float32(val.Float)
 			default:
-				return fmt.Errorf("float column got %v", val.Kind)
+				return fmt.Errorf("expected float, got %v", val.Kind)
 			}
 			return nil
 		}, nil
@@ -258,7 +265,7 @@ func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, 
 			case sql.ValueFloat:
 				dst[row] = val.Float
 			default:
-				return fmt.Errorf("float column got %v", val.Kind)
+				return fmt.Errorf("expected float, got %v", val.Kind)
 			}
 			return nil
 		}, nil
@@ -266,7 +273,7 @@ func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, 
 		dst := v.Var()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueString {
-				return fmt.Errorf("text column got %v", val.Kind)
+				return fmt.Errorf("expected text, got %v", val.Kind)
 			}
 			dst.AppendString(row, val.String)
 			return nil
@@ -275,7 +282,7 @@ func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, 
 		dst := v.FixedBytes()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueString {
-				return fmt.Errorf("uuid column got %v", val.Kind)
+				return fmt.Errorf("expected uuid string, got %v", val.Kind)
 			}
 			u, err := vector.ParseUUID(val.String)
 			if err != nil {
@@ -288,7 +295,7 @@ func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, 
 		dst := v.U32()
 		return func(row int, val sql.Value) error {
 			if val.Kind != sql.ValueEnum {
-				return fmt.Errorf("enum column got %v (binder did not resolve to ValueEnum)", val.Kind)
+				return fmt.Errorf("expected enum, got %v", val.Kind)
 			}
 			dst[row] = val.Enum
 			return nil
