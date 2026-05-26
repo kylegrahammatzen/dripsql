@@ -15,7 +15,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-func (db *DB) delete(ctx context.Context, plan *sql.Plan, target commitTarget) (int64, error) {
+func (db *DB) delete(ctx context.Context, plan *sql.Plan, commit commitFn) (int64, error) {
 	def := plan.Table
 	m, err := db.manifestFor(def.Name)
 	if err != nil {
@@ -37,7 +37,7 @@ func (db *DB) delete(ctx context.Context, plan *sql.Plan, target commitTarget) (
 			dvUpdates = append(dvUpdates, *dvUpdate)
 		}
 	}
-	if err := target.commit(def.Name, nil, dvUpdates); err != nil {
+	if err := commit(def.Name, nil, dvUpdates); err != nil {
 		return deleted, err
 	}
 	return deleted, nil

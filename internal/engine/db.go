@@ -95,6 +95,9 @@ type Result struct {
 	RowsAffected int64
 }
 
+// Seam between DB's auto-commit path and Tx's staged path; DB binds db.commitManifestTxn, Tx binds tx.commit.
+type commitFn func(table string, adds []storage.ManifestSegmentAdd, dvUpdates []storage.ManifestDVUpdate) error
+
 type Rows struct {
 	Columns []string
 	Values  [][]any
@@ -395,11 +398,11 @@ func (db *DB) execStmt(ctx context.Context, stmt sql.Stmt, args []any) (int64, e
 		}
 		return 0, db.registerTable(spec)
 	case sql.PlanInsert:
-		return db.insert(ctx, plan, autoCommitTarget{db})
+		return db.insert(ctx, plan, db.commitManifestTxn)
 	case sql.PlanDelete:
-		return db.delete(ctx, plan, autoCommitTarget{db})
+		return db.delete(ctx, plan, db.commitManifestTxn)
 	case sql.PlanUpdate:
-		return db.update(ctx, plan, autoCommitTarget{db})
+		return db.update(ctx, plan, db.commitManifestTxn)
 	}
 	return 0, fmt.Errorf("engine: unsupported plan kind %v", plan.Kind)
 }

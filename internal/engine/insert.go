@@ -102,7 +102,7 @@ func (db *DB) BulkInsert(ctx context.Context, statements []string) (int64, error
 	return total, nil
 }
 
-func (db *DB) insert(ctx context.Context, plan *sql.Plan, target commitTarget) (int64, error) {
+func (db *DB) insert(ctx context.Context, plan *sql.Plan, commit commitFn) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -135,7 +135,7 @@ func (db *DB) insert(ctx context.Context, plan *sql.Plan, target commitTarget) (
 	if err != nil {
 		return 0, err
 	}
-	if err := target.commit(def.Name, []storage.ManifestSegmentAdd{{Path: path, Rows: uint32(values.RowCount)}}, nil); err != nil {
+	if err := commit(def.Name, []storage.ManifestSegmentAdd{{Path: path, Rows: uint32(values.RowCount)}}, nil); err != nil {
 		return 0, err
 	}
 	cleanup = false

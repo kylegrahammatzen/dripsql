@@ -109,11 +109,11 @@ func (tx *Tx) execStmt(ctx context.Context, stmt sql.Stmt, args []any) (int64, e
 	}
 	switch plan.Kind {
 	case sql.PlanInsert:
-		return tx.db.insert(ctx, plan, tx)
+		return tx.db.insert(ctx, plan, tx.commit)
 	case sql.PlanDelete:
-		return tx.db.delete(ctx, plan, tx)
+		return tx.db.delete(ctx, plan, tx.commit)
 	case sql.PlanUpdate:
-		return tx.db.update(ctx, plan, tx)
+		return tx.db.update(ctx, plan, tx.commit)
 	}
 	return 0, fmt.Errorf("engine: %v not supported inside a transaction", plan.Kind)
 }

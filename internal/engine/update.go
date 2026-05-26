@@ -15,7 +15,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-func (db *DB) update(ctx context.Context, plan *sql.Plan, target commitTarget) (int64, error) {
+func (db *DB) update(ctx context.Context, plan *sql.Plan, commit commitFn) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -84,7 +84,7 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan, target commitTarget) (
 		stage.cleanup()
 		return updated, err
 	}
-	if err := target.commit(def.Name, stage.adds, stage.dvUpdates); err != nil {
+	if err := commit(def.Name, stage.adds, stage.dvUpdates); err != nil {
 		stage.cleanup()
 		return updated, err
 	}
