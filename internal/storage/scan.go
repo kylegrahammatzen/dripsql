@@ -104,6 +104,9 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 			return fmt.Errorf("Scan: %w", err)
 		}
 		if compiled != nil {
+			if predSkipsOnSyntheticNulls(opts.Pred, seg, opts.Columns, opts.ColumnIDs, opts.ColumnDefaults) {
+				continue
+			}
 			seg.LoadPageStats()
 			if compiled.Skips(seg) {
 				continue
@@ -276,6 +279,38 @@ func decodeIDs(decode []string, projNames []string, projIDs []uint64, predNames 
 		out[i] = byName[strings.ToLower(n)]
 	}
 	return out
+}
+
+// A comparison leaf on a missing column with no non-null default cannot match because the synthesised vector is all-null and comparisons against NULL are never true.
+func predSkipsOnSyntheticNulls(p *Pred, seg *Segment, projNames []string, projIDs []uint64, projDefaults []ScanDefault) bool {
+	if p == nil || seg.TableID == 0 {
+		return false
+	}
+	switch p.Op {
+	case OpEq, OpNe, OpLt, OpLe, OpGt, OpGe:
+	default:
+		return false
+	}
+	if p.ColID == 0 {
+		return false
+	}
+	for _, c := range seg.Cols {
+		if c.ColumnID == p.ColID {
+			return false
+		}
+	}
+	if len(projIDs) == len(projNames) && len(projDefaults) == len(projNames) {
+		for i, id := range projIDs {
+			if id != p.ColID {
+				continue
+			}
+			if projDefaults[i].Set && !projDefaults[i].Null {
+				return false
+			}
+			break
+		}
+	}
+	return true
 }
 
 func fillSyntheticVec(kind vector.VecKind, rows int, def ScanDefault) vector.Vec {

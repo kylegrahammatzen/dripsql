@@ -163,7 +163,7 @@ func (b boundEqInt64) PruneSegment(seg *Segment) bool {
 	if err != nil {
 		return false
 	}
-	if f, ok := filters[schema.NormalizeName(b.column)]; ok && !f.Contains(b.value) {
+	if f, ok := filters[schema.NormalizeName(c.Name)]; ok && !f.Contains(b.value) {
 		return true
 	}
 	return false
@@ -295,7 +295,7 @@ func (b boundEqBytes) PruneSegment(seg *Segment) bool {
 	if err != nil || hists == nil {
 		return false
 	}
-	hist, ok := hists[schema.NormalizeName(b.column)]
+	hist, ok := hists[schema.NormalizeName(c.Name)]
 	if !ok {
 		return false
 	}
@@ -321,7 +321,7 @@ func (b boundEqBytes) PrunePage(seg *Segment, pageIdx int) bool {
 	if err != nil || blooms == nil {
 		return false
 	}
-	vb, ok := blooms[schema.NormalizeName(b.column)]
+	vb, ok := blooms[schema.NormalizeName(c.Name)]
 	if !ok || vb == nil || pageIdx >= len(vb.Pages) {
 		return false
 	}
