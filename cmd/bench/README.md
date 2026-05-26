@@ -1,5 +1,3 @@
-# Benchmarks
-
 <div align="center">
   <a href="../../README.md">DripSQL</a>
   /
@@ -7,6 +5,8 @@
   /
   <a href="../cli/README.md">CLI</a>
 </div>
+
+# DripSQL - Benchmarks
 
 All numbers were captured on `AMD Ryzen 7 3700X` / `Windows amd64` / `go1.26.0`. Medians across 10 runs at `-benchtime=1s`.
 
@@ -21,7 +21,7 @@ go run ./cmd/bench -query <name> -rows <N> -runs <R> -mode hot -json
 | `-query` | Cataloged query name; see `go run ./cmd/bench list` |
 | `-rows` | Synthetic dataset row count |
 | `-runs` | Timed-run count for the median |
-| `-mode` | `hot`, `cold-soft` (reopen DB between runs), or `cold-hard` (drop OS page cache) |
+| `-mode` | `hot` or `cold-soft` (close and reopen DB between runs) |
 | `-json` | Emit results as JSON for downstream tooling |
 
 ## Snapshot (hot mode, median ms across timed runs)
@@ -88,3 +88,24 @@ go test ./internal/storage/codec -bench=. -benchmem -run=^$ -count=10
 | `Codec_Decode/plain_text` | 63 us | 503 K | 55 K |
 
 `Storage_ScanEqInt64Miss` is the page-prune fast path resolving in sub-microsecond via the Binary Fuse 8 `.bf` sidecar. Sidecar loaders all sit below 25us and run once per segment open.
+
+## Iterating on a single bench
+
+The full sweep above takes 8-12 minutes because `go test -bench` adapts iterations so every function runs ~`benchtime` seconds, then `-count=10` multiplies that. Wall time is `N_functions × benchtime × count + compile`. For perf iteration on the same bench, two patterns cut that.
+
+**Precompile and reuse the test binary** when running the same bench repeatedly against unchanged code. The build cache already shortcuts most re-compiles after edits, so this pattern shines on repeat runs, not on the first invocation after an edit:
+
+```
+go test -c -o exec.test.exe ./internal/exec
+.\exec.test.exe '-test.run=^$' '-test.bench=Filter_Int64Less' '-test.benchtime=1s' '-test.count=10' '-test.benchmem'
+```
+
+`-test.run=^$` skips normal tests so only the bench runs. PowerShell needs the dotted flags single-quoted. Drop the binary when done.
+
+**Targeted filter for smoke checks** during perf iteration:
+
+```
+go test -run=^$ -bench='Benchmark(Filter_|Storage_ScanFull)|Codec_Decode/plain_int64' -benchtime=500ms -count=3 ./internal/...
+```
+
+~10s instead of 10 min. Anchor the regex with `Benchmark(...)`, a bare `Filter` also matches things like `Storage_LoadIntFilter`. Use this for "did I regress" during iteration, not for capturing a `.bench/final.txt` baseline. The full-sweep form in the sections above is what regression captures should use.

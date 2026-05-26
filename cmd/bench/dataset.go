@@ -1,4 +1,4 @@
-// Dataset generators and query catalog. Each generator fills a fresh DB with a deterministic synthetic schema.
+// Dataset generators and query catalog where each generator fills a fresh DB with a deterministic synthetic schema.
 // Each query targets one schema and carries a name used as the benchstat label.
 package main
 
@@ -57,8 +57,7 @@ var queries = map[string]query{
 	}},
 }
 
-// Per-segment page target. Each segment is built from up to bulkPagesPerSegment
-// INSERTs of segmentRows rows each, sealed via BulkInsert into one multi-page file.
+// Each segment is built from up to bulkPagesPerSegment INSERTs of segmentRows rows each and sealed via BulkInsert into one multi-page file.
 const bulkPagesPerSegment = 16
 
 func setupUsers(ctx context.Context, db *engine.DB, rows int, segmentRows int) error {
