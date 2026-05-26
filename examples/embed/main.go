@@ -1,5 +1,5 @@
-// Minimal embed example showing the dripsql public surface.
-// Build and run with `go run ./example/embed -db /tmp/embed_demo`.
+// Minimal embed example showing Open, Exec, and the streaming Query cursor.
+// Build and run with `go run ./examples/embed -db /tmp/embed_demo`.
 package main
 
 import (
@@ -36,7 +36,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	for i, v := range rows.Values() {
-		fmt.Printf("row %d: %v\n", i, v)
+	defer rows.Close()
+	vals, err := rows.All()
+	if err != nil {
+		log.Fatal(err)
 	}
+	fmt.Printf("click count: %v\n", vals[0][0])
 }

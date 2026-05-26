@@ -1,5 +1,5 @@
-// Package dripsql is the public embedded API for the DripSQL columnar engine.
-// Open returns a DB and callers use Exec, Query, and BeginTx with no driver indirection.
+// Package dripsql is the embedded API for the DripSQL columnar engine.
+// Runnable examples live under examples/embed, examples/transactions, and examples/readonly.
 package dripsql
 
 import (
@@ -9,14 +9,13 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/engine"
 )
 
-// MemoryPath is the reserved sentinel for an in-memory database once support lands.
+// MemoryPath is reserved for a future in-memory backend and currently returns an error from Open.
 const MemoryPath = ":memory:"
 
-// Open returns a DB backed by the directory at path.
-// Empty string returns an error so a missing config value cannot silently open a default location.
+// Open opens or creates the database directory at path.
 func Open(path string) (*DB, error) {
 	if path == "" {
-		return nil, fmt.Errorf("dripsql.Open: empty path; pass a directory path")
+		return nil, fmt.Errorf("dripsql.Open: empty path")
 	}
 	if path == MemoryPath {
 		return nil, fmt.Errorf("dripsql.Open: MemoryPath is reserved but not yet implemented")
@@ -28,32 +27,37 @@ func Open(path string) (*DB, error) {
 	return &DB{e: e}, nil
 }
 
-// DB wraps the internal engine.DB so callers never import internal/ packages.
+// DB is a single-database handle whose methods are safe for concurrent use.
 type DB struct{ e *engine.DB }
 
+// Close releases the WAL, segment cache, and catalog handles.
 func (db *DB) Close() error { return db.e.Close() }
 
+// Exec runs one or more non-query statements separated by semicolons under a single engine lock.
 func (db *DB) Exec(ctx context.Context, sql string) (Result, error) {
 	r, err := db.e.Exec(ctx, sql)
 	return Result{Statements: r.Statements, RowsAffected: r.RowsAffected}, err
 }
 
+// Query runs a SELECT or EXPLAIN and returns a single-pass cursor that the caller must Close.
 func (db *DB) Query(ctx context.Context, sql string) (*Rows, error) {
 	rs, err := db.e.Query(ctx, sql)
 	if err != nil {
 		return nil, err
 	}
-	return &Rows{rs: rs}, nil
+	return newRows(rs), nil
 }
 
+// QueryAt runs Query against the snapshot pinned at the given commit timestamp.
 func (db *DB) QueryAt(ctx context.Context, sql string, readTs uint64) (*Rows, error) {
 	rs, err := db.e.QueryAt(ctx, sql, readTs)
 	if err != nil {
 		return nil, err
 	}
-	return &Rows{rs: rs}, nil
+	return newRows(rs), nil
 }
 
+// BeginTx starts a multi-statement transaction that holds the writer lock until Commit or Rollback.
 func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
 	t, err := db.e.BeginTx(ctx)
 	if err != nil {
@@ -62,45 +66,128 @@ func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
 	return &Tx{t: t}, nil
 }
 
+// Compact rewrites half-or-more-deleted segments for table into fresh segments under one atomic manifest swap.
 func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 	return db.e.Compact(ctx, table)
 }
 
+// Vacuum removes deletion-vector files no longer referenced and runs retention retirement when SetAutoRetention is on.
 func (db *DB) Vacuum() (int, error) { return db.e.Vacuum() }
 
-// SetAutoRetention toggles whether Vacuum also runs VacuumRetention with the current lag.
+// SetAutoRetention makes Vacuum also retire fully-dead segments below the configured lag.
 func (db *DB) SetAutoRetention(on bool) { db.e.SetAutoRetention(on) }
 
-// SetRetentionLag sets the retention cutoff in commit-ts ticks for VacuumRetention.
+// SetRetentionLag sets the commit-timestamp distance Vacuum keeps before retiring fully-dead segments.
 func (db *DB) SetRetentionLag(lag uint64) { db.e.SetRetentionLag(lag) }
 
-// Result reports counts from a single Exec call.
+// SetCacheSize caps the number of open segment file handles and resets to the engine default when n is below 1.
+func (db *DB) SetCacheSize(n int) { db.e.SetCacheSize(n) }
+
+// SetReadOnly when true makes Exec and BeginTx return a read-only error while leaving reads unaffected.
+func (db *DB) SetReadOnly(on bool) { db.e.SetReadOnly(on) }
+
+// Result reports the statement count and total RowsAffected from one Exec call.
 type Result struct {
 	Statements   int
 	RowsAffected int64
 }
 
-// Rows is the materialized result set; Columns plus Values give the full payload.
-type Rows struct{ rs *engine.Rows }
+// Rows is the single-pass cursor returned by Query and must always be Closed.
+type Rows struct {
+	rs      *engine.Rows
+	cursor  int
+	current []any
+	closed  bool
+	err     error
+}
 
+func newRows(rs *engine.Rows) *Rows {
+	return &Rows{rs: rs, cursor: -1}
+}
+
+// Columns returns the result-set column names in select order.
 func (r *Rows) Columns() []string { return r.rs.Columns }
-func (r *Rows) Values() [][]any   { return r.rs.Values }
 
-// Tx wraps a multi-statement transaction; the txn holds the writer lock until Commit or Rollback.
+// Next advances to the next row and reports whether one is available.
+func (r *Rows) Next() bool {
+	if r.closed || r.err != nil {
+		return false
+	}
+	r.cursor++
+	if r.cursor >= len(r.rs.Values) {
+		r.current = nil
+		return false
+	}
+	r.current = r.rs.Values[r.cursor]
+	return true
+}
+
+// Scan copies the current row into dst pointers which may be any of *int family, *uint family, *float32, *float64, *bool, *string, *[]byte, or *any.
+func (r *Rows) Scan(dst ...any) error {
+	if r.current == nil {
+		return fmt.Errorf("dripsql.Rows.Scan: no current row, call Next first")
+	}
+	if len(dst) != len(r.current) {
+		return fmt.Errorf("dripsql.Rows.Scan: got %d destinations for %d columns", len(dst), len(r.current))
+	}
+	for i, d := range dst {
+		if err := scanInto(d, r.current[i]); err != nil {
+			return fmt.Errorf("dripsql.Rows.Scan: column %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// Err returns the deferred error from iteration or nil if Next exhausted cleanly.
+func (r *Rows) Err() error { return r.err }
+
+// All drains the cursor into a slice of rows where each row is its column values in select order.
+func (r *Rows) All() ([][]any, error) {
+	if r.closed {
+		return nil, fmt.Errorf("dripsql.Rows.All: cursor already closed")
+	}
+	remaining := r.rs.Values
+	if r.cursor >= 0 && r.cursor < len(r.rs.Values) {
+		remaining = r.rs.Values[r.cursor:]
+	}
+	out := make([][]any, len(remaining))
+	for i, row := range remaining {
+		copied := make([]any, len(row))
+		copy(copied, row)
+		out[i] = copied
+	}
+	r.cursor = len(r.rs.Values)
+	r.current = nil
+	return out, nil
+}
+
+// Close releases the cursor and is safe to call more than once.
+func (r *Rows) Close() error {
+	r.closed = true
+	r.current = nil
+	return nil
+}
+
+// Tx is a multi-statement transaction that holds the writer lock until Commit or Rollback.
 type Tx struct{ t *engine.Tx }
 
+// Exec runs DDL or DML inside the transaction.
 func (tx *Tx) Exec(ctx context.Context, sql string) (Result, error) {
 	r, err := tx.t.Exec(ctx, sql)
 	return Result{Statements: r.Statements, RowsAffected: r.RowsAffected}, err
 }
 
+// Query runs a SELECT or EXPLAIN inside the transaction and returns a cursor that must be Closed.
 func (tx *Tx) Query(ctx context.Context, sql string) (*Rows, error) {
 	rs, err := tx.t.Query(ctx, sql)
 	if err != nil {
 		return nil, err
 	}
-	return &Rows{rs: rs}, nil
+	return newRows(rs), nil
 }
 
-func (tx *Tx) Commit() error   { return tx.t.Commit() }
+// Commit publishes the transaction's writes atomically and releases the writer lock.
+func (tx *Tx) Commit() error { return tx.t.Commit() }
+
+// Rollback discards the transaction's writes and releases the writer lock and is safe to call after Commit as a no-op.
 func (tx *Tx) Rollback() error { return tx.t.Rollback() }
