@@ -2,6 +2,7 @@
 package storage
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -153,7 +154,7 @@ func TestManifest_DeletionVectorPath_OmittedByDefault(t *testing.T) {
 	m.Close()
 
 	data, _ := os.ReadFile(path)
-	if contains(data, []byte("deletion_vector_path")) {
+	if bytes.Contains(data, []byte("deletion_vector_path")) {
 		t.Fatalf("empty DeletionVectorPath should be omitted from JSON; got %s", data)
 	}
 }
@@ -166,21 +167,3 @@ func TestManifest_AppendAfterClose_Errors(t *testing.T) {
 	}
 }
 
-func contains(haystack, needle []byte) bool {
-	if len(needle) == 0 {
-		return true
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		match := true
-		for j := range needle {
-			if haystack[i+j] != needle[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
-}

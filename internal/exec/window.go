@@ -201,7 +201,7 @@ func (w *WindowOp) computeAggregate(wf sql.WindowFunc, out *windowColumn) error 
 
 func (w *WindowOp) fillFramedAggregate(wf sql.WindowFunc, perm []int, cmp windowCmp, out *windowColumn) error {
 	partStart := 0
-	for i := 0; i <= len(perm); i++ {
+	for i := range len(perm) + 1 {
 		isBoundary := i == len(perm) || (i > partStart && cmp.partitionChanged(perm[i-1], perm[i]))
 		if !isBoundary {
 			continue
@@ -238,7 +238,7 @@ func (w *WindowOp) fillRangeAggregate(wf sql.WindowFunc, perm []int, cmp windowC
 	orderKey := wf.OrderBy[0]
 	desc := orderKey.Desc
 	partStart := 0
-	for i := 0; i <= len(perm); i++ {
+	for i := range len(perm) + 1 {
 		isBoundary := i == len(perm) || (i > partStart && cmp.partitionChanged(perm[i-1], perm[i]))
 		if !isBoundary {
 			continue
@@ -394,7 +394,7 @@ func frameRange(f *sql.WindowFrameBounds, i, n int) (int, int) {
 
 func (w *WindowOp) fillPartitionAggregate(wf sql.WindowFunc, perm []int, cmp windowCmp, out *windowColumn) error {
 	start := 0
-	for i := 0; i <= len(perm); i++ {
+	for i := range len(perm) + 1 {
 		if i < len(perm) && i > 0 && cmp.partitionChanged(perm[i-1], perm[i]) {
 			if err := w.scatterAggregate(wf, perm[start:i], out); err != nil {
 				return err
