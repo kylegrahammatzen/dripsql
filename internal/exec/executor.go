@@ -567,12 +567,15 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, ou
 					drop[id] = struct{}{}
 				}
 				kept := make([]string, 0, len(names))
+				keptIDs := make([]uint64, 0, len(names))
 				for i, id := range rel.Columns {
 					if _, ok := drop[id]; !ok {
 						kept = append(kept, names[i])
+						keptIDs = append(keptIDs, ids[i])
 					}
 				}
 				opts.Columns = kept
+				opts.ColumnIDs = keptIDs
 			}
 		}
 		residual = res

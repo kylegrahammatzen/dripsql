@@ -401,8 +401,8 @@ func TestScan_ProjectionCaseInsensitive(t *testing.T) {
 	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{makeIntBatch(t, "id", 0, 5)})
 	defer seg.Close()
 	err := Scan(ScanOpts{Segments: []*Segment{seg}, Columns: []string{"ID"}}, func(b vector.Batch, sel *vector.SelectionMask) error {
-		if b.Columns[0].Name != "id" {
-			t.Fatalf("column name = %q, want %q", b.Columns[0].Name, "id")
+		if b.Columns[0].Name != "ID" {
+			t.Fatalf("column name = %q, want %q", b.Columns[0].Name, "ID")
 		}
 		return nil
 	})

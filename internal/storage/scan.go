@@ -315,7 +315,10 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 	var scratch []byte
 	predOnly := predicateOnlyMask(decodeIdx, projIdx)
 	for i, ci := range decodeIdx {
-		decoded[i].Name = seg.Cols[ci].Name
+		// Expose the requested name, not the segment's stored name. After a metadata
+		// only RENAME the segment still has the old name in its footer; downstream
+		// operators bind to the catalog name and would otherwise miss the column.
+		decoded[i].Name = decode[i]
 		decoded[i].EnumLabels = seg.Cols[ci].EnumLabels
 		if seg.Cols[ci].Kind != vector.VecEnum32 {
 			t, err := vector.TypeFromVecKind(seg.Cols[ci].Kind, "")
