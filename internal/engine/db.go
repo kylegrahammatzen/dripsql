@@ -410,6 +410,56 @@ func (db *DB) registerTable(spec schema.TableSpec, ifNotExists bool) error {
 	return nil
 }
 
+func (db *DB) alterTable(p *sql.AlterPayload) error {
+	if p == nil {
+		return fmt.Errorf("ALTER TABLE: nil payload")
+	}
+	if p.Rename == nil {
+		return fmt.Errorf("ALTER TABLE: unsupported operation")
+	}
+	tab, ok := db.tables[schema.NormalizeName(p.Table)]
+	if !ok {
+		return fmt.Errorf("table %q does not exist", p.Table)
+	}
+	from := schema.NormalizeName(p.Rename.From)
+	to := schema.NormalizeName(p.Rename.To)
+	var target *catalog.Column
+	for i := range tab.Columns {
+		c := &tab.Columns[i]
+		if c.DroppedAtGeneration != nil {
+			continue
+		}
+		if schema.NormalizeName(c.Name) == to {
+			return fmt.Errorf("column %q already exists in table %q", p.Rename.To, p.Table)
+		}
+		if schema.NormalizeName(c.Name) == from {
+			target = c
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("column %q does not exist in table %q", p.Rename.From, p.Table)
+	}
+	prevName := target.Name
+	prevGen := db.catalog.Generation
+	prevSchemaVersion := tab.SchemaVersion
+	prevUpdated := tab.UpdatedAtGeneration
+	newGen := prevGen + 1
+	target.Name = to
+	tab.SchemaVersion++
+	tab.UpdatedAtGeneration = newGen
+	db.catalog.Generation = newGen
+	db.version = sql.SchemaVersion(newGen)
+	if err := catalog.Save(db.root, db.catalog); err != nil {
+		target.Name = prevName
+		tab.SchemaVersion = prevSchemaVersion
+		tab.UpdatedAtGeneration = prevUpdated
+		db.catalog.Generation = prevGen
+		db.version = sql.SchemaVersion(prevGen)
+		return err
+	}
+	return nil
+}
+
 func (db *DB) resolveTableTypes(spec *schema.TableSpec) error {
 	spec.Name = schema.NormalizeName(spec.Name)
 	for i := range spec.Columns {
@@ -480,6 +530,8 @@ func (db *DB) execStmt(ctx context.Context, stmt sql.Stmt, args []any) (int64, e
 			return 0, err
 		}
 		return 0, db.registerTable(spec, plan.IfNotExists)
+	case sql.PlanAlterTable:
+		return 0, db.alterTable(plan.Alter)
 	case sql.PlanInsert:
 		return db.insert(ctx, plan, db.commitManifestTxn)
 	case sql.PlanDelete:

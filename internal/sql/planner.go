@@ -88,6 +88,8 @@ func (p *Planner) Plan(stmt Stmt) (*Plan, error) {
 		return BindCreateType(s)
 	case *CreateTableStmt:
 		return BindCreateTable(s)
+	case *AlterTableStmt:
+		return BindAlterTable(s)
 	case *InsertStmt:
 		def, err := p.resolveTable(s.Table)
 		if err != nil {
@@ -874,6 +876,34 @@ func BindCreateTypeSpec(stmt *CreateTypeStmt) (schema.TypeSpec, error) {
 		return schema.TypeSpec{}, err
 	}
 	return spec, nil
+}
+
+func BindAlterTable(stmt *AlterTableStmt) (*Plan, error) {
+	if stmt == nil {
+		return nil, fmt.Errorf("ALTER TABLE statement is nil")
+	}
+	table := schema.NormalizeName(stmt.Table)
+	if table == "" {
+		return nil, fmt.Errorf("ALTER TABLE requires a table name")
+	}
+	if stmt.Rename == nil {
+		return nil, fmt.Errorf("ALTER TABLE: only RENAME COLUMN is supported")
+	}
+	from := schema.NormalizeName(stmt.Rename.From)
+	to := schema.NormalizeName(stmt.Rename.To)
+	if from == "" || to == "" {
+		return nil, fmt.Errorf("ALTER TABLE RENAME COLUMN requires both from and to names")
+	}
+	if from == to {
+		return nil, fmt.Errorf("ALTER TABLE RENAME COLUMN: from and to are identical (%q)", from)
+	}
+	return &Plan{
+		Kind: PlanAlterTable,
+		Alter: &AlterPayload{
+			Table:  table,
+			Rename: &AlterRenameColumn{From: from, To: to},
+		},
+	}, nil
 }
 
 func BindCreateTable(stmt *CreateTableStmt) (*Plan, error) {

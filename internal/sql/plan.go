@@ -12,6 +12,11 @@ type ColumnID uint64
 type TypeID uint64
 type SchemaVersion uint64
 
+type AlterPayload struct {
+	Table  string
+	Rename *AlterRenameColumn
+}
+
 type TypeDef struct {
 	ID      TypeID
 	Name    string
@@ -48,6 +53,7 @@ const (
 	PlanInvalid PlanKind = iota
 	PlanCreateType
 	PlanCreateTable
+	PlanAlterTable
 	PlanInsert
 	PlanDelete
 	PlanUpdate
@@ -213,6 +219,7 @@ type Plan struct {
 
 	TypeSpec    schema.TypeSpec
 	TableSpec   schema.TableSpec
+	Alter       *AlterPayload
 	IfNotExists bool
 
 	Table       BoundTableDef

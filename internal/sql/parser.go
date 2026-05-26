@@ -71,6 +71,8 @@ func (p *parser) parseStmt() (Stmt, error) {
 		return p.parseSelect()
 	case "create":
 		return p.parseCreate()
+	case "alter":
+		return p.parseAlter()
 	case "insert":
 		return p.parseInsert()
 	case "delete":
@@ -82,6 +84,34 @@ func (p *parser) parseStmt() (Stmt, error) {
 	default:
 		return nil, p.errorAt(tok, "unsupported statement %q", tok.lit)
 	}
+}
+
+func (p *parser) parseAlter() (Stmt, error) {
+	if err := p.expectWord("table"); err != nil {
+		return nil, err
+	}
+	tableName, err := p.parseName()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("rename"); err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("column"); err != nil {
+		return nil, err
+	}
+	from, err := p.parseName()
+	if err != nil {
+		return nil, err
+	}
+	if err := p.expectWord("to"); err != nil {
+		return nil, err
+	}
+	to, err := p.parseName()
+	if err != nil {
+		return nil, err
+	}
+	return &AlterTableStmt{Table: tableName, Rename: &AlterRenameColumn{From: from, To: to}}, nil
 }
 
 func (p *parser) parseCreate() (Stmt, error) {

@@ -24,6 +24,16 @@ type CreateTableStmt struct {
 	Options     []TableOption
 }
 
+type AlterTableStmt struct {
+	Table  string
+	Rename *AlterRenameColumn
+}
+
+type AlterRenameColumn struct {
+	From string
+	To   string
+}
+
 type InsertStmt struct {
 	Table   string
 	Columns []string
@@ -143,6 +153,7 @@ const (
 
 func (*CreateTypeStmt) isStmt()  {}
 func (*CreateTableStmt) isStmt() {}
+func (*AlterTableStmt) isStmt()  {}
 func (*InsertStmt) isStmt()      {}
 func (*DeleteStmt) isStmt()      {}
 func (*UpdateStmt) isStmt()      {}
