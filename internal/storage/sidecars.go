@@ -3,7 +3,8 @@
 package storage
 
 import (
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const (
@@ -41,7 +42,6 @@ var dictHistSidecar = Sidecar[DictHistogram]{
 		return hist, nil
 	},
 }
-
 
 const (
 	intFilterMagic      = "FFV1"
@@ -85,21 +85,20 @@ func (f *IntFilter) Contains(v int64) bool {
 	return f.bloom.contains(uint64(v))
 }
 
-
-func kindEligibleForIntFilter(k types.VecKind) bool {
+func kindEligibleForIntFilter(k vector.VecKind) bool {
 	switch k {
-	case types.VecInt16, types.VecInt32, types.VecInt64,
-		types.VecDate, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt16, vector.VecInt32, vector.VecInt64,
+		vector.VecDate, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		return true
 	}
 	return false
 }
 
-func readInt64Key(v types.Vec, row int) int64 {
+func readInt64Key(v vector.Vec, row int) int64 {
 	switch v.Kind {
-	case types.VecInt16:
+	case vector.VecInt16:
 		return int64(v.I16()[row])
-	case types.VecInt32, types.VecDate:
+	case vector.VecInt32, vector.VecDate:
 		return int64(v.I32()[row])
 	}
 	return v.I64()[row]
@@ -213,7 +212,7 @@ func materializeSidecarsFromSinks(cols []writerColumn, sinks []*colSink) (DictHi
 		if s == nil {
 			continue
 		}
-		name := types.NormalizeName(c.Schema.Name)
+		name := schema.NormalizeName(c.Schema.Name)
 		switch {
 		case c.Kind.IsVarBytes():
 			if !s.varHistSkip && len(s.varHist) > 0 {
@@ -260,7 +259,6 @@ func materializeSidecarsFromSinks(cols []writerColumn, sinks []*colSink) (DictHi
 	return dictHists, intFilters, numSums, varBlooms
 }
 
-
 func addOverflowsInt64(a, b int64) bool {
 	if b > 0 && a > int64(^uint64(0)>>1)-b {
 		return true
@@ -270,4 +268,3 @@ func addOverflowsInt64(a, b int64) bool {
 	}
 	return false
 }
-

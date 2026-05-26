@@ -7,21 +7,22 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type WindowOp struct {
 	Source Operator
 	Funcs  []sql.WindowFunc
 
-	state    operatorState
-	built    bool
-	cursor   int
-	rows     []windowRow
-	order    []int
-	winCols  []windowColumn
-	batches  []types.Batch
+	state   operatorState
+	built   bool
+	cursor  int
+	rows    []windowRow
+	order   []int
+	winCols []windowColumn
+	batches []vector.Batch
 }
 
 type windowColumn struct {
@@ -71,7 +72,7 @@ func (w *WindowOp) buildBatches() error {
 		w.batches = append(w.batches, batch)
 		iter := batch.Sel
 		if iter == nil {
-			for row := 0; row < batch.Len; row++ {
+			for row := range batch.Len {
 				w.rows = append(w.rows, windowRow{batchIdx: bi, rowIdx: row})
 			}
 			continue
@@ -104,7 +105,7 @@ func (w *WindowOp) computeWindowColumn(wf sql.WindowFunc) (windowColumn, error) 
 	n := len(w.rows)
 	if wf.Func.IsAggregate() {
 		out := windowColumn{}
-		argFloat := wf.Arg != nil && (wf.Arg.Type.Kind == types.KindFloat32 || wf.Arg.Type.Kind == types.KindFloat64)
+		argFloat := wf.Arg != nil && (wf.Arg.Type.Kind == schema.KindFloat32 || wf.Arg.Type.Kind == schema.KindFloat64)
 		out.isFloat = argFloat || wf.Func == sql.WindowAvg
 		if out.isFloat {
 			out.f64 = make([]float64, n)
@@ -200,7 +201,7 @@ func (w *WindowOp) computeAggregate(wf sql.WindowFunc, out *windowColumn) error 
 
 func (w *WindowOp) fillFramedAggregate(wf sql.WindowFunc, perm []int, cmp windowCmp, out *windowColumn) error {
 	partStart := 0
-	for i := 0; i <= len(perm); i++ {
+	for i := range len(perm) + 1 {
 		isBoundary := i == len(perm) || (i > partStart && cmp.partitionChanged(perm[i-1], perm[i]))
 		if !isBoundary {
 			continue
@@ -237,7 +238,7 @@ func (w *WindowOp) fillRangeAggregate(wf sql.WindowFunc, perm []int, cmp windowC
 	orderKey := wf.OrderBy[0]
 	desc := orderKey.Desc
 	partStart := 0
-	for i := 0; i <= len(perm); i++ {
+	for i := range len(perm) + 1 {
 		isBoundary := i == len(perm) || (i > partStart && cmp.partitionChanged(perm[i-1], perm[i]))
 		if !isBoundary {
 			continue
@@ -393,7 +394,7 @@ func frameRange(f *sql.WindowFrameBounds, i, n int) (int, int) {
 
 func (w *WindowOp) fillPartitionAggregate(wf sql.WindowFunc, perm []int, cmp windowCmp, out *windowColumn) error {
 	start := 0
-	for i := 0; i <= len(perm); i++ {
+	for i := range len(perm) + 1 {
 		if i < len(perm) && i > 0 && cmp.partitionChanged(perm[i-1], perm[i]) {
 			if err := w.scatterAggregate(wf, perm[start:i], out); err != nil {
 				return err
@@ -689,37 +690,37 @@ func compareAnyValues(a, b any) int {
 	return 0
 }
 
-func (w *WindowOp) Next() (types.Batch, bool, error) {
+func (w *WindowOp) Next() (vector.Batch, bool, error) {
 	if err := w.state.requireOpen(); err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	if !w.built {
 		if err := w.build(); err != nil {
-			return types.Batch{}, false, err
+			return vector.Batch{}, false, err
 		}
 		w.built = true
 	}
 	if w.cursor >= len(w.batches) {
-		return types.Batch{}, false, nil
+		return vector.Batch{}, false, nil
 	}
 	src := w.batches[w.cursor]
 	w.cursor++
-	cols := make([]types.Column, 0, len(src.Columns)+len(w.Funcs))
+	cols := make([]vector.Column, 0, len(src.Columns)+len(w.Funcs))
 	cols = append(cols, src.Columns...)
 	bi := w.cursor - 1
 	for fi, wf := range w.Funcs {
 		col := w.winCols[fi]
 		if col.isFloat {
-			v := types.NewVec(types.VecFloat64, src.Len)
+			v := vector.NewVec(vector.VecFloat64, src.Len)
 			dst := v.F64()
-			var valid types.Validity
+			var valid vector.Validity
 			for ri, wr := range w.rows {
 				if wr.batchIdx != bi {
 					continue
 				}
 				if col.valid != nil && !col.valid[ri] {
 					if valid == nil {
-						valid = types.NewAllValid(src.Len)
+						valid = vector.NewAllValid(src.Len)
 					}
 					valid.SetInvalid(wr.rowIdx)
 					continue
@@ -727,19 +728,19 @@ func (w *WindowOp) Next() (types.Batch, bool, error) {
 				dst[wr.rowIdx] = col.f64[ri]
 			}
 			v.Valid = valid
-			cols = append(cols, types.Column{Name: wf.Alias, Type: types.Float64, V: v})
+			cols = append(cols, vector.Column{Name: wf.Alias, Type: schema.Float64, V: v})
 			continue
 		}
-		v := types.NewVec(types.VecInt64, src.Len)
+		v := vector.NewVec(vector.VecInt64, src.Len)
 		dst := v.I64()
-		var valid types.Validity
+		var valid vector.Validity
 		for ri, wr := range w.rows {
 			if wr.batchIdx != bi {
 				continue
 			}
 			if col.valid != nil && !col.valid[ri] {
 				if valid == nil {
-					valid = types.NewAllValid(src.Len)
+					valid = vector.NewAllValid(src.Len)
 				}
 				valid.SetInvalid(wr.rowIdx)
 				continue
@@ -747,9 +748,9 @@ func (w *WindowOp) Next() (types.Batch, bool, error) {
 			dst[wr.rowIdx] = col.i64[ri]
 		}
 		v.Valid = valid
-		cols = append(cols, types.Column{Name: wf.Alias, Type: types.Int64, V: v})
+		cols = append(cols, vector.Column{Name: wf.Alias, Type: schema.Int64, V: v})
 	}
-	out := types.Batch{Len: src.Len, Columns: cols, Sel: src.Sel}
+	out := vector.Batch{Len: src.Len, Columns: cols, Sel: src.Sel}
 	return out, true, nil
 }
 
@@ -760,4 +761,3 @@ func (w *WindowOp) Close() error {
 	w.winCols = nil
 	return w.Source.Close()
 }
-

@@ -2,7 +2,10 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"testing"
+
+	"github.com/kylegrahammatzen/dripsql/internal/storage"
 )
 
 func TestEngine_MetadataAggregate_CountStarAndMinMax(t *testing.T) {
@@ -49,7 +52,7 @@ func TestEngine_MetadataAggregate_CountStarAndMinMax(t *testing.T) {
 	}
 }
 
-func TestEngine_MetadataAggregate_FallsBackOnDV(t *testing.T) {
+func TestEngine_MetadataAggregate_CountStaysFastUnderDV(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)
 	if err != nil {
@@ -57,7 +60,7 @@ func TestEngine_MetadataAggregate_FallsBackOnDV(t *testing.T) {
 	}
 	defer db.Close()
 	ctx := context.Background()
-	if _, err := db.Exec(ctx, "CREATE TABLE u (id int64, age int32);"); err != nil {
+	if _, err := db.Exec(ctx, "CREATE TABLE u (id int64 NOT NULL, age int32);"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(ctx, "INSERT INTO u VALUES (1,7),(2,4),(3,9),(4,2);"); err != nil {
@@ -66,11 +69,114 @@ func TestEngine_MetadataAggregate_FallsBackOnDV(t *testing.T) {
 	if _, err := db.Exec(ctx, "DELETE FROM u WHERE id = 2;"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Query(ctx, "SELECT count(*) FROM u"); err != nil {
+		t.Fatal(err)
+	}
+	storage.ResetTimings()
 	rows, err := db.Query(ctx, "SELECT count(*) FROM u")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := rows.Values[0][0]; got != int64(3) {
-		t.Fatalf("count(*) with DV: got %v, want 3", got)
+		t.Fatalf("count(*) with DV got %v want 3", got)
 	}
+	ioNs, decodeNs := storage.ReadTimings()
+	if ioNs != 0 || decodeNs != 0 {
+		t.Fatalf("count(*) with DV should be metadata-only, got io=%d decode=%d", ioNs, decodeNs)
+	}
+	rows, err = db.Query(ctx, "SELECT count(id) FROM u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rows.Values[0][0]; got != int64(3) {
+		t.Fatalf("count(id) with non-nullable id under DV got %v want 3", got)
+	}
+}
+
+func TestEngine_MetadataAggregate_MinMaxSumStillBailOnDV(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.Exec(ctx, "CREATE TABLE u (id int64 NOT NULL, age int32);"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, "INSERT INTO u VALUES (1,7),(2,4),(3,9),(4,2);"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, "DELETE FROM u WHERE id = 4;"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(ctx, "SELECT min(age) FROM u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := toInt64(rows.Values[0][0]); got != 4 {
+		t.Fatalf("min(age) after deleting id=4 (age=2) got %v want 4", rows.Values[0][0])
+	}
+	rows, err = db.Query(ctx, "SELECT sum(id) FROM u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := toInt64(rows.Values[0][0]); got != 6 {
+		t.Fatalf("sum(id) after deleting id=4 got %v want 6", rows.Values[0][0])
+	}
+}
+
+func BenchmarkEngine_CountStar_WithDV_10k(b *testing.B) {
+	dir := b.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if _, err := db.Exec(ctx, "CREATE TABLE u (id int64 NOT NULL);"); err != nil {
+		b.Fatal(err)
+	}
+	for start := 0; start < 10000; start += 2000 {
+		var sb []byte
+		sb = append(sb, "INSERT INTO u VALUES "...)
+		for i := start; i < start+2000 && i < 10000; i++ {
+			if i > start {
+				sb = append(sb, ',')
+			}
+			sb = append(sb, '(')
+			sb = strconv.AppendInt(sb, int64(i), 10)
+			sb = append(sb, ')')
+		}
+		if _, err := db.Exec(ctx, string(sb)); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(ctx, "DELETE FROM u WHERE id < 100;"); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		rows, err := db.Query(ctx, "SELECT count(*) FROM u")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if rows.Values[0][0] != int64(9900) {
+			b.Fatalf("count got %v want 9900", rows.Values[0][0])
+		}
+	}
+}
+
+func toInt64(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case int32:
+		return int64(x)
+	case int16:
+		return int64(x)
+	case int:
+		return int64(x)
+	}
+	return -1
 }

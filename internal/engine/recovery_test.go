@@ -8,8 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestRecovery_ForwardRollPartialMultiTableCommit(t *testing.T) {
@@ -115,13 +116,13 @@ func writeSingleInt(t *testing.T, path string, val int64) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	v := types.NewVec(types.VecInt64, 1)
+	v := vector.NewVec(vector.VecInt64, 1)
 	v.I64()[0] = val
-	batch, err := types.NewBatch([]types.Column{{Name: "id", Type: types.Int64, V: v}})
+	batch, err := vector.NewBatch([]vector.Column{{Name: "id", Type: schema.Int64, V: v}})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
-	if _, err := storage.WriteSegment(path, []types.Batch{batch}, nil); err != nil {
+	if _, err := storage.WriteSegment(path, []vector.Batch{batch}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 }

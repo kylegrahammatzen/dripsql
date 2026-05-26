@@ -1,4 +1,4 @@
-// Dictionary codec round-trip + boundary tests.
+﻿// Dictionary codec round-trip + boundary tests.
 package codec
 
 import (
@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestDictionary_EncodingIsDictionary(t *testing.T) {
-	if (dictionaryCodec{}).Encoding() != types.EncodingDictionary {
+	if (dictionaryCodec{}).Encoding() != schema.EncDict {
 		t.Fatal("dictionaryCodec must claim Dictionary encoding")
 	}
 }
@@ -18,7 +19,7 @@ func TestDictionary_EncodingIsDictionary(t *testing.T) {
 func TestDictionary_RoundTrip_ShortValues(t *testing.T) {
 	rows := 100
 	values := []string{"red", "green", "blue", "yellow"}
-	src := types.NewVarVec(types.VecText, rows, 0)
+	src := vector.NewVarVec(vector.VecText, rows, 0)
 	vb := src.Var()
 	for i := range rows {
 		vb.AppendString(i, values[i%len(values)])
@@ -27,8 +28,8 @@ func TestDictionary_RoundTrip_ShortValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	var dst types.Vec
-	if err := (dictionaryCodec{}).Decode(payload, types.VecText, rows, 0, &dst); err != nil {
+	var dst vector.Vec
+	if err := (dictionaryCodec{}).Decode(payload, vector.VecText, rows, 0, &dst); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
 	dvb := dst.Var()
@@ -48,7 +49,7 @@ func TestDictionary_RoundTrip_LongValues(t *testing.T) {
 		bytes.Repeat([]byte{'b'}, 64),
 		bytes.Repeat([]byte{'c'}, 100),
 	}
-	src := types.NewVarVec(types.VecBytes, rows, 0)
+	src := vector.NewVarVec(vector.VecBytes, rows, 0)
 	vb := src.Var()
 	for i := range rows {
 		vb.AppendBytes(i, values[i%len(values)])
@@ -57,8 +58,8 @@ func TestDictionary_RoundTrip_LongValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	var dst types.Vec
-	if err := (dictionaryCodec{}).Decode(payload, types.VecBytes, rows, 0, &dst); err != nil {
+	var dst vector.Vec
+	if err := (dictionaryCodec{}).Decode(payload, vector.VecBytes, rows, 0, &dst); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
 	dvb := dst.Var()
@@ -71,7 +72,7 @@ func TestDictionary_RoundTrip_LongValues(t *testing.T) {
 
 func TestDictionary_ExactBoundary_256Values(t *testing.T) {
 	rows := 256
-	src := types.NewVarVec(types.VecText, rows, 0)
+	src := vector.NewVarVec(vector.VecText, rows, 0)
 	vb := src.Var()
 	for i := range rows {
 		vb.AppendString(i, fmt.Sprintf("v%d", i))
@@ -83,15 +84,15 @@ func TestDictionary_ExactBoundary_256Values(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	var dst types.Vec
-	if err := (dictionaryCodec{}).Decode(payload, types.VecText, rows, 0, &dst); err != nil {
+	var dst vector.Vec
+	if err := (dictionaryCodec{}).Decode(payload, vector.VecText, rows, 0, &dst); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
 }
 
 func TestDictionary_RejectsAbove256(t *testing.T) {
 	rows := 257
-	src := types.NewVarVec(types.VecText, rows, 0)
+	src := vector.NewVarVec(vector.VecText, rows, 0)
 	vb := src.Var()
 	for i := range rows {
 		vb.AppendString(i, fmt.Sprintf("v%d", i))
@@ -105,8 +106,8 @@ func TestDictionary_RejectsAbove256(t *testing.T) {
 }
 
 func TestDictionary_EstimateRejectsNonVarBytes(t *testing.T) {
-	for _, kind := range []types.VecKind{types.VecInt64, types.VecBool, types.VecUUID, types.VecFloat32} {
-		v := types.NewVec(kind, 4)
+	for _, kind := range []vector.VecKind{vector.VecInt64, vector.VecBool, vector.VecUUID, vector.VecFloat32} {
+		v := vector.NewVec(kind, 4)
 		if _, ok := Estimate(dictionaryCodec{}, v); ok {
 			t.Fatalf("Estimate must reject %v", kind)
 		}
@@ -117,16 +118,16 @@ func TestDictionary_DecodeRejects(t *testing.T) {
 	cases := []struct {
 		name    string
 		payload []byte
-		kind    types.VecKind
+		kind    vector.VecKind
 		rows    int
 	}{
-		{"truncatedHeader", []byte{1}, types.VecText, 4},
-		{"dictCountZero", []byte{0, 0, 0, 0, 0, 0}, types.VecText, 4},
-		{"negativeRows", nil, types.VecText, -1},
-		{"nonVarBytesKind", []byte{1, 0, 4, 0, 0, 0, 't', 'e', 's', 't', 0}, types.VecInt64, 1},
+		{"truncatedHeader", []byte{1}, vector.VecText, 4},
+		{"dictCountZero", []byte{0, 0, 0, 0, 0, 0}, vector.VecText, 4},
+		{"negativeRows", nil, vector.VecText, -1},
+		{"nonVarBytesKind", []byte{1, 0, 4, 0, 0, 0, 't', 'e', 's', 't', 0}, vector.VecInt64, 1},
 	}
 	for _, tc := range cases {
-		var dst types.Vec
+		var dst vector.Vec
 		if err := (dictionaryCodec{}).Decode(tc.payload, tc.kind, tc.rows, 0, &dst); err == nil {
 			t.Fatalf("%s: Decode must reject", tc.name)
 		}
@@ -135,7 +136,7 @@ func TestDictionary_DecodeRejects(t *testing.T) {
 
 func TestDictionary_EstimateMatchesEncode(t *testing.T) {
 	rows := 50
-	src := types.NewVarVec(types.VecText, rows, 0)
+	src := vector.NewVarVec(vector.VecText, rows, 0)
 	vb := src.Var()
 	for i := range rows {
 		vb.AppendString(i, fmt.Sprintf("k%d", i%5))

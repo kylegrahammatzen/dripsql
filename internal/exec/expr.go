@@ -8,18 +8,18 @@ import (
 	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type evalCtx struct {
-	batch    types.Batch
+	batch    vector.Batch
 	outer    *correlatedOuter
 	subBuild func(plan *sql.Plan) (Operator, error)
 }
 
-func newEvalCtx(batch types.Batch) *evalCtx { return &evalCtx{batch: batch} }
+func newEvalCtx(batch vector.Batch) *evalCtx { return &evalCtx{batch: batch} }
 
-func newEvalCtxWith(batch types.Batch, outer *correlatedOuter, subBuild func(plan *sql.Plan) (Operator, error)) *evalCtx {
+func newEvalCtxWith(batch vector.Batch, outer *correlatedOuter, subBuild func(plan *sql.Plan) (Operator, error)) *evalCtx {
 	return &evalCtx{batch: batch, outer: outer, subBuild: subBuild}
 }
 
@@ -462,27 +462,27 @@ func compare(op sql.ExprOp, left, right any) (any, error) {
 func orderingCompare(left, right any) (int, error) {
 	if li, lok := asInt64(left); lok {
 		if ri, rok := asInt64(right); rok {
-			return types.CmpOrdered(li, ri), nil
+			return vector.CmpOrdered(li, ri), nil
 		}
 	}
 	if lf, lok := asFloat64(left); lok {
 		if rf, rok := asFloat64(right); rok {
-			return types.CmpOrdered(lf, rf), nil
+			return vector.CmpOrdered(lf, rf), nil
 		}
 	}
 	if ls, lok := left.(string); lok {
 		if rs, rok := right.(string); rok {
-			return types.CmpOrdered(ls, rs), nil
+			return vector.CmpOrdered(ls, rs), nil
 		}
 	}
 	if lb, lok := left.(bool); lok {
 		if rb, rok := right.(bool); rok {
-			return types.CmpBool(lb, rb), nil
+			return vector.CmpBool(lb, rb), nil
 		}
 	}
 	if lbs, lok := left.([]byte); lok {
 		if rbs, rok := right.([]byte); rok {
-			return types.CmpBytes(lbs, rbs), nil
+			return vector.CmpBytes(lbs, rbs), nil
 		}
 	}
 	return 0, fmt.Errorf("compare: incompatible operand types %T vs %T", left, right)
@@ -508,15 +508,15 @@ func arithmetic(op sql.ExprOp, left, right any) (any, error) {
 func intArith(op sql.ExprOp, l, r int64) (any, error) {
 	switch op {
 	case sql.ExprAdd:
-		return types.AddInt(l, r), nil
+		return vector.AddInt(l, r), nil
 	case sql.ExprSubtract:
-		return types.SubInt(l, r), nil
+		return vector.SubInt(l, r), nil
 	case sql.ExprMultiply:
-		return types.MulInt(l, r), nil
+		return vector.MulInt(l, r), nil
 	case sql.ExprDivide, sql.ExprIntDivide:
-		return types.DivInt(l, r)
+		return vector.DivInt(l, r)
 	case sql.ExprModulo:
-		return types.ModInt(l, r)
+		return vector.ModInt(l, r)
 	}
 	return nil, fmt.Errorf("arithmetic: unsupported int op %v", op)
 }
@@ -524,13 +524,13 @@ func intArith(op sql.ExprOp, l, r int64) (any, error) {
 func floatArith(op sql.ExprOp, l, r float64) (any, error) {
 	switch op {
 	case sql.ExprAdd:
-		return types.AddFloat(l, r), nil
+		return vector.AddFloat(l, r), nil
 	case sql.ExprSubtract:
-		return types.SubFloat(l, r), nil
+		return vector.SubFloat(l, r), nil
 	case sql.ExprMultiply:
-		return types.MulFloat(l, r), nil
+		return vector.MulFloat(l, r), nil
 	case sql.ExprDivide:
-		return types.DivFloat(l, r)
+		return vector.DivFloat(l, r)
 	}
 	return nil, fmt.Errorf("arithmetic: unsupported float op %v", op)
 }

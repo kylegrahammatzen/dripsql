@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 type Tx struct {
@@ -27,19 +27,25 @@ type tablePending struct {
 }
 
 func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
-	if db == nil {
-		return nil, fmt.Errorf("engine: nil DB")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	return db.beginTx(ctx, false)
+}
+
+// BeginReadTx pins a snapshot for read-only use and is permitted in read-only mode since it cannot stage writes.
+func (db *DB) BeginReadTx(ctx context.Context) (*Tx, error) {
+	return db.beginTx(ctx, true)
+}
+
+func (db *DB) beginTx(ctx context.Context, readOnly bool) (*Tx, error) {
+	ctx = ctxOrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	db.mu.Lock()
-	if db.closed {
+	if err := db.lockOpen(); err != nil {
+		return nil, err
+	}
+	if !readOnly && db.readOnly.Load() {
 		db.mu.Unlock()
-		return nil, fmt.Errorf("engine: database is closed")
+		return nil, ErrReadOnly
 	}
 	readTs := db.nextCommitTs.Load()
 	db.pinnedReadTs[readTs]++
@@ -51,7 +57,7 @@ func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
 }
 
 func (tx *Tx) commit(table string, adds []storage.ManifestSegmentAdd, dvUpdates []storage.ManifestDVUpdate) error {
-	key := types.NormalizeName(table)
+	key := schema.NormalizeName(table)
 	p, ok := tx.pending[key]
 	if !ok {
 		p = &tablePending{}
@@ -68,9 +74,9 @@ func (tx *Tx) commit(table string, adds []storage.ManifestSegmentAdd, dvUpdates 
 	return nil
 }
 
-func (tx *Tx) Exec(ctx context.Context, sqlText string) (Result, error) {
+func (tx *Tx) Exec(ctx context.Context, sqlText string, args ...any) (Result, error) {
 	if tx.done {
-		return Result{}, fmt.Errorf("engine: transaction already finished")
+		return Result{}, ErrTxDone
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -84,7 +90,7 @@ func (tx *Tx) Exec(ctx context.Context, sqlText string) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		affected, err := tx.execStmt(ctx, stmt)
+		affected, err := tx.execStmt(ctx, stmt, args)
 		if err != nil {
 			return result, err
 		}
@@ -94,25 +100,29 @@ func (tx *Tx) Exec(ctx context.Context, sqlText string) (Result, error) {
 	return result, nil
 }
 
-func (tx *Tx) execStmt(ctx context.Context, stmt sql.Stmt) (int64, error) {
+func (tx *Tx) execStmt(ctx context.Context, stmt sql.Stmt, args []any) (int64, error) {
 	plan, err := tx.db.planner().Plan(stmt)
+	if err != nil {
+		return 0, err
+	}
+	plan, err = sql.BindParameters(plan, args)
 	if err != nil {
 		return 0, err
 	}
 	switch plan.Kind {
 	case sql.PlanInsert:
-		return tx.db.insert(ctx, plan, tx)
+		return tx.db.insert(ctx, plan, tx.commit)
 	case sql.PlanDelete:
-		return tx.db.delete(ctx, plan, tx)
+		return tx.db.delete(ctx, plan, tx.commit)
 	case sql.PlanUpdate:
-		return tx.db.update(ctx, plan, tx)
+		return tx.db.update(ctx, plan, tx.commit)
 	}
 	return 0, fmt.Errorf("engine: %v not supported inside a transaction", plan.Kind)
 }
 
-func (tx *Tx) Query(ctx context.Context, sqlText string) (*Rows, error) {
+func (tx *Tx) Query(ctx context.Context, sqlText string, args ...any) (*Rows, error) {
 	if tx.done {
-		return nil, fmt.Errorf("engine: transaction already finished")
+		return nil, ErrTxDone
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -121,7 +131,11 @@ func (tx *Tx) Query(ctx context.Context, sqlText string) (*Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	return tx.db.runQueryWith(ctx, plan, tx.resolveSegments)
+	bound, err := sql.BindParameters(plan, args)
+	if err != nil {
+		return nil, err
+	}
+	return tx.db.runQueryWith(ctx, bound, tx.resolveSegments)
 }
 
 // resolveSegments returns base SnapshotAt(readTs) with pending overlays applied:
@@ -129,7 +143,7 @@ func (tx *Tx) Query(ctx context.Context, sqlText string) (*Rows, error) {
 // and pending Adds append as fresh segments. Overlay segments get a CommitTs of 0
 // (always visible to this txn's reader).
 func (tx *Tx) resolveSegments(d sql.BoundTableDef) ([]*storage.Segment, error) {
-	key := types.NormalizeName(d.Name)
+	key := schema.NormalizeName(d.Name)
 	p := tx.pending[key]
 	m, err := tx.db.manifestFor(d.Name)
 	if err != nil {
@@ -176,7 +190,7 @@ func (tx *Tx) resolveSegments(d sql.BoundTableDef) ([]*storage.Segment, error) {
 
 func (tx *Tx) Commit() error {
 	if tx.done {
-		return fmt.Errorf("engine: transaction already finished")
+		return ErrTxDone
 	}
 	defer tx.finish()
 	if len(tx.pending) == 0 {

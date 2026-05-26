@@ -8,9 +8,10 @@ import (
 	"fmt"
 	"runtime"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type SegmentsFn func(def sql.BoundTableDef) ([]*storage.Segment, error)
@@ -208,31 +209,15 @@ func drainValues(op Operator) ([]any, error) {
 			return nil, fmt.Errorf("IN subquery must return one column, got %d", len(batch.Columns))
 		}
 		col := &batch.Columns[0]
-		iter := batch.Sel
-		if iter == nil {
-			for row := 0; row < batch.Len; row++ {
-				v, verr := col.ValueAt(row)
-				if verr != nil {
-					return nil, verr
-				}
-				out = append(out, v)
-			}
-			continue
-		}
-		var iterErr error
-		iter.IterSet(func(row int) {
-			if iterErr != nil {
-				return
-			}
+		if err := vector.ForVisible(batch, func(row int) error {
 			v, verr := col.ValueAt(row)
 			if verr != nil {
-				iterErr = verr
-				return
+				return verr
 			}
 			out = append(out, v)
-		})
-		if iterErr != nil {
-			return nil, iterErr
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
@@ -282,37 +267,17 @@ func drainScalar(op Operator) (any, error) {
 			return nil, fmt.Errorf("scalar subquery must return one column, got %d", len(batch.Columns))
 		}
 		col := &batch.Columns[0]
-		iter := batch.Sel
-		if iter == nil {
-			for row := 0; row < batch.Len; row++ {
-				rows++
-				if rows > 1 {
-					return nil, fmt.Errorf("scalar subquery returned more than one row")
-				}
-				v, verr := col.ValueAt(row)
-				if verr != nil {
-					return nil, verr
-				}
-				captured = v
-			}
-			continue
-		}
-		var iterErr error
-		iter.IterSet(func(row int) {
-			if iterErr != nil {
-				return
-			}
+		iterErr := vector.ForVisible(batch, func(row int) error {
 			rows++
 			if rows > 1 {
-				iterErr = fmt.Errorf("scalar subquery returned more than one row")
-				return
+				return fmt.Errorf("scalar subquery returned more than one row")
 			}
 			v, verr := col.ValueAt(row)
 			if verr != nil {
-				iterErr = verr
-				return
+				return verr
 			}
 			captured = v
+			return nil
 		})
 		if iterErr != nil {
 			return nil, iterErr
@@ -485,7 +450,7 @@ func isIdentityProject(rel *sql.Rel) bool {
 }
 
 func sameFoldName(a, b string) bool {
-	return types.NormalizeName(a) == types.NormalizeName(b)
+	return schema.NormalizeName(a) == schema.NormalizeName(b)
 }
 
 // checkProjectionOps rejects expressions the row-by-row eval has not implemented yet.
@@ -547,10 +512,10 @@ func scanColumnName(scan *sql.Rel, id sql.ColumnID) string {
 	return ""
 }
 
-func intLikeType(t types.Type) bool {
+func intLikeType(t schema.Type) bool {
 	switch t.Kind {
-	case types.KindInt16, types.KindInt32, types.KindInt64,
-		types.KindDate, types.KindTimestamp, types.KindTime, types.KindDecimal:
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64,
+		schema.KindDate, schema.KindTimestamp, schema.KindTime, schema.KindDecimal:
 		return true
 	}
 	return false
@@ -591,9 +556,10 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, ou
 	opts := storage.ScanOpts{Segments: segs, Columns: names, TopK: topK}
 	var residual *sql.BoundExpr
 	if rel.Where != nil {
-		if pred, ok := loweredPredicate(*rel.Where); ok {
-			opts.Predicate = pred
-			if len(rel.PredicateOnly) > 0 {
+		push, res := splitWhere(*rel.Where)
+		if push != nil {
+			opts.Pred = push
+			if res == nil && len(rel.PredicateOnly) > 0 {
 				drop := make(map[sql.ColumnID]struct{}, len(rel.PredicateOnly))
 				for _, id := range rel.PredicateOnly {
 					drop[id] = struct{}{}
@@ -606,9 +572,8 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, ou
 				}
 				opts.Columns = kept
 			}
-		} else {
-			residual = rel.Where
 		}
+		residual = res
 	}
 	parallelism := 1
 	if topK == nil && len(segs) > 1 {

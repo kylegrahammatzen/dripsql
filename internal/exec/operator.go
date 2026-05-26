@@ -7,7 +7,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 var (
@@ -18,7 +18,7 @@ var (
 
 type Operator interface {
 	Open(ctx context.Context) error
-	Next() (batch types.Batch, ok bool, err error)
+	Next() (batch vector.Batch, ok bool, err error)
 	Close() error
 }
 

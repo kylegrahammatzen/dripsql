@@ -1,4 +1,4 @@
-// Cascade picks the smallest-encoded codec for a Vec via Encode-or-ErrSkip.
+﻿// Cascade picks the smallest-encoded codec for a Vec via Encode-or-ErrSkip.
 // Last candidate wins ties. Plain is always last so ties favor it.
 package codec
 
@@ -6,36 +6,37 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 // Plain is last so the <= tie-break selects it on ties.
-func Candidates(k types.VecKind) []Codec {
-	base := []Codec{mustLookup(types.EncodingConstant)}
+func Candidates(k vector.VecKind) []Codec {
+	base := []Codec{mustLookup(schema.EncConstant)}
 	switch {
 	case k.IsVarBytes():
-		base = append(base, mustLookup(types.EncodingDictionary), mustLookup(types.EncodingFSST))
+		base = append(base, mustLookup(schema.EncDict), mustLookup(schema.EncFSST))
 	case k.IsFORPackable() && k.FixedWidth() == 8:
 		base = append(base,
-			mustLookup(types.EncodingSequence),
-			mustLookup(types.EncodingFORBitPack),
-			mustLookup(types.EncodingDeltaBitPack),
-			mustLookup(types.EncodingPcodec))
+			mustLookup(schema.EncSequence),
+			mustLookup(schema.EncFOR),
+			mustLookup(schema.EncDelta),
+			mustLookup(schema.EncPcodec))
 	case k.IsFORPackable():
 		base = append(base,
-			mustLookup(types.EncodingFORBitPack),
-			mustLookup(types.EncodingDeltaBitPack),
-			mustLookup(types.EncodingPcodec))
-	case k == types.VecFloat32 || k == types.VecFloat64:
-		base = append(base, mustLookup(types.EncodingALP))
-		if k == types.VecFloat64 {
-			base = append(base, mustLookup(types.EncodingALPRD))
+			mustLookup(schema.EncFOR),
+			mustLookup(schema.EncDelta),
+			mustLookup(schema.EncPcodec))
+	case k == vector.VecFloat32 || k == vector.VecFloat64:
+		base = append(base, mustLookup(schema.EncALP))
+		if k == vector.VecFloat64 {
+			base = append(base, mustLookup(schema.EncALPRD), mustLookup(schema.EncPcodec))
 		}
 	}
-	return append(base, mustLookup(types.EncodingFlat))
+	return append(base, mustLookup(schema.EncPlain))
 }
 
-func mustLookup(e types.Encoding) Codec {
+func mustLookup(e schema.Encoding) Codec {
 	c, err := Lookup(e)
 	if err != nil {
 		panic(err)
@@ -44,9 +45,7 @@ func mustLookup(e types.Encoding) Codec {
 }
 
 // Encode runs every applicable candidate and keeps the smallest payload.
-// The winner's bytes are copied into ctx.Scratch.best so later candidates can
-// safely overwrite ctx.Scratch.trial. Last candidate wins ties.
-func Encode(v types.Vec, ctx *EncodeContext) (types.Encoding, []byte, error) {
+func Encode(v vector.Vec, ctx *EncodeContext) (schema.Encoding, []byte, error) {
 	if ctx == nil {
 		ctx = &EncodeContext{Scratch: NewScratchPool()}
 	}
@@ -56,7 +55,7 @@ func Encode(v types.Vec, ctx *EncodeContext) (types.Encoding, []byte, error) {
 	sp := ctx.Scratch
 	sp.best = sp.best[:0]
 	haveBest := false
-	var bestEnc types.Encoding
+	var bestEnc schema.Encoding
 
 	for _, c := range Candidates(v.Kind) {
 		sp.trial = sp.trial[:0]
@@ -81,7 +80,7 @@ func Encode(v types.Vec, ctx *EncodeContext) (types.Encoding, []byte, error) {
 }
 
 // Thin wrapper for callers that only need the chosen codec and a size.
-func Pick(v types.Vec) (Codec, int, bool) {
+func Pick(v vector.Vec) (Codec, int, bool) {
 	enc, payload, err := Encode(v, nil)
 	if err != nil {
 		return nil, 0, false

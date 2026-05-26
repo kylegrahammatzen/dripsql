@@ -1,12 +1,14 @@
-// Dictionary codec for varbytes kinds: stores each distinct value once, indexed by u8 per row.
-// Wire: [u16 LE dictCount][u32 LE len + bytes per entry][u8 indices x rows]. Rejects above DictMaxValues.
+﻿// Dictionary codec for varbytes kinds that stores each distinct value once indexed by u8 per row.
+// Wire is u16 LE dictCount then u32 LE len plus bytes per entry then u8 indices times rows and the codec rejects above DictMaxValues.
 package codec
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const DictMaxValues = 256
@@ -19,9 +21,9 @@ func init() {
 	Register(dictionaryCodec{})
 }
 
-func (dictionaryCodec) Encoding() types.Encoding { return types.EncodingDictionary }
+func (dictionaryCodec) Encoding() schema.Encoding { return schema.EncDict }
 
-func (c dictionaryCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+func (c dictionaryCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !v.Kind.IsVarBytes() || v.Len == 0 {
 		return nil, ErrSkip
 	}
@@ -62,7 +64,7 @@ func (c dictionaryCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error)
 	return scratch, nil
 }
 
-func (dictionaryCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (dictionaryCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("dictionary decode: %w", err)
 	}
@@ -73,7 +75,7 @@ func (dictionaryCodec) Decode(payload []byte, kind types.VecKind, rows, nullCoun
 		if len(payload) != 0 {
 			return fmt.Errorf("dictionary decode: zero rows but %d-byte payload", len(payload))
 		}
-		*dst = types.NewVarVec(kind, 0, 0)
+		*dst = vector.NewVarVec(kind, 0, 0)
 		return nil
 	}
 	if len(payload) < dictHeaderSize {
@@ -98,7 +100,7 @@ func (dictionaryCodec) Decode(payload []byte, kind types.VecKind, rows, nullCoun
 		}
 		entryStarts[i] = pos
 		entryLens[i] = length
-		if length > types.StringViewInlineMax {
+		if length > vector.StringViewInlineMax {
 			totalLong += length
 		}
 		pos += length
@@ -107,15 +109,15 @@ func (dictionaryCodec) Decode(payload []byte, kind types.VecKind, rows, nullCoun
 		return fmt.Errorf("dictionary decode: indices payload %d != expected %d", len(payload)-pos, rows)
 	}
 	indices := payload[pos : pos+rows]
-	*dst = types.NewVarVec(kind, rows, 0)
+	*dst = vector.NewVarVec(kind, rows, 0)
 	vb := dst.Var()
-	dictViews := make([]types.StringView, dictCount)
+	dictViews := make([]vector.StringView, dictCount)
 	if totalLong > 0 {
 		sharedBuf := make([]byte, 0, totalLong)
 		offsets := make([]uint32, dictCount)
 		for i := range dictCount {
 			length := entryLens[i]
-			if length <= types.StringViewInlineMax {
+			if length <= vector.StringViewInlineMax {
 				continue
 			}
 			offsets[i] = uint32(len(sharedBuf))
@@ -125,11 +127,11 @@ func (dictionaryCodec) Decode(payload []byte, kind types.VecKind, rows, nullCoun
 		for i := range dictCount {
 			length := entryLens[i]
 			entry := payload[entryStarts[i] : entryStarts[i]+length]
-			if length <= types.StringViewInlineMax {
+			if length <= vector.StringViewInlineMax {
 				dictViews[i] = vb.PrepareDictEntry(entry)
 				continue
 			}
-			dictViews[i] = types.MakeLongView(sharedBuf, bufID, offsets[i], uint32(length))
+			dictViews[i] = vector.MakeLongView(sharedBuf, bufID, offsets[i], uint32(length))
 		}
 	} else {
 		for i := range dictCount {
@@ -147,24 +149,28 @@ func (dictionaryCodec) Decode(payload []byte, kind types.VecKind, rows, nullCoun
 	return nil
 }
 
-func buildDict(v types.Vec) (indices []byte, entries [][]byte, dictBytes int, ok bool) {
+func buildDict(v vector.Vec) (indices []byte, entries [][]byte, dictBytes int, ok bool) {
 	rows := int(v.Len)
 	vb := v.Var()
 	indices = make([]byte, rows)
 	entries = make([][]byte, 0, 16)
-	seen := make(map[string]uint8, DictMaxValues)
 	for i := range rows {
 		val := vb.Bytes(i)
-		key := string(val)
-		if idx, exists := seen[key]; exists {
-			indices[i] = idx
+		found := -1
+		for j, e := range entries {
+			if bytes.Equal(e, val) {
+				found = j
+				break
+			}
+		}
+		if found >= 0 {
+			indices[i] = uint8(found)
 			continue
 		}
 		if len(entries) >= DictMaxValues {
 			return nil, nil, 0, false
 		}
 		idx := uint8(len(entries))
-		seen[key] = idx
 		indices[i] = idx
 		entries = append(entries, val)
 		dictBytes += 4 + len(val)

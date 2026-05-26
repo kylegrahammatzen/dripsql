@@ -1,4 +1,4 @@
-// Delta + bitpack codec: stores PackFirst (vals[0]), bitpacks (vals[i]-vals[i-1]) - min(deltas).
+﻿// Delta + bitpack codec: stores PackFirst (vals[0]), bitpacks (vals[i]-vals[i-1]) - min(deltas).
 // Wire: [u64 LE PackFirst][u64 LE PackBase][u8 PackWidth][bitpack payload of rows-1 residuals].
 package codec
 
@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"math/bits"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const deltaHeaderSize = 17
@@ -18,9 +19,9 @@ func init() {
 	Register(deltaBitpackCodec{})
 }
 
-func (deltaBitpackCodec) Encoding() types.Encoding { return types.EncodingDeltaBitPack }
+func (deltaBitpackCodec) Encoding() schema.Encoding { return schema.EncDelta }
 
-func (c deltaBitpackCodec) deltaFits(v types.Vec, ctx *EncodeContext) (first, base int64, width int, ok bool) {
+func (c deltaBitpackCodec) deltaFits(v vector.Vec, ctx *EncodeContext) (first, base int64, width int, ok bool) {
 	if !v.Kind.IsFORPackable() {
 		return 0, 0, 0, false
 	}
@@ -50,7 +51,7 @@ func (c deltaBitpackCodec) deltaFits(v types.Vec, ctx *EncodeContext) (first, ba
 	return first, base, width, true
 }
 
-func (c deltaBitpackCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+func (c deltaBitpackCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	first, base, width, ok := c.deltaFits(v, ctx)
 	if !ok {
 		return nil, ErrSkip
@@ -76,7 +77,7 @@ func (c deltaBitpackCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, erro
 	return scratch, nil
 }
 
-func (deltaBitpackCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (deltaBitpackCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("delta+bitpack decode: %w", err)
 	}
@@ -122,7 +123,7 @@ func (deltaBitpackCodec) Decode(payload []byte, kind types.VecKind, rows, nullCo
 	return nil
 }
 
-func deltaParams(v types.Vec) (first, base int64, width int, ok bool) {
+func deltaParams(v vector.Vec) (first, base int64, width int, ok bool) {
 	rows := int(v.Len)
 	vals := make([]uint64, rows)
 	readFORValues(v, vals)

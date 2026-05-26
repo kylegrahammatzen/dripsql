@@ -7,16 +7,17 @@ import (
 	"fmt"
 
 	"github.com/kylegrahammatzen/dripsql/internal/exec"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func (db *DB) runQuery(ctx context.Context, plan *sql.Plan) (*Rows, error) {
 	if plan != nil && plan.Kind == sql.PlanExplain {
 		return db.runExplain(ctx, plan)
 	}
-	if rows, ok, err := db.tryMetadataAggregate(plan); err != nil {
+	if rows, ok, err := db.answerFromMetadata(plan); err != nil {
 		return nil, err
 	} else if ok {
 		return rows, nil
@@ -39,20 +40,7 @@ func (db *DB) runQueryWith(ctx context.Context, plan *sql.Plan, resolveBase func
 	if plan != nil && plan.Kind == sql.PlanExplain {
 		return db.runExplain(ctx, plan)
 	}
-	openSegs := make(map[string][]*storage.Segment)
-	resolve := func(d sql.BoundTableDef) ([]*storage.Segment, error) {
-		key := types.NormalizeName(d.Name)
-		if segs, ok := openSegs[key]; ok {
-			return segs, nil
-		}
-		segs, err := resolveBase(d)
-		if err != nil {
-			return nil, err
-		}
-		openSegs[key] = segs
-		return segs, nil
-	}
-	op, err := exec.BuildOperator(plan, resolve)
+	op, err := exec.BuildOperator(plan, cachedSegmentResolver(resolveBase))
 	if err != nil {
 		return nil, err
 	}
@@ -119,11 +107,8 @@ func (db *DB) openSegmentsAt(table string, readTs uint64) ([]*storage.Segment, e
 	for _, entry := range view.Entries {
 		key := segCacheKey{path: entry.Path, dvPath: entry.DeletionVectorPath}
 		working[key] = struct{}{}
-		if elem, ok := db.segCache[key]; ok {
-			db.segLRU.MoveToBack(elem)
-			seg := elem.Value.(*segCacheEntry).seg
-			// Cached *os.File is still valid after a manifest rewrite. CommitTs may differ
-			// so refresh from the current entry.
+		if seg, ok := db.segments.touch(key); ok {
+			// CommitTs may differ after a manifest rewrite even when the file handle is still valid.
 			seg.CommitTs = entry.CommitTs
 			segs = append(segs, seg)
 			continue
@@ -133,38 +118,14 @@ func (db *DB) openSegmentsAt(table string, readTs uint64) ([]*storage.Segment, e
 			return nil, fmt.Errorf("engine: open segment %q: %w", entry.Path, err)
 		}
 		seg.CommitTs = entry.CommitTs
-		ce := &segCacheEntry{key: key, seg: seg}
-		db.segCache[key] = db.segLRU.PushBack(ce)
+		db.segments.add(key, seg)
 		segs = append(segs, seg)
 	}
-	db.evictColdSegments(working)
+	db.segments.evictExcept(working)
 	return segs, nil
 }
 
-// evictColdSegments closes the oldest cached segments that are not in the current
-// query's working set, until the cache fits under segCacheLimit. Segments needed
-// by the in-progress query stay open. Called while db.mu is held.
-func (db *DB) evictColdSegments(working map[segCacheKey]struct{}) {
-	for db.segLRU.Len() > segCacheLimit {
-		evicted := false
-		for e := db.segLRU.Front(); e != nil; e = e.Next() {
-			entry := e.Value.(*segCacheEntry)
-			if _, used := working[entry.key]; used {
-				continue
-			}
-			_ = entry.seg.Close()
-			db.segLRU.Remove(e)
-			delete(db.segCache, entry.key)
-			evicted = true
-			break
-		}
-		if !evicted {
-			return
-		}
-	}
-}
-
-func columnNames(batch types.Batch) []string {
+func columnNames(batch vector.Batch) []string {
 	names := make([]string, len(batch.Columns))
 	for i, c := range batch.Columns {
 		names[i] = c.Name
@@ -172,39 +133,34 @@ func columnNames(batch types.Batch) []string {
 	return names
 }
 
-func appendBatchRows(rows *Rows, batch types.Batch) error {
-	rowValues := func(row int) ([]any, error) {
-		out := make([]any, len(batch.Columns))
+// cachedSegmentResolver wraps base in a per-call cache so a multi-Rel plan does not reopen the same table twice.
+func cachedSegmentResolver(base func(sql.BoundTableDef) ([]*storage.Segment, error)) exec.SegmentsFn {
+	opened := make(map[string][]*storage.Segment)
+	return func(d sql.BoundTableDef) ([]*storage.Segment, error) {
+		key := schema.NormalizeName(d.Name)
+		if segs, ok := opened[key]; ok {
+			return segs, nil
+		}
+		segs, err := base(d)
+		if err != nil {
+			return nil, err
+		}
+		opened[key] = segs
+		return segs, nil
+	}
+}
+
+func appendBatchRows(rows *Rows, batch vector.Batch) error {
+	return vector.ForVisible(batch, func(row int) error {
+		vals := make([]any, len(batch.Columns))
 		for i, c := range batch.Columns {
 			v, err := c.ValueAt(row)
 			if err != nil {
-				return nil, err
-			}
-			out[i] = v
-		}
-		return out, nil
-	}
-	if batch.Sel == nil {
-		for row := range batch.Len {
-			vals, err := rowValues(row)
-			if err != nil {
 				return err
 			}
-			rows.Values = append(rows.Values, vals)
-		}
-		return nil
-	}
-	var loopErr error
-	batch.Sel.IterSet(func(row int) {
-		if loopErr != nil {
-			return
-		}
-		vals, err := rowValues(row)
-		if err != nil {
-			loopErr = err
-			return
+			vals[i] = v
 		}
 		rows.Values = append(rows.Values, vals)
+		return nil
 	})
-	return loopErr
 }

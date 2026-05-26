@@ -10,7 +10,6 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/exec"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 func (db *DB) runExplain(ctx context.Context, plan *sql.Plan) (*Rows, error) {
@@ -38,19 +37,9 @@ func (db *DB) runExplain(ctx context.Context, plan *sql.Plan) (*Rows, error) {
 }
 
 func (db *DB) runAnalyze(ctx context.Context, plan *sql.Plan) (*exec.TimingStats, error) {
-	openSegs := make(map[string][]*storage.Segment)
-	resolve := func(d sql.BoundTableDef) ([]*storage.Segment, error) {
-		key := types.NormalizeName(d.Name)
-		if segs, ok := openSegs[key]; ok {
-			return segs, nil
-		}
-		segs, err := db.openSegmentsForQuery(d.Name)
-		if err != nil {
-			return nil, err
-		}
-		openSegs[key] = segs
-		return segs, nil
-	}
+	resolve := cachedSegmentResolver(func(d sql.BoundTableDef) ([]*storage.Segment, error) {
+		return db.openSegmentsForQuery(d.Name)
+	})
 	op, root, err := exec.BuildOperatorAnalyzed(plan, resolve)
 	if err != nil {
 		return nil, err

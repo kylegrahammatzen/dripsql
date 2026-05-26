@@ -1,6 +1,5 @@
-// End-to-end storage benches: write, cold-open, scan, predicate scan, and lazy sidecar
-// load. Page shape mirrors the cmd/bench users dataset (id int64, name text, age int64,
-// category text) so the numbers stack against the workload bench.
+// End-to-end storage benches cover write, cold open, scan, predicate scan, and lazy sidecar load.
+// Page shape mirrors the cmd/bench users dataset with id int64, name text, age int64, and category text.
 package storage
 
 import (
@@ -11,7 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func fileSize(t *testing.T, path string) int64 {
@@ -27,7 +27,7 @@ const benchPageRows = 2048
 
 func BenchmarkStorage_WriteSegment(b *testing.B) {
 	page := makeBenchSegmentBatch(benchPageRows)
-	pages := []types.Batch{page, page, page, page}
+	pages := []vector.Batch{page, page, page, page}
 	b.ReportAllocs()
 	for b.Loop() {
 		tmp := b.TempDir()
@@ -79,7 +79,7 @@ func BenchmarkStorage_WriteSegment_Float64Plain(b *testing.B) {
 // strictly smaller than the same data forced to flat encoding.
 func TestFloat64_ALPVsPlain_FileSize(t *testing.T) {
 	page := makeFloat64DecimalBatch(benchPageRows)
-	pages := []types.Batch{page, page, page, page}
+	pages := []vector.Batch{page, page, page, page}
 	tmp := t.TempDir()
 
 	defaultPath := filepath.Join(tmp, "alp.dsv4")
@@ -87,7 +87,7 @@ func TestFloat64_ALPVsPlain_FileSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	forcedPath := filepath.Join(tmp, "plain.dsv4")
-	overrides := map[string]types.Encoding{"price": types.EncodingFlat}
+	overrides := map[string]schema.Encoding{"price": schema.EncPlain}
 	if _, err := WriteSegment(forcedPath, pages, overrides); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func BenchmarkStorage_OpenCold(b *testing.B) {
 	tmp := b.TempDir()
 	path := filepath.Join(tmp, "seg.dsv4")
 	page := makeBenchSegmentBatch(benchPageRows)
-	if _, err := WriteSegment(path, []types.Batch{page, page, page, page}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{page, page, page, page}, nil); err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
@@ -124,7 +124,7 @@ func BenchmarkStorage_ScanFull(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		opts := ScanOpts{Segments: []*Segment{seg}}
-		err := Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error { return nil })
+		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -134,12 +134,12 @@ func BenchmarkStorage_ScanFull(b *testing.B) {
 func BenchmarkStorage_ScanEqInt64Hit(b *testing.B) {
 	seg := openBenchSegment(b, 4)
 	defer seg.Close()
-	pred := EqInt64{Column: "age", Value: 42}
+	pred := Pred{Op: OpEq, Col: "age", Kind: vector.VecInt64, I64: 42}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		opts := ScanOpts{Segments: []*Segment{seg}, Predicate: pred}
-		err := Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error { return nil })
+		opts := ScanOpts{Segments: []*Segment{seg}, Pred: &pred}
+		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -150,12 +150,12 @@ func BenchmarkStorage_ScanEqInt64Miss(b *testing.B) {
 	seg := openBenchSegment(b, 4)
 	defer seg.Close()
 	// age is i % 100 so 999 falls inside [0, 99] only as a Bloom-rescuable miss.
-	pred := EqInt64{Column: "age", Value: 999}
+	pred := Pred{Op: OpEq, Col: "age", Kind: vector.VecInt64, I64: 999}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		opts := ScanOpts{Segments: []*Segment{seg}, Predicate: pred}
-		err := Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error { return nil })
+		opts := ScanOpts{Segments: []*Segment{seg}, Pred: &pred}
+		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -165,12 +165,27 @@ func BenchmarkStorage_ScanEqInt64Miss(b *testing.B) {
 func BenchmarkStorage_ScanEqBytesHit(b *testing.B) {
 	seg := openBenchSegment(b, 4)
 	defer seg.Close()
-	pred := EqBytes{Column: "category", Value: []byte("alpha")}
+	pred := Pred{Op: OpEq, Col: "category", Kind: vector.VecText, Bytes: []byte("alpha")}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		opts := ScanOpts{Segments: []*Segment{seg}, Predicate: pred}
-		err := Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error { return nil })
+		opts := ScanOpts{Segments: []*Segment{seg}, Pred: &pred}
+		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkStorage_ScanLtInt64AllMatchUnprojected(b *testing.B) {
+	seg := openBenchSegment(b, 4)
+	defer seg.Close()
+	pred := Pred{Op: OpLt, Col: "id", Kind: vector.VecInt64, I64: benchPageRows}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		opts := ScanOpts{Segments: []*Segment{seg}, Columns: []string{"name"}, Pred: &pred}
+		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -243,7 +258,7 @@ func openBenchSegment(b *testing.B, pages int) *Segment {
 	tmp := b.TempDir()
 	path := filepath.Join(tmp, "seg.dsv4")
 	batch := makeBenchSegmentBatch(benchPageRows)
-	all := make([]types.Batch, pages)
+	all := make([]vector.Batch, pages)
 	for i := range pages {
 		all[i] = batch
 	}
@@ -257,9 +272,9 @@ func openBenchSegment(b *testing.B, pages int) *Segment {
 	return seg
 }
 
-func runWriteShapeBench(b *testing.B, page types.Batch) {
+func runWriteShapeBench(b *testing.B, page vector.Batch) {
 	b.Helper()
-	pages := []types.Batch{page, page, page, page}
+	pages := []vector.Batch{page, page, page, page}
 	b.ReportAllocs()
 	for b.Loop() {
 		tmp := b.TempDir()
@@ -270,20 +285,20 @@ func runWriteShapeBench(b *testing.B, page types.Batch) {
 	}
 }
 
-func makeInt64Batch(name string, rows int, fill func(i int) int64) types.Batch {
-	v := types.NewVec(types.VecInt64, rows)
+func makeInt64Batch(name string, rows int, fill func(i int) int64) vector.Batch {
+	v := vector.NewVec(vector.VecInt64, rows)
 	xs := v.I64()
 	for i := range rows {
 		xs[i] = fill(i)
 	}
-	batch, err := types.NewBatch([]types.Column{{Name: name, Type: types.Int64, V: v}})
+	batch, err := vector.NewBatch([]vector.Column{{Name: name, Type: schema.Int64, V: v}})
 	if err != nil {
 		panic(err)
 	}
 	return batch
 }
 
-func makeInt64RandomBatch(rows int) types.Batch {
+func makeInt64RandomBatch(rows int) vector.Batch {
 	// LCG so the test stays deterministic without importing math/rand.
 	state := uint64(0x9E3779B97F4A7C15)
 	return makeInt64Batch("x", rows, func(int) int64 {
@@ -292,17 +307,17 @@ func makeInt64RandomBatch(rows int) types.Batch {
 	})
 }
 
-func makeInt64MonotonicBatch(rows int) types.Batch {
+func makeInt64MonotonicBatch(rows int) vector.Batch {
 	return makeInt64Batch("x", rows, func(i int) int64 { return int64(i) })
 }
 
-func makeInt64ConstantBatch(rows int) types.Batch {
+func makeInt64ConstantBatch(rows int) vector.Batch {
 	return makeInt64Batch("x", rows, func(int) int64 { return 42 })
 }
 
-func makeInt64SparseNullsBatch(rows int) types.Batch {
-	v := types.NewVec(types.VecInt64, rows)
-	v.Valid = types.NewValidity(rows)
+func makeInt64SparseNullsBatch(rows int) vector.Batch {
+	v := vector.NewVec(vector.VecInt64, rows)
+	v.Valid = vector.NewValidity(rows)
 	xs := v.I64()
 	for i := range rows {
 		xs[i] = int64(i % 256)
@@ -310,32 +325,32 @@ func makeInt64SparseNullsBatch(rows int) types.Batch {
 			v.Valid.SetInvalid(i)
 		}
 	}
-	batch, err := types.NewBatch([]types.Column{{Name: "x", Type: types.Int64, V: v}})
+	batch, err := vector.NewBatch([]vector.Column{{Name: "x", Type: schema.Int64, V: v}})
 	if err != nil {
 		panic(err)
 	}
 	return batch
 }
 
-func makeTextBatch(rows int, fill func(i int) string) types.Batch {
-	v := types.NewVarVec(types.VecText, rows, 0)
+func makeTextBatch(rows int, fill func(i int) string) vector.Batch {
+	v := vector.NewVarVec(vector.VecText, rows, 0)
 	vb := v.Var()
 	for i := range rows {
 		vb.AppendString(i, fill(i))
 	}
-	batch, err := types.NewBatch([]types.Column{{Name: "s", Type: types.Text, V: v}})
+	batch, err := vector.NewBatch([]vector.Column{{Name: "s", Type: schema.Text, V: v}})
 	if err != nil {
 		panic(err)
 	}
 	return batch
 }
 
-func makeTextLowCardBatch(rows int) types.Batch {
+func makeTextLowCardBatch(rows int) vector.Batch {
 	labels := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
 	return makeTextBatch(rows, func(i int) string { return labels[i%len(labels)] })
 }
 
-func makeTextHighCardBatch(rows int) types.Batch {
+func makeTextHighCardBatch(rows int) vector.Batch {
 	// 8192 distinct strings cycled across rows. Exceeds DictMaxValues (256)
 	// so Dictionary codec rejects and falls through to plain varbytes.
 	const distinct = 8192
@@ -348,14 +363,14 @@ func makeTextHighCardBatch(rows int) types.Batch {
 
 // makeFloat64DecimalBatch produces ALP-friendly prices like 12.34 across [0, 1000).
 // Two decimal places fit cleanly at e=2 with a small mantissa range, exercising ALP.
-func makeFloat64DecimalBatch(rows int) types.Batch {
-	v := types.NewVec(types.VecFloat64, rows)
+func makeFloat64DecimalBatch(rows int) vector.Batch {
+	v := vector.NewVec(vector.VecFloat64, rows)
 	xs := v.F64()
 	for i := range rows {
 		cents := int64((i * 7919) % 100000)
 		xs[i] = float64(cents) / 100.0
 	}
-	batch, err := types.NewBatch([]types.Column{{Name: "price", Type: types.Float64, V: v}})
+	batch, err := vector.NewBatch([]vector.Column{{Name: "price", Type: schema.Float64, V: v}})
 	if err != nil {
 		panic(err)
 	}
@@ -364,23 +379,23 @@ func makeFloat64DecimalBatch(rows int) types.Batch {
 
 // makeFloat64PlainBatch produces noisy float64 from a uint64 LCG bit-cast. ALP
 // must reject these (no exponent makes them round-trip) and fall through to plain.
-func makeFloat64PlainBatch(rows int) types.Batch {
+func makeFloat64PlainBatch(rows int) vector.Batch {
 	state := uint64(0x9E3779B97F4A7C15)
-	v := types.NewVec(types.VecFloat64, rows)
+	v := vector.NewVec(vector.VecFloat64, rows)
 	xs := v.F64()
 	for i := range rows {
 		state = state*6364136223846793005 + 1442695040888963407
 		bits := (state & 0x000FFFFFFFFFFFFF) | 0x4000000000000000
 		xs[i] = math.Float64frombits(bits)
 	}
-	batch, err := types.NewBatch([]types.Column{{Name: "x", Type: types.Float64, V: v}})
+	batch, err := vector.NewBatch([]vector.Column{{Name: "x", Type: schema.Float64, V: v}})
 	if err != nil {
 		panic(err)
 	}
 	return batch
 }
 
-func makeTextLongBatch(rows int) types.Batch {
+func makeTextLongBatch(rows int) vector.Batch {
 	// Each value > StringViewInlineMax (12 bytes) so SetView takes the long path.
 	const padding = "long_string_payload_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 	return makeTextBatch(rows, func(i int) string {
@@ -388,29 +403,29 @@ func makeTextLongBatch(rows int) types.Batch {
 	})
 }
 
-func makeBenchSegmentBatch(rows int) types.Batch {
-	idVec := types.NewVec(types.VecInt64, rows)
+func makeBenchSegmentBatch(rows int) vector.Batch {
+	idVec := vector.NewVec(vector.VecInt64, rows)
 	for i := range idVec.I64() {
 		idVec.I64()[i] = int64(i)
 	}
-	ageVec := types.NewVec(types.VecInt64, rows)
+	ageVec := vector.NewVec(vector.VecInt64, rows)
 	for i := range ageVec.I64() {
 		ageVec.I64()[i] = int64(i % 100)
 	}
-	nameVec := types.NewVarVec(types.VecText, rows, 0)
+	nameVec := vector.NewVarVec(vector.VecText, rows, 0)
 	for i := range rows {
 		nameVec.Var().AppendString(i, "row_name")
 	}
-	catVec := types.NewVarVec(types.VecText, rows, 0)
+	catVec := vector.NewVarVec(vector.VecText, rows, 0)
 	labels := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
 	for i := range rows {
 		catVec.Var().AppendString(i, labels[i%len(labels)])
 	}
-	batch, err := types.NewBatch([]types.Column{
-		{Name: "id", Type: types.Int64, V: idVec},
-		{Name: "name", Type: types.Text, V: nameVec},
-		{Name: "age", Type: types.Int64, V: ageVec},
-		{Name: "category", Type: types.Text, V: catVec},
+	batch, err := vector.NewBatch([]vector.Column{
+		{Name: "id", Type: schema.Int64, V: idVec},
+		{Name: "name", Type: schema.Text, V: nameVec},
+		{Name: "age", Type: schema.Int64, V: ageVec},
+		{Name: "category", Type: schema.Text, V: catVec},
 	})
 	if err != nil {
 		panic(err)

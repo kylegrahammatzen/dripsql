@@ -1,4 +1,4 @@
-// Segment cache LRU bound: the cache never exceeds segCacheLimit after a query, even when
+// Segment cache LRU bound: the cache never exceeds defaultSegCacheLimit after a query, even when
 // the table has more segments than the cap, and reused segments keep working across the cap.
 package engine
 
@@ -29,11 +29,11 @@ func TestSegCache_EvictsColdAfterQueryOnSmallTable(t *testing.T) {
 	if _, err := db.Query(ctx, "SELECT id FROM small"); err != nil {
 		t.Fatalf("query small: %v", err)
 	}
-	if db.segLRU.Len() > segCacheLimit {
-		t.Fatalf("segLRU.Len() = %d, want <= %d after cold table evicted", db.segLRU.Len(), segCacheLimit)
+	if db.segments.len() > defaultSegCacheLimit {
+		t.Fatalf("cache size = %d, want <= %d after cold table evicted", db.segments.len(), defaultSegCacheLimit)
 	}
-	if len(db.segCache) != db.segLRU.Len() {
-		t.Fatalf("cache map size %d != lru list size %d", len(db.segCache), db.segLRU.Len())
+	if len(db.segments.byKey) != db.segments.len() {
+		t.Fatalf("cache map size %d != lru list size %d", len(db.segments.byKey), db.segments.len())
 	}
 }
 
@@ -49,7 +49,7 @@ func TestSegCache_RepeatedQueriesStable(t *testing.T) {
 			t.Fatalf("query: %v", err)
 		}
 	}
-	if db.segLRU.Len() != 50 {
-		t.Fatalf("expected all 50 segments cached, got %d", db.segLRU.Len())
+	if db.segments.len() != 50 {
+		t.Fatalf("expected all 50 segments cached, got %d", db.segments.len())
 	}
 }

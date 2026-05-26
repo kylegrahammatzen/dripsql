@@ -1,4 +1,4 @@
-// Sequence codec: arithmetic progression start + step*i in 16 bytes regardless of row count.
+﻿// Sequence codec: arithmetic progression start + step*i in 16 bytes regardless of row count.
 // Scope is width-8 FOR-packable kinds (Int64, Timestamp, Time, Decimal64). Int64 wrap semantics on overflow are tolerated.
 package codec
 
@@ -6,7 +6,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type sequenceCodec struct{}
@@ -15,9 +16,9 @@ func init() {
 	Register(sequenceCodec{})
 }
 
-func (sequenceCodec) Encoding() types.Encoding { return types.EncodingSequence }
+func (sequenceCodec) Encoding() schema.Encoding { return schema.EncSequence }
 
-func (c sequenceCodec) sequenceFits(v types.Vec, ctx *EncodeContext) bool {
+func (c sequenceCodec) sequenceFits(v vector.Vec, ctx *EncodeContext) bool {
 	if v.Kind.FixedWidth() != 8 || !v.Kind.IsFORPackable() {
 		return false
 	}
@@ -38,7 +39,7 @@ func (c sequenceCodec) sequenceFits(v types.Vec, ctx *EncodeContext) bool {
 	return true
 }
 
-func (c sequenceCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+func (c sequenceCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !c.sequenceFits(v, ctx) {
 		return nil, ErrSkip
 	}
@@ -54,7 +55,7 @@ func (c sequenceCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 	return scratch, nil
 }
 
-func (sequenceCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (sequenceCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("sequence decode: %w", err)
 	}

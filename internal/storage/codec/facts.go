@@ -3,13 +3,13 @@
 package codec
 
 import (
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type PageFacts struct {
 	Rows     int
 	Nulls    int
-	Kind     types.VecKind
+	Kind     vector.VecKind
 	Int      *IntFacts
 	VarBytes *VarBytesFacts
 }

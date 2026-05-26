@@ -7,13 +7,13 @@ package engine
 import (
 	"sort"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 func addExprColumns(seen map[string]struct{}, expr sql.BoundExpr) {
 	if expr.Op == sql.ExprColumn {
-		seen[types.NormalizeName(expr.Column)] = struct{}{}
+		seen[schema.NormalizeName(expr.Column)] = struct{}{}
 		return
 	}
 	for _, a := range expr.Args {

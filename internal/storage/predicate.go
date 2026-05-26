@@ -1,5 +1,6 @@
-// Predicate is a sealed tagged union of filter ops. Bind resolves columns and kinds,
-// Eval fills a SelectionMask, PruneSegment reads stats to skip non-matching segments.
+// BoundPredicate plus the bound types are internal eval helpers reached only via Pred.toBound.
+// All shape and binding live in pred.go.
+// Helpers below resolve segment columns, stats, and encoded paths.
 package storage
 
 import (
@@ -8,74 +9,21 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-type Predicate interface {
-	isPredicate()
-}
-
-type EqInt64 struct {
-	Column string
-	Value  int64
-}
-type LtInt64 struct {
-	Column string
-	Value  int64
-}
-type GtInt64 struct {
-	Column string
-	Value  int64
-}
-type EqBytes struct {
-	Column string
-	Value  []byte
-}
-type LtBytes struct {
-	Column    string
-	Value     []byte
-	Inclusive bool
-}
-type GtBytes struct {
-	Column    string
-	Value     []byte
-	Inclusive bool
-}
-type IsNull struct {
-	Column string
-}
-type And struct {
-	Children []Predicate
-}
-type Or struct {
-	Children []Predicate
-}
-type Not struct {
-	Child Predicate
-}
-
-func (EqInt64) isPredicate() {}
-func (LtInt64) isPredicate() {}
-func (GtInt64) isPredicate() {}
-func (EqBytes) isPredicate() {}
-func (LtBytes) isPredicate() {}
-func (GtBytes) isPredicate() {}
-func (IsNull) isPredicate()  {}
-func (And) isPredicate()     {}
-func (Or) isPredicate()      {}
-func (Not) isPredicate()     {}
-
 type BoundPredicate interface {
-	Eval(batch types.Batch, sel *types.SelectionMask)
+	Eval(batch vector.Batch, sel *vector.SelectionMask)
 	PruneSegment(seg *Segment) bool
 	PrunePage(seg *Segment, pageIdx int) bool
 }
 
-type SchemaLookup func(name string) (types.VecKind, bool)
+type SchemaLookup func(name string) (vector.VecKind, bool)
 
-func BatchSchema(batch types.Batch) SchemaLookup {
-	return func(name string) (types.VecKind, bool) {
+func BatchSchema(batch vector.Batch) SchemaLookup {
+	return func(name string) (vector.VecKind, bool) {
 		c, ok := batch.ColumnByName(name)
 		if !ok {
 			return 0, false
@@ -85,7 +33,7 @@ func BatchSchema(batch types.Batch) SchemaLookup {
 }
 
 func SegmentSchema(seg *Segment) SchemaLookup {
-	return func(name string) (types.VecKind, bool) {
+	return func(name string) (vector.VecKind, bool) {
 		for i := range seg.Cols {
 			if strings.EqualFold(seg.Cols[i].Name, name) {
 				return seg.Cols[i].Kind, true
@@ -95,11 +43,11 @@ func SegmentSchema(seg *Segment) SchemaLookup {
 	}
 }
 
-func ColumnsSchema(cols []types.Column) SchemaLookup {
-	return func(name string) (types.VecKind, bool) {
+func ColumnsSchema(cols []vector.Column) SchemaLookup {
+	return func(name string) (vector.VecKind, bool) {
 		for i := range cols {
 			if strings.EqualFold(cols[i].Name, name) {
-				k, err := types.VecKindOf(cols[i].Type)
+				k, err := vector.VecKindOf(cols[i].Type)
 				if err != nil {
 					return 0, false
 				}
@@ -110,145 +58,7 @@ func ColumnsSchema(cols []types.Column) SchemaLookup {
 	}
 }
 
-func BindPredicate(p Predicate, lookup SchemaLookup) (BoundPredicate, error) {
-	switch p := p.(type) {
-	case EqInt64:
-		if err := checkKind(lookup, p.Column, types.VecInt64); err != nil {
-			return nil, err
-		}
-		return boundEqInt64{column: p.Column, value: p.Value}, nil
-	case LtInt64:
-		if err := checkKind(lookup, p.Column, types.VecInt64); err != nil {
-			return nil, err
-		}
-		return boundLtInt64{column: p.Column, value: p.Value}, nil
-	case GtInt64:
-		if err := checkKind(lookup, p.Column, types.VecInt64); err != nil {
-			return nil, err
-		}
-		return boundGtInt64{column: p.Column, value: p.Value}, nil
-	case EqBytes:
-		kind, ok := lookup(p.Column)
-		if !ok {
-			return nil, fmt.Errorf("column %q not in schema", p.Column)
-		}
-		if !kind.IsVarBytes() {
-			return nil, fmt.Errorf("column %q kind %v is not varbytes", p.Column, kind)
-		}
-		clone := append([]byte(nil), p.Value...)
-		return boundEqBytes{column: p.Column, value: clone}, nil
-	case LtBytes:
-		kind, ok := lookup(p.Column)
-		if !ok {
-			return nil, fmt.Errorf("column %q not in schema", p.Column)
-		}
-		if !kind.IsVarBytes() {
-			return nil, fmt.Errorf("column %q kind %v is not varbytes", p.Column, kind)
-		}
-		clone := append([]byte(nil), p.Value...)
-		return boundLtBytes{column: p.Column, value: clone, inclusive: p.Inclusive}, nil
-	case GtBytes:
-		kind, ok := lookup(p.Column)
-		if !ok {
-			return nil, fmt.Errorf("column %q not in schema", p.Column)
-		}
-		if !kind.IsVarBytes() {
-			return nil, fmt.Errorf("column %q kind %v is not varbytes", p.Column, kind)
-		}
-		clone := append([]byte(nil), p.Value...)
-		return boundGtBytes{column: p.Column, value: clone, inclusive: p.Inclusive}, nil
-	case IsNull:
-		if _, ok := lookup(p.Column); !ok {
-			return nil, fmt.Errorf("column %q not in schema", p.Column)
-		}
-		return boundIsNull{column: p.Column}, nil
-	case And:
-		children, err := bindChildren(p.Children, lookup)
-		if err != nil {
-			return nil, err
-		}
-		return &boundAnd{children: children}, nil
-	case Or:
-		children, err := bindChildren(p.Children, lookup)
-		if err != nil {
-			return nil, err
-		}
-		return &boundOr{children: children}, nil
-	case Not:
-		child, err := BindPredicate(p.Child, lookup)
-		if err != nil {
-			return nil, err
-		}
-		return boundNot{child: child}, nil
-	}
-	return nil, fmt.Errorf("BindPredicate: unknown predicate %T", p)
-}
-
-// Returns column names in first-encountered order so scan's decode-set union is deterministic.
-func PredicateColumns(p Predicate) []string {
-	if p == nil {
-		return nil
-	}
-	seen := map[string]struct{}{}
-	var out []string
-	var walk func(p Predicate)
-	walk = func(p Predicate) {
-		var name string
-		switch p := p.(type) {
-		case EqInt64:
-			name = p.Column
-		case LtInt64:
-			name = p.Column
-		case GtInt64:
-			name = p.Column
-		case EqBytes:
-			name = p.Column
-		case LtBytes:
-			name = p.Column
-		case GtBytes:
-			name = p.Column
-		case IsNull:
-			name = p.Column
-		case And:
-			for _, c := range p.Children {
-				walk(c)
-			}
-			return
-		case Or:
-			for _, c := range p.Children {
-				walk(c)
-			}
-			return
-		case Not:
-			walk(p.Child)
-			return
-		default:
-			return
-		}
-		key := strings.ToLower(name)
-		if _, dup := seen[key]; dup {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, name)
-	}
-	walk(p)
-	return out
-}
-
-func bindChildren(preds []Predicate, lookup SchemaLookup) ([]BoundPredicate, error) {
-	out := make([]BoundPredicate, len(preds))
-	for i, p := range preds {
-		b, err := BindPredicate(p, lookup)
-		if err != nil {
-			return nil, fmt.Errorf("child %d: %w", i, err)
-		}
-		out[i] = b
-	}
-	return out, nil
-}
-
-func checkKind(lookup SchemaLookup, name string, want types.VecKind) error {
+func checkKind(lookup SchemaLookup, name string, want vector.VecKind) error {
 	kind, ok := lookup(name)
 	if !ok {
 		return fmt.Errorf("column %q not in schema", name)
@@ -259,7 +69,7 @@ func checkKind(lookup SchemaLookup, name string, want types.VecKind) error {
 	return nil
 }
 
-func ensureMaskSize(sel *types.SelectionMask, rows int) {
+func ensureMaskSize(sel *vector.SelectionMask, rows int) {
 	if sel.Rows() != rows {
 		sel.Resize(rows)
 		return
@@ -296,10 +106,10 @@ func pageMinMaxInt(c *SegmentColumn, pageIdx int) (min, max int64, ok bool) {
 		return 0, 0, false
 	}
 	switch c.Kind {
-	case types.VecInt16, types.VecInt32, types.VecDate:
+	case vector.VecInt16, vector.VecInt32, vector.VecDate:
 		s := UnmarshalNumericStats[int32](c.PageStats[pageIdx][:], true)
 		return int64(s.Min), int64(s.Max), true
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		s := UnmarshalNumericStats[int64](c.PageStats[pageIdx][:], true)
 		return s.Min, s.Max, true
 	}
@@ -311,14 +121,14 @@ type boundEqInt64 struct {
 	value  int64
 }
 
-func (b boundEqInt64) Eval(batch types.Batch, sel *types.SelectionMask) {
+func (b boundEqInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	ensureMaskSize(sel, batch.Len)
 	col, ok := batch.ColumnByName(b.column)
 	if !ok {
 		return
 	}
 	sel.FillAll()
-	types.FilterOrdered(col.V.I64(), col.V.Valid, b.value, types.FilterEqual, *sel, sel)
+	vector.FilterOrdered(col.V.I64(), col.V.Valid, b.value, vector.FilterEqual, *sel, sel)
 }
 
 func (b boundEqInt64) PruneSegment(seg *Segment) bool {
@@ -340,7 +150,7 @@ func (b boundEqInt64) PruneSegment(seg *Segment) bool {
 	if err != nil {
 		return false
 	}
-	if f, ok := filters[types.NormalizeName(b.column)]; ok && !f.Contains(b.value) {
+	if f, ok := filters[schema.NormalizeName(b.column)]; ok && !f.Contains(b.value) {
 		return true
 	}
 	return false
@@ -363,14 +173,14 @@ type boundLtInt64 struct {
 	value  int64
 }
 
-func (b boundLtInt64) Eval(batch types.Batch, sel *types.SelectionMask) {
+func (b boundLtInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	ensureMaskSize(sel, batch.Len)
 	col, ok := batch.ColumnByName(b.column)
 	if !ok {
 		return
 	}
 	sel.FillAll()
-	types.FilterOrdered(col.V.I64(), col.V.Valid, b.value, types.FilterLess, *sel, sel)
+	vector.FilterOrdered(col.V.I64(), col.V.Valid, b.value, vector.FilterLess, *sel, sel)
 }
 
 func (b boundLtInt64) PruneSegment(seg *Segment) bool {
@@ -405,14 +215,14 @@ type boundGtInt64 struct {
 	value  int64
 }
 
-func (b boundGtInt64) Eval(batch types.Batch, sel *types.SelectionMask) {
+func (b boundGtInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	ensureMaskSize(sel, batch.Len)
 	col, ok := batch.ColumnByName(b.column)
 	if !ok {
 		return
 	}
 	sel.FillAll()
-	types.FilterOrdered(col.V.I64(), col.V.Valid, b.value, types.FilterGreater, *sel, sel)
+	vector.FilterOrdered(col.V.I64(), col.V.Valid, b.value, vector.FilterGreater, *sel, sel)
 }
 
 func (b boundGtInt64) PruneSegment(seg *Segment) bool {
@@ -447,14 +257,14 @@ type boundEqBytes struct {
 	value  []byte
 }
 
-func (b boundEqBytes) Eval(batch types.Batch, sel *types.SelectionMask) {
+func (b boundEqBytes) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	ensureMaskSize(sel, batch.Len)
 	col, ok := batch.ColumnByName(b.column)
 	if !ok {
 		return
 	}
 	sel.FillAll()
-	types.FilterBytes(col.V.Var(), col.V.Valid, b.value, types.FilterEqual, *sel, sel)
+	vector.FilterBytes(col.V.Var(), col.V.Valid, b.value, vector.FilterEqual, *sel, sel)
 }
 
 func (b boundEqBytes) PruneSegment(seg *Segment) bool {
@@ -469,7 +279,7 @@ func (b boundEqBytes) PruneSegment(seg *Segment) bool {
 	if err != nil || hists == nil {
 		return false
 	}
-	hist, ok := hists[types.NormalizeName(b.column)]
+	hist, ok := hists[schema.NormalizeName(b.column)]
 	if !ok {
 		return false
 	}
@@ -495,7 +305,7 @@ func (b boundEqBytes) PrunePage(seg *Segment, pageIdx int) bool {
 	if err != nil || blooms == nil {
 		return false
 	}
-	vb, ok := blooms[types.NormalizeName(b.column)]
+	vb, ok := blooms[schema.NormalizeName(b.column)]
 	if !ok || vb == nil || pageIdx >= len(vb.Pages) {
 		return false
 	}
@@ -512,22 +322,22 @@ type boundLtBytes struct {
 	inclusive bool
 }
 
-func (b boundLtBytes) Eval(batch types.Batch, sel *types.SelectionMask) {
+func (b boundLtBytes) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	ensureMaskSize(sel, batch.Len)
 	col, ok := batch.ColumnByName(b.column)
 	if !ok {
 		return
 	}
 	sel.FillAll()
-	op := types.FilterLess
+	op := vector.FilterLess
 	if b.inclusive {
-		op = types.FilterLessEqual
+		op = vector.FilterLessEqual
 	}
-	types.FilterBytes(col.V.Var(), col.V.Valid, b.value, op, *sel, sel)
+	vector.FilterBytes(col.V.Var(), col.V.Valid, b.value, op, *sel, sel)
 }
 
-func (boundLtBytes) PruneSegment(*Segment) bool      { return false }
-func (boundLtBytes) PrunePage(*Segment, int) bool    { return false }
+func (boundLtBytes) PruneSegment(*Segment) bool   { return false }
+func (boundLtBytes) PrunePage(*Segment, int) bool { return false }
 
 type boundGtBytes struct {
 	column    string
@@ -535,26 +345,26 @@ type boundGtBytes struct {
 	inclusive bool
 }
 
-func (b boundGtBytes) Eval(batch types.Batch, sel *types.SelectionMask) {
+func (b boundGtBytes) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	ensureMaskSize(sel, batch.Len)
 	col, ok := batch.ColumnByName(b.column)
 	if !ok {
 		return
 	}
 	sel.FillAll()
-	op := types.FilterGreater
+	op := vector.FilterGreater
 	if b.inclusive {
-		op = types.FilterGreaterEqual
+		op = vector.FilterGreaterEqual
 	}
-	types.FilterBytes(col.V.Var(), col.V.Valid, b.value, op, *sel, sel)
+	vector.FilterBytes(col.V.Var(), col.V.Valid, b.value, op, *sel, sel)
 }
 
-func (boundGtBytes) PruneSegment(*Segment) bool      { return false }
-func (boundGtBytes) PrunePage(*Segment, int) bool    { return false }
+func (boundGtBytes) PruneSegment(*Segment) bool   { return false }
+func (boundGtBytes) PrunePage(*Segment, int) bool { return false }
 
 type boundIsNull struct{ column string }
 
-func (b boundIsNull) Eval(batch types.Batch, sel *types.SelectionMask) {
+func (b boundIsNull) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	ensureMaskSize(sel, batch.Len)
 	col, ok := batch.ColumnByName(b.column)
 	if !ok || col.V.Valid == nil {
@@ -590,10 +400,10 @@ func (b boundIsNull) PrunePage(seg *Segment, pageIdx int) bool {
 
 type boundAnd struct {
 	children []BoundPredicate
-	tmp      types.SelectionMask
+	tmp      vector.SelectionMask
 }
 
-func (b *boundAnd) Eval(batch types.Batch, sel *types.SelectionMask) {
+func (b *boundAnd) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	if len(b.children) == 0 {
 		ensureMaskSize(sel, batch.Len)
 		sel.FillAll()
@@ -626,10 +436,10 @@ func (b *boundAnd) PrunePage(seg *Segment, pageIdx int) bool {
 
 type boundOr struct {
 	children []BoundPredicate
-	tmp      types.SelectionMask
+	tmp      vector.SelectionMask
 }
 
-func (b *boundOr) Eval(batch types.Batch, sel *types.SelectionMask) {
+func (b *boundOr) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	if len(b.children) == 0 {
 		ensureMaskSize(sel, batch.Len)
 		return
@@ -661,7 +471,7 @@ func (b boundOr) PrunePage(seg *Segment, pageIdx int) bool {
 
 type boundNot struct{ child BoundPredicate }
 
-func (b boundNot) Eval(batch types.Batch, sel *types.SelectionMask) {
+func (b boundNot) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	b.child.Eval(batch, sel)
 	sel.NotCount()
 }
@@ -719,6 +529,31 @@ func childAlwaysMatchesSegment(child BoundPredicate, seg *Segment) bool {
 	return false
 }
 
+func predicateAlwaysMatchesPage(pred BoundPredicate, seg *Segment, pageIdx int) bool {
+	switch p := pred.(type) {
+	case *boundAnd:
+		if len(p.children) == 0 {
+			return true
+		}
+		for _, child := range p.children {
+			if !predicateAlwaysMatchesPage(child, seg, pageIdx) {
+				return false
+			}
+		}
+		return true
+	case *boundOr:
+		for _, child := range p.children {
+			if predicateAlwaysMatchesPage(child, seg, pageIdx) {
+				return true
+			}
+		}
+		return false
+	case boundNot:
+		return p.child.PrunePage(seg, pageIdx)
+	}
+	return childAlwaysMatchesPage(pred, seg, pageIdx)
+}
+
 func childAlwaysMatchesPage(child BoundPredicate, seg *Segment, pageIdx int) bool {
 	switch c := child.(type) {
 	case boundIsNull:
@@ -770,20 +605,32 @@ func childAlwaysMatchesPage(child BoundPredicate, seg *Segment, pageIdx int) boo
 	}
 	return false
 }
+
 type EncodedEvaluator interface {
-	EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (handled bool, scratchOut []byte, err error)
+	EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (handled bool, scratchOut []byte, err error)
 }
 
-func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	colIdx, ok := findSegmentColumnIdx(seg, b.column)
 	if !ok {
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
-	enc, ok := types.EncodingFromWire(page.Encoding)
-	if !ok || enc != types.EncodingDictionary {
+	enc := schema.Encoding(page.Encoding)
+	if !enc.Valid() {
 		return false, scratch, nil
 	}
+	switch enc {
+	case schema.EncDict:
+		return evalEncodedDictEq(seg, colIdx, pageIdx, sel, scratch, b.value)
+	case schema.EncFSST:
+		return evalEncodedFSSTEq(seg, colIdx, pageIdx, sel, scratch, b.value)
+	}
+	return false, scratch, nil
+}
+
+func evalEncodedDictEq(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target []byte) (bool, []byte, error) {
+	page := seg.Cols[colIdx].Pages[pageIdx]
 	rows := int(page.Rows)
 	ensureMaskSize(sel, rows)
 	if page.Flags&PageFlagAllNull != 0 {
@@ -796,7 +643,7 @@ func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *types.Selectio
 	if allNull {
 		return true, newScratch, nil
 	}
-	code, indices, found, err := resolveDictCode(payload, rows, b.value)
+	code, indices, found, err := resolveDictCode(payload, rows, target)
 	if err != nil {
 		return false, newScratch, err
 	}
@@ -807,25 +654,71 @@ func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *types.Selectio
 	return true, newScratch, nil
 }
 
-func (b boundLtBytes) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+// evalEncodedFSSTEq encodes target against the page symbol table once and byte-compares each row.
+// FSST encoding is deterministic against a fixed symbol table so equality requires no decode.
+func evalEncodedFSSTEq(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target []byte) (bool, []byte, error) {
+	page := seg.Cols[colIdx].Pages[pageIdx]
+	rows := int(page.Rows)
+	ensureMaskSize(sel, rows)
+	if page.Flags&PageFlagAllNull != 0 {
+		return true, scratch, nil
+	}
+	payload, valid, allNull, newScratch, err := seg.ReadPagePayload(colIdx, pageIdx, scratch)
+	if err != nil {
+		return false, newScratch, err
+	}
+	if allNull {
+		return true, newScratch, nil
+	}
+	symbols, rowsOff, encRows, err := codec.ParseFSSTHeader(payload)
+	if err != nil {
+		return false, newScratch, err
+	}
+	if encRows != rows {
+		return false, newScratch, fmt.Errorf("EvalEncoded FSST: row mismatch wire=%d want=%d", encRows, rows)
+	}
+	encodedLit := codec.EncodeFSSTLiteral(symbols, target)
+	sel.Clear()
+	pos := rowsOff
+	for i := range rows {
+		if pos+4 > len(payload) {
+			return false, newScratch, fmt.Errorf("EvalEncoded FSST: row %d length truncated", i)
+		}
+		encLen := int(binary.LittleEndian.Uint32(payload[pos : pos+4]))
+		pos += 4
+		if pos+encLen > len(payload) {
+			return false, newScratch, fmt.Errorf("EvalEncoded FSST: row %d payload truncated", i)
+		}
+		if encLen == len(encodedLit) && bytes.Equal(payload[pos:pos+encLen], encodedLit) {
+			sel.Set(i)
+		}
+		pos += encLen
+	}
+	if valid != nil {
+		applyValidity(valid, sel, rows)
+	}
+	return true, newScratch, nil
+}
+
+func (b boundLtBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	return evalEncodedDictOrdered(seg, pageIdx, sel, scratch, b.column, b.value, false, b.inclusive)
 }
 
-func (b boundGtBytes) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+func (b boundGtBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	return evalEncodedDictOrdered(seg, pageIdx, sel, scratch, b.column, b.value, true, b.inclusive)
 }
 
 // evalEncodedDictOrdered narrows sel for dictionary-encoded text under a LT/GT comparison.
 // It builds a 256-bit accept mask by comparing every dict entry against target, then walks
 // the index stream once. Same allocation profile as the eq path.
-func evalEncodedDictOrdered(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte, column string, target []byte, greater, inclusive bool) (bool, []byte, error) {
+func evalEncodedDictOrdered(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte, column string, target []byte, greater, inclusive bool) (bool, []byte, error) {
 	colIdx, ok := findSegmentColumnIdx(seg, column)
 	if !ok {
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
-	enc, ok := types.EncodingFromWire(page.Encoding)
-	if !ok || enc != types.EncodingDictionary {
+	enc := schema.Encoding(page.Encoding)
+	if !enc.Valid() || enc != schema.EncDict {
 		return false, scratch, nil
 	}
 	rows := int(page.Rows)
@@ -890,7 +783,7 @@ func dictAcceptMask(payload []byte, rows int, target []byte, greater, inclusive 
 }
 
 // narrowDictByMask sets sel[i] when accept[indices[i]] is set, gated by validity.
-func narrowDictByMask(indices []byte, accept [4]uint64, valid types.Validity, sel *types.SelectionMask) {
+func narrowDictByMask(indices []byte, accept [4]uint64, valid vector.Validity, sel *vector.SelectionMask) {
 	sel.Clear()
 	rows := len(indices)
 	for i := range rows {
@@ -904,26 +797,26 @@ func narrowDictByMask(indices []byte, accept [4]uint64, valid types.Validity, se
 	}
 }
 
-func (b boundEqInt64) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+func (b boundEqInt64) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	colIdx, ok := findSegmentColumnIdx(seg, b.column)
 	if !ok {
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
-	enc, ok := types.EncodingFromWire(page.Encoding)
-	if !ok {
+	enc := schema.Encoding(page.Encoding)
+	if !enc.Valid() {
 		return false, scratch, nil
 	}
 	switch enc {
-	case types.EncodingFORBitPack:
+	case schema.EncFOR:
 		return evalEncodedEqFOR(seg, colIdx, pageIdx, sel, scratch, b.value)
-	case types.EncodingDeltaBitPack:
+	case schema.EncDelta:
 		return evalEncodedEqDelta(seg, colIdx, pageIdx, sel, scratch, b.value)
 	}
 	return false, scratch, nil
 }
 
-func evalEncodedEqFOR(seg *Segment, colIdx, pageIdx int, sel *types.SelectionMask, scratch []byte, target int64) (bool, []byte, error) {
+func evalEncodedEqFOR(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target int64) (bool, []byte, error) {
 	page := seg.Cols[colIdx].Pages[pageIdx]
 	rows := int(page.Rows)
 	ensureMaskSize(sel, rows)
@@ -962,7 +855,7 @@ func evalEncodedEqFOR(seg *Segment, colIdx, pageIdx int, sel *types.SelectionMas
 	return true, newScratch, nil
 }
 
-func evalEncodedEqDelta(seg *Segment, colIdx, pageIdx int, sel *types.SelectionMask, scratch []byte, target int64) (bool, []byte, error) {
+func evalEncodedEqDelta(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target int64) (bool, []byte, error) {
 	page := seg.Cols[colIdx].Pages[pageIdx]
 	rows := int(page.Rows)
 	ensureMaskSize(sel, rows)
@@ -992,7 +885,7 @@ func evalEncodedEqDelta(seg *Segment, colIdx, pageIdx int, sel *types.SelectionM
 	return true, newScratch, nil
 }
 
-func narrowDeltaEq(first, base int64, residuals []uint64, target int64, valid types.Validity, sel *types.SelectionMask) {
+func narrowDeltaEq(first, base int64, residuals []uint64, target int64, valid vector.Validity, sel *vector.SelectionMask) {
 	sel.Clear()
 	cur := first
 	if cur == target {
@@ -1009,7 +902,7 @@ func narrowDeltaEq(first, base int64, residuals []uint64, target int64, valid ty
 	}
 }
 
-func narrowFOREq(residuals []uint64, target uint64, valid types.Validity, sel *types.SelectionMask) {
+func narrowFOREq(residuals []uint64, target uint64, valid vector.Validity, sel *vector.SelectionMask) {
 	sel.Clear()
 	for i, r := range residuals {
 		if r == target {
@@ -1021,11 +914,11 @@ func narrowFOREq(residuals []uint64, target uint64, valid types.Validity, sel *t
 	}
 }
 
-func (b boundLtInt64) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+func (b boundLtInt64) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	return evalEncodedFORRange(seg, pageIdx, sel, scratch, b.column, b.value, forRangeLT)
 }
 
-func (b boundGtInt64) EvalEncoded(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte) (bool, []byte, error) {
+func (b boundGtInt64) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	return evalEncodedFORRange(seg, pageIdx, sel, scratch, b.column, b.value, forRangeGT)
 }
 
@@ -1036,14 +929,14 @@ const (
 	forRangeGT
 )
 
-func evalEncodedFORRange(seg *Segment, pageIdx int, sel *types.SelectionMask, scratch []byte, column string, limit int64, op forRangeOp) (bool, []byte, error) {
+func evalEncodedFORRange(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte, column string, limit int64, op forRangeOp) (bool, []byte, error) {
 	colIdx, ok := findSegmentColumnIdx(seg, column)
 	if !ok {
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
-	enc, ok := types.EncodingFromWire(page.Encoding)
-	if !ok || enc != types.EncodingFORBitPack {
+	enc := schema.Encoding(page.Encoding)
+	if !enc.Valid() || enc != schema.EncFOR {
 		return false, scratch, nil
 	}
 	rows := int(page.Rows)
@@ -1113,7 +1006,7 @@ func evalEncodedFORRange(seg *Segment, pageIdx int, sel *types.SelectionMask, sc
 	return false, newScratch, nil
 }
 
-func narrowFORLT(residuals []uint64, threshold uint64, valid types.Validity, sel *types.SelectionMask) {
+func narrowFORLT(residuals []uint64, threshold uint64, valid vector.Validity, sel *vector.SelectionMask) {
 	sel.Clear()
 	for i, r := range residuals {
 		if r < threshold {
@@ -1125,7 +1018,7 @@ func narrowFORLT(residuals []uint64, threshold uint64, valid types.Validity, sel
 	}
 }
 
-func narrowFORGT(residuals []uint64, threshold uint64, valid types.Validity, sel *types.SelectionMask) {
+func narrowFORGT(residuals []uint64, threshold uint64, valid vector.Validity, sel *vector.SelectionMask) {
 	sel.Clear()
 	for i, r := range residuals {
 		if r > threshold {
@@ -1217,7 +1110,7 @@ func bytesEqual(a, b []byte) bool {
 
 // narrowDictEq sets sel[i] when indices[i] == code, gated by validity. The indices are
 // uint8 per row; the inner loop is a byte compare so 8 rows fit in a SIMDable lane.
-func narrowDictEq(indices []byte, code uint8, valid types.Validity, sel *types.SelectionMask) {
+func narrowDictEq(indices []byte, code uint8, valid vector.Validity, sel *vector.SelectionMask) {
 	sel.Clear()
 	rows := len(indices)
 	for i := range rows {
@@ -1230,7 +1123,7 @@ func narrowDictEq(indices []byte, code uint8, valid types.Validity, sel *types.S
 	}
 }
 
-func applyValidity(valid types.Validity, sel *types.SelectionMask, rows int) {
+func applyValidity(valid vector.Validity, sel *vector.SelectionMask, rows int) {
 	for i := range rows {
 		if !valid.IsValid(i) {
 			sel.Unset(i)

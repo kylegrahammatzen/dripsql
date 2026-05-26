@@ -1,4 +1,4 @@
-// ALP-RD codec for float64 that decimal-ALP rejects.
+﻿// ALP-RD codec for float64 that decimal-ALP rejects.
 // Round-trip is bitwise-exact, so NaN, Inf, and -0 are preserved.
 package codec
 
@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const (
@@ -23,10 +24,10 @@ func init() {
 	Register(alpRDCodec{})
 }
 
-func (alpRDCodec) Encoding() types.Encoding { return types.EncodingALPRD }
+func (alpRDCodec) Encoding() schema.Encoding { return schema.EncALPRD }
 
-func (c alpRDCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
-	if v.Kind != types.VecFloat64 {
+func (c alpRDCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
+	if v.Kind != vector.VecFloat64 {
 		return nil, ErrSkip
 	}
 	rows := int(v.Len)
@@ -83,11 +84,11 @@ func (c alpRDCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 	return scratch, nil
 }
 
-func (alpRDCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (alpRDCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("alp-rd decode: %w", err)
 	}
-	if kind != types.VecFloat64 {
+	if kind != vector.VecFloat64 {
 		return fmt.Errorf("alp-rd decode: kind %v not float64", kind)
 	}
 	if rows == 0 {

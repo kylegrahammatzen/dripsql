@@ -10,8 +10,9 @@ import (
 	"hash/maphash"
 	"math"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type HashJoinOp struct {
@@ -39,7 +40,7 @@ type hashJoinRuntime struct {
 	leftTpls  []columnTemplate
 	rightTpls []columnTemplate
 
-	probeBatch types.Batch
+	probeBatch vector.Batch
 	pending    []joinRow
 
 	drainBatch int
@@ -49,7 +50,7 @@ type hashJoinRuntime struct {
 type hashJoinBuild struct {
 	batches []bufferedBatch
 	index   map[uint64][]hashBucket
-	matched []types.SelectionMask
+	matched []vector.SelectionMask
 }
 
 type hashBucket struct {
@@ -64,15 +65,15 @@ type keyEncoder struct {
 
 type joinKeyCol struct {
 	idx        int
-	kind       types.VecKind
+	kind       vector.VecKind
 	enumLabels []string
 }
 
 type columnTemplate struct {
 	Name       string
-	Type       types.Type
+	Type       schema.Type
 	EnumLabels []string
-	Kind       types.VecKind
+	Kind       vector.VecKind
 }
 
 // joinRow flags whether each side contributes real data or a null fill. Probe-matched rows
@@ -107,13 +108,13 @@ func (h *HashJoinOp) Open(ctx context.Context) error {
 	return nil
 }
 
-func (h *HashJoinOp) Next() (types.Batch, bool, error) {
+func (h *HashJoinOp) Next() (vector.Batch, bool, error) {
 	if err := h.state.requireOpen(); err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	if !h.rt.built {
 		if err := h.buildIndex(); err != nil {
-			return types.Batch{}, false, err
+			return vector.Batch{}, false, err
 		}
 		h.rt.built = true
 	}
@@ -124,18 +125,18 @@ func (h *HashJoinOp) Next() (types.Batch, bool, error) {
 			}
 			leftBatch, ok, err := h.Left.Next()
 			if err != nil {
-				return types.Batch{}, false, err
+				return vector.Batch{}, false, err
 			}
 			if !ok {
 				h.rt.leftDrained = true
 				break
 			}
 			if err := h.resolveLeft(leftBatch); err != nil {
-				return types.Batch{}, false, err
+				return vector.Batch{}, false, err
 			}
 			h.rt.probeBatch = leftBatch
 			if err := h.collectRows(leftBatch); err != nil {
-				return types.Batch{}, false, err
+				return vector.Batch{}, false, err
 			}
 			if len(h.rt.pending) == 0 {
 				continue
@@ -144,7 +145,7 @@ func (h *HashJoinOp) Next() (types.Batch, bool, error) {
 		}
 	}
 	if h.Kind != sql.JoinRight && h.Kind != sql.JoinFull {
-		return types.Batch{}, false, nil
+		return vector.Batch{}, false, nil
 	}
 	return h.drainUnmatchedRight()
 }
@@ -164,11 +165,11 @@ func (h *HashJoinOp) buildIndex() error {
 		}
 		build.batches = append(build.batches, bufferedBatch{batch: batch, sel: selectionForBatch(batch)})
 	}
-	build.index = make(map[uint64][]hashBucket, len(build.batches)*types.StandardBatchRows)
+	build.index = make(map[uint64][]hashBucket, len(build.batches)*vector.StandardBatchRows)
 	if h.Kind == sql.JoinRight || h.Kind == sql.JoinFull {
-		build.matched = make([]types.SelectionMask, len(build.batches))
+		build.matched = make([]vector.SelectionMask, len(build.batches))
 		for bi, bb := range build.batches {
-			build.matched[bi] = types.NewSelectionMask(bb.batch.Len)
+			build.matched[bi] = vector.NewSelectionMask(bb.batch.Len)
 		}
 	}
 	for bi, bb := range build.batches {
@@ -194,7 +195,7 @@ func (h *HashJoinOp) buildIndex() error {
 	return nil
 }
 
-func (h *HashJoinOp) resolveLeft(batch types.Batch) error {
+func (h *HashJoinOp) resolveLeft(batch vector.Batch) error {
 	if h.rt.leftKeys != nil {
 		return nil
 	}
@@ -207,7 +208,7 @@ func (h *HashJoinOp) resolveLeft(batch types.Batch) error {
 	return nil
 }
 
-func (h *HashJoinOp) resolveRight(batch types.Batch) error {
+func (h *HashJoinOp) resolveRight(batch vector.Batch) error {
 	if h.rt.rightKeys != nil {
 		return nil
 	}
@@ -242,7 +243,7 @@ func (b *hashJoinBuild) lookup(key []byte, sum uint64) []rightRowRef {
 	return nil
 }
 
-func (h *HashJoinOp) collectRows(left types.Batch) error {
+func (h *HashJoinOp) collectRows(left vector.Batch) error {
 	rt := &h.rt
 	build := &rt.build
 	rt.pending = rt.pending[:0]
@@ -283,7 +284,7 @@ func (h *HashJoinOp) collectRows(left types.Batch) error {
 // resolveJoinKeyCols pre-resolves the column index for each join key. splitJoinEquality
 // already requires keys to be column references, so the type switch in encodeRow can
 // dispatch on VecKind without going through evalCtx or ColumnByName per row.
-func resolveJoinKeyCols(batch types.Batch, keys []sql.BoundExpr) ([]joinKeyCol, error) {
+func resolveJoinKeyCols(batch vector.Batch, keys []sql.BoundExpr) ([]joinKeyCol, error) {
 	cols := make([]joinKeyCol, len(keys))
 	for i, k := range keys {
 		if k.Op != sql.ExprColumn {
@@ -308,7 +309,7 @@ func resolveJoinKeyCols(batch types.Batch, keys []sql.BoundExpr) ([]joinKeyCol, 
 // encodeRow writes a type-tagged deterministic byte form of the row's join key. Tags
 // guard against type drift between sides. -0.0 is canonicalised to +0.0 so float keys
 // compare equal across rows that wrote the negative sign bit.
-func (e *keyEncoder) encodeRow(batch types.Batch, cols []joinKeyCol, row int) ([]byte, uint64, bool, error) {
+func (e *keyEncoder) encodeRow(batch vector.Batch, cols []joinKeyCol, row int) ([]byte, uint64, bool, error) {
 	e.buf = e.buf[:0]
 	for _, kc := range cols {
 		col := &batch.Columns[kc.idx]
@@ -316,47 +317,47 @@ func (e *keyEncoder) encodeRow(batch types.Batch, cols []joinKeyCol, row int) ([
 			return nil, 0, false, nil
 		}
 		switch kc.kind {
-		case types.VecInt16:
+		case vector.VecInt16:
 			e.buf = append(e.buf, 'i')
 			e.buf = binary.BigEndian.AppendUint64(e.buf, uint64(int64(col.V.I16()[row])))
-		case types.VecInt32, types.VecDate:
+		case vector.VecInt32, vector.VecDate:
 			e.buf = append(e.buf, 'i')
 			e.buf = binary.BigEndian.AppendUint64(e.buf, uint64(int64(col.V.I32()[row])))
-		case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 			e.buf = append(e.buf, 'i')
 			e.buf = binary.BigEndian.AppendUint64(e.buf, uint64(col.V.I64()[row]))
-		case types.VecFloat32:
+		case vector.VecFloat32:
 			x := float64(col.V.F32()[row])
 			if x == 0 {
 				x = 0
 			}
 			e.buf = append(e.buf, 'f')
 			e.buf = binary.BigEndian.AppendUint64(e.buf, math.Float64bits(x))
-		case types.VecFloat64:
+		case vector.VecFloat64:
 			x := col.V.F64()[row]
 			if x == 0 {
 				x = 0
 			}
 			e.buf = append(e.buf, 'f')
 			e.buf = binary.BigEndian.AppendUint64(e.buf, math.Float64bits(x))
-		case types.VecBool:
+		case vector.VecBool:
 			e.buf = append(e.buf, 'b')
 			if col.V.BoolBits()[row>>3]&(1<<(row&7)) != 0 {
 				e.buf = append(e.buf, 1)
 			} else {
 				e.buf = append(e.buf, 0)
 			}
-		case types.VecText, types.VecBytes, types.VecJSON:
+		case vector.VecText, vector.VecBytes, vector.VecJSON:
 			b := col.V.Var().Bytes(row)
 			e.buf = append(e.buf, 's')
 			e.buf = binary.BigEndian.AppendUint32(e.buf, uint32(len(b)))
 			e.buf = append(e.buf, b...)
-		case types.VecUUID:
-			s := types.FormatUUID(col.V.UUID()[row])
+		case vector.VecUUID:
+			s := vector.FormatUUID(col.V.UUID()[row])
 			e.buf = append(e.buf, 's')
 			e.buf = binary.BigEndian.AppendUint32(e.buf, uint32(len(s)))
 			e.buf = append(e.buf, s...)
-		case types.VecEnum32:
+		case vector.VecEnum32:
 			code := col.V.U32()[row]
 			if code == 0 || int(code-1) >= len(kc.enumLabels) {
 				return nil, 0, false, fmt.Errorf("hashjoin: enum code %d out of range", code)
@@ -372,25 +373,25 @@ func (e *keyEncoder) encodeRow(batch types.Batch, cols []joinKeyCol, row int) ([
 	return e.buf, maphash.Bytes(e.seed, e.buf), true, nil
 }
 
-func (h *HashJoinOp) emitChunk() (types.Batch, bool, error) {
+func (h *HashJoinOp) emitChunk() (vector.Batch, bool, error) {
 	chunk := h.rt.pending
-	if len(chunk) > types.StandardBatchRows {
-		chunk = chunk[:types.StandardBatchRows]
-		h.rt.pending = h.rt.pending[types.StandardBatchRows:]
+	if len(chunk) > vector.StandardBatchRows {
+		chunk = chunk[:vector.StandardBatchRows]
+		h.rt.pending = h.rt.pending[vector.StandardBatchRows:]
 	} else {
 		h.rt.pending = nil
 	}
 	left := h.rt.probeBatch
 	if len(h.rt.pending) == 0 {
-		h.rt.probeBatch = types.Batch{}
+		h.rt.probeBatch = vector.Batch{}
 	}
 	return h.emitRows(&left, chunk)
 }
 
-func (h *HashJoinOp) drainUnmatchedRight() (types.Batch, bool, error) {
+func (h *HashJoinOp) drainUnmatchedRight() (vector.Batch, bool, error) {
 	build := &h.rt.build
 	if len(build.batches) == 0 {
-		return types.Batch{}, false, nil
+		return vector.Batch{}, false, nil
 	}
 	rows := h.rt.pending[:0]
 	for h.rt.drainBatch < len(build.batches) {
@@ -405,11 +406,11 @@ func (h *HashJoinOp) drainUnmatchedRight() (types.Batch, bool, error) {
 				continue
 			}
 			rows = append(rows, joinRow{right: rightRowRef{batch: h.rt.drainBatch, row: r}, hasRight: true})
-			if len(rows) >= types.StandardBatchRows {
+			if len(rows) >= vector.StandardBatchRows {
 				break
 			}
 		}
-		if len(rows) >= types.StandardBatchRows {
+		if len(rows) >= vector.StandardBatchRows {
 			break
 		}
 		h.rt.drainBatch++
@@ -417,33 +418,33 @@ func (h *HashJoinOp) drainUnmatchedRight() (types.Batch, bool, error) {
 	}
 	h.rt.pending = rows[:0]
 	if len(rows) == 0 {
-		return types.Batch{}, false, nil
+		return vector.Batch{}, false, nil
 	}
 	return h.emitRows(nil, rows)
 }
 
-func (h *HashJoinOp) emitRows(left *types.Batch, rows []joinRow) (types.Batch, bool, error) {
+func (h *HashJoinOp) emitRows(left *vector.Batch, rows []joinRow) (vector.Batch, bool, error) {
 	if len(rows) == 0 {
-		return types.Batch{}, false, nil
+		return vector.Batch{}, false, nil
 	}
 	build := &h.rt.build
 	n := len(rows)
 
 	leftTpls, err := h.leftTemplates(left)
 	if err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	rightTpls, err := h.rightTemplates()
 	if err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	leftCols, err := allocColumns(leftTpls, n)
 	if err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	rightCols, err := allocColumns(rightTpls, n)
 	if err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	cols := append(leftCols, rightCols...)
 	leftWidth := len(leftCols)
@@ -451,8 +452,8 @@ func (h *HashJoinOp) emitRows(left *types.Batch, rows []joinRow) (types.Batch, b
 	for dst, r := range rows {
 		if r.hasLeft && left != nil {
 			for ci, sc := range left.Columns {
-				if err := types.CopyVecRow(sc.V, r.leftRow, &cols[ci].V, dst); err != nil {
-					return types.Batch{}, false, err
+				if err := vector.CopyVecRow(sc.V, r.leftRow, &cols[ci].V, dst); err != nil {
+					return vector.Batch{}, false, err
 				}
 			}
 		} else {
@@ -461,8 +462,8 @@ func (h *HashJoinOp) emitRows(left *types.Batch, rows []joinRow) (types.Batch, b
 		if r.hasRight {
 			rb := build.batches[r.right.batch].batch
 			for ci, sc := range rb.Columns {
-				if err := types.CopyVecRow(sc.V, r.right.row, &cols[leftWidth+ci].V, dst); err != nil {
-					return types.Batch{}, false, err
+				if err := vector.CopyVecRow(sc.V, r.right.row, &cols[leftWidth+ci].V, dst); err != nil {
+					return vector.Batch{}, false, err
 				}
 			}
 		} else {
@@ -470,26 +471,28 @@ func (h *HashJoinOp) emitRows(left *types.Batch, rows []joinRow) (types.Batch, b
 		}
 	}
 
-	out, err := types.NewBatch(cols)
+	out, err := vector.NewBatch(cols)
 	if err != nil {
-		return types.Batch{}, false, fmt.Errorf("hashjoin: NewBatch: %w", err)
+		return vector.Batch{}, false, fmt.Errorf("hashjoin: NewBatch: %w", err)
 	}
-	sel := types.NewSelectionMask(n)
+	sel := vector.NewSelectionMask(n)
 	sel.FillAll()
-	out.Sel = &sel
+	if err := out.SetSel(&sel); err != nil {
+		return vector.Batch{}, false, fmt.Errorf("hashjoin: %w", err)
+	}
 	return out, true, nil
 }
 
-func nullFillRow(cols []types.Column, row int) {
+func nullFillRow(cols []vector.Column, row int) {
 	for i := range cols {
 		if cols[i].V.Valid == nil {
-			cols[i].V.Valid = types.NewAllValid(int(cols[i].V.Len))
+			cols[i].V.Valid = vector.NewAllValid(int(cols[i].V.Len))
 		}
 		cols[i].V.Valid.SetInvalid(row)
 	}
 }
 
-func (h *HashJoinOp) leftTemplates(left *types.Batch) ([]columnTemplate, error) {
+func (h *HashJoinOp) leftTemplates(left *vector.Batch) ([]columnTemplate, error) {
 	if left != nil && len(left.Columns) > 0 {
 		return templatesFromColumns(left.Columns), nil
 	}
@@ -506,7 +509,7 @@ func (h *HashJoinOp) rightTemplates() ([]columnTemplate, error) {
 	return templatesFromOutputs(h.RightOutputs)
 }
 
-func templatesFromColumns(cols []types.Column) []columnTemplate {
+func templatesFromColumns(cols []vector.Column) []columnTemplate {
 	out := make([]columnTemplate, len(cols))
 	for i, c := range cols {
 		out[i] = columnTemplate{Name: c.Name, Type: c.Type, EnumLabels: c.EnumLabels, Kind: c.V.Kind}
@@ -520,7 +523,7 @@ func templatesFromOutputs(outputs []sql.BoundOutput) ([]columnTemplate, error) {
 	}
 	tpls := make([]columnTemplate, len(outputs))
 	for i, o := range outputs {
-		kind, err := types.VecKindOf(o.Expr.Type)
+		kind, err := vector.VecKindOf(o.Expr.Type)
 		if err != nil {
 			return nil, err
 		}
@@ -533,14 +536,14 @@ func templatesFromOutputs(outputs []sql.BoundOutput) ([]columnTemplate, error) {
 	return tpls, nil
 }
 
-func allocColumns(tpls []columnTemplate, rows int) ([]types.Column, error) {
-	cols := make([]types.Column, len(tpls))
+func allocColumns(tpls []columnTemplate, rows int) ([]vector.Column, error) {
+	cols := make([]vector.Column, len(tpls))
 	for i, t := range tpls {
-		v, err := types.NewVecForKind(t.Kind, rows)
+		v, err := vector.NewVecForKind(t.Kind, rows)
 		if err != nil {
 			return nil, err
 		}
-		cols[i] = types.Column{Name: t.Name, Type: t.Type, EnumLabels: t.EnumLabels, V: v}
+		cols[i] = vector.Column{Name: t.Name, Type: t.Type, EnumLabels: t.EnumLabels, V: v}
 	}
 	return cols, nil
 }

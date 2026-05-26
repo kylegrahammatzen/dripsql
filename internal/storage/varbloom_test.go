@@ -7,26 +7,27 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestVarBloom_PrunesAbsentPerPage(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "seg.dat")
 
-	makePage := func(values []string) types.Batch {
-		v := types.NewVarVec(types.VecText, len(values), 0)
+	makePage := func(values []string) vector.Batch {
+		v := vector.NewVarVec(vector.VecText, len(values), 0)
 		vb := v.Var()
 		for i, s := range values {
 			vb.AppendString(i, s)
 		}
-		b, err := types.NewBatch([]types.Column{{Name: "k", Type: types.Text, V: v}})
+		b, err := vector.NewBatch([]vector.Column{{Name: "k", Type: schema.Text, V: v}})
 		if err != nil {
 			t.Fatalf("NewBatch: %v", err)
 		}
 		return b
 	}
-	pages := []types.Batch{
+	pages := []vector.Batch{
 		makePage([]string{"alpha", "alpha", "alpha"}),
 		makePage([]string{"beta", "beta"}),
 		makePage([]string{"gamma", "gamma", "gamma", "gamma"}),
@@ -46,7 +47,7 @@ func TestVarBloom_PrunesAbsentPerPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VarBlooms: %v", err)
 	}
-	vb := blooms[types.NormalizeName("k")]
+	vb := blooms[schema.NormalizeName("k")]
 	if vb == nil {
 		t.Fatal("missing varbloom for k")
 	}

@@ -1,5 +1,5 @@
-// Bench smoke tests: percentile arithmetic, the catalog stays self-consistent, summary numbers are sane.
-// No subprocess. The main() exit-on-error contract is exercised by hand via go run.
+// Bench smoke tests cover percentile arithmetic and catalog self-consistency and summary shape.
+// The main() exit-on-error contract is exercised by hand via go run.
 package main
 
 import (
@@ -98,43 +98,95 @@ func TestDataset_UsersSetupSeedsRows(t *testing.T) {
 	}
 }
 
-func TestMannWhitney_NoDifference(t *testing.T) {
-	a := []float64{10, 11, 9, 10, 10}
-	b := []float64{10, 11, 9, 10, 10}
-	_, p := mannWhitneyU(a, b)
-	if p < 0.9 {
-		t.Fatalf("identical samples p = %v, want close to 1", p)
-	}
-}
-
-func TestMannWhitney_LargeDifference(t *testing.T) {
-	a := []float64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
-	b := []float64{100, 110, 120, 130, 140, 150, 160, 170, 180, 190}
-	_, p := mannWhitneyU(a, b)
-	if p > 0.01 {
-		t.Fatalf("clearly different samples p = %v, want < 0.01", p)
-	}
-}
-
-func TestMannWhitney_EmptySamples(t *testing.T) {
-	if _, p := mannWhitneyU(nil, []float64{1, 2}); p != 1 {
-		t.Fatalf("empty base p = %v, want 1", p)
-	}
-}
-
-func TestCompareReports_Roundtrip(t *testing.T) {
+func TestCompareReports_Regressed(t *testing.T) {
 	dir := t.TempDir()
 	basePath := dir + "/base.json"
 	headPath := dir + "/head.json"
-	mustWriteReport(t, basePath, runReport{Query: "q1", Median: 10, Durations: []float64{9, 10, 11}})
-	mustWriteReport(t, headPath, runReport{Query: "q1", Median: 20, Durations: []float64{19, 20, 21}})
+	mustWriteReport(t, basePath, runReport{Query: "q1", Median: 10})
+	mustWriteReport(t, headPath, runReport{Query: "q1", Median: 20})
 	var out bytes.Buffer
-	if err := compareReports(basePath, headPath, 0.5, &out); err != nil {
+	if err := compareReports(basePath, headPath, 10.0, &out); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
 	if !strings.Contains(got, "q1") || !strings.Contains(got, "regressed") {
-		t.Fatalf("compare output missing expected fields: %q", got)
+		t.Fatalf("compare output missing expected fields, got %q", got)
+	}
+}
+
+func TestCompareReports_WithinThreshold(t *testing.T) {
+	dir := t.TempDir()
+	basePath := dir + "/base.json"
+	headPath := dir + "/head.json"
+	mustWriteReport(t, basePath, runReport{Query: "q1", Median: 10})
+	mustWriteReport(t, headPath, runReport{Query: "q1", Median: 10.5})
+	var out bytes.Buffer
+	if err := compareReports(basePath, headPath, 10.0, &out); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "q1") || !strings.Contains(got, "~") {
+		t.Fatalf("compare output should mark within-threshold as ~, got %q", got)
+	}
+}
+
+func TestCompareReports_Improved(t *testing.T) {
+	dir := t.TempDir()
+	basePath := dir + "/base.json"
+	headPath := dir + "/head.json"
+	mustWriteReport(t, basePath, runReport{Query: "q1", Median: 20})
+	mustWriteReport(t, headPath, runReport{Query: "q1", Median: 10})
+	var out bytes.Buffer
+	if err := compareReports(basePath, headPath, 10.0, &out); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "improved") {
+		t.Fatalf("compare output should mark large drop as improved, got %q", got)
+	}
+}
+
+func TestListCatalog_IsSorted(t *testing.T) {
+	var out bytes.Buffer
+	listCatalog(&out)
+	got := out.String()
+	prev := ""
+	section := ""
+	for _, line := range strings.Split(got, "\n") {
+		if line == "Datasets:" || line == "Queries:" {
+			section = line
+			prev = ""
+			continue
+		}
+		if !strings.HasPrefix(line, "  ") {
+			continue
+		}
+		name := strings.TrimSpace(strings.SplitN(strings.TrimSpace(line), " ", 2)[0])
+		if prev != "" && name < prev {
+			t.Fatalf("section %q out of order, %q < %q", section, name, prev)
+		}
+		prev = name
+	}
+}
+
+func TestPrintBenchstatLine_UsesWriter(t *testing.T) {
+	var out bytes.Buffer
+	r := runReport{
+		Query:  "q1",
+		Rows:   100,
+		Runs:   3,
+		Median: 0.5,
+		StdDev: 0.05,
+		Result: 1,
+		Env:    envReport{GOMAXPROCS: 8},
+	}
+	printBenchstatLine(&out, r)
+	got := out.String()
+	if !strings.Contains(got, "Benchmark_q1/rows=100-8") {
+		t.Fatalf("output missing benchmark name: %q", got)
+	}
+	if !strings.Contains(got, "500 us") {
+		t.Fatalf("output should render sub-ms as us, got %q", got)
 	}
 }
 

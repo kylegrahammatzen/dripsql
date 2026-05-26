@@ -1,16 +1,17 @@
-// Compare two bench -json outputs. Joins reports on query name, prints delta percent and Mann-Whitney p-value.
-// Verdict column reads as significant when p is below alpha (default 0.05) and the medians differ.
+// Compare two bench JSON outputs by median delta and flag when the move exceeds a threshold percent.
+// Use benchstat for distributional rigor, this is the quick "did the median move" check.
 package main
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 )
 
-func compareReports(basePath, headPath string, alpha float64, out io.Writer) error {
+func compareReports(basePath, headPath string, thresholdPct float64, out io.Writer) error {
 	base, err := loadReports(basePath)
 	if err != nil {
 		return fmt.Errorf("load base: %w", err)
@@ -20,33 +21,32 @@ func compareReports(basePath, headPath string, alpha float64, out io.Writer) err
 		return fmt.Errorf("load head: %w", err)
 	}
 	names := joinedQueryNames(base, head)
-	fmt.Fprintf(out, "%-22s %14s %14s %10s %10s %s\n", "query", "base (median)", "head (median)", "delta", "p-value", "verdict")
+	fmt.Fprintf(out, "%-22s %14s %14s %10s %s\n", "query", "base (median)", "head (median)", "delta", "verdict")
 	for _, name := range names {
 		b, bok := base[name]
 		h, hok := head[name]
 		if !bok {
-			fmt.Fprintf(out, "%-22s %14s %14s %10s %10s %s\n", name, "missing", formatMs(h.Median), "", "", "head-only")
+			fmt.Fprintf(out, "%-22s %14s %14s %10s %s\n", name, "missing", formatMs(h.Median), "", "head-only")
 			continue
 		}
 		if !hok {
-			fmt.Fprintf(out, "%-22s %14s %14s %10s %10s %s\n", name, formatMs(b.Median), "missing", "", "", "base-only")
+			fmt.Fprintf(out, "%-22s %14s %14s %10s %s\n", name, formatMs(b.Median), "missing", "", "base-only")
 			continue
 		}
 		delta := 0.0
 		if b.Median > 0 {
 			delta = 100 * (h.Median - b.Median) / b.Median
 		}
-		_, p := mannWhitneyU(b.Durations, h.Durations)
 		verdict := "~"
-		if p < alpha && b.Median != h.Median {
-			if h.Median > b.Median {
+		if math.Abs(delta) > thresholdPct {
+			if delta > 0 {
 				verdict = "regressed"
 			} else {
 				verdict = "improved"
 			}
 		}
-		fmt.Fprintf(out, "%-22s %14s %14s %+9.2f%% %10.4f %s\n",
-			name, formatMs(b.Median), formatMs(h.Median), delta, p, verdict)
+		fmt.Fprintf(out, "%-22s %14s %14s %+9.2f%% %s\n",
+			name, formatMs(b.Median), formatMs(h.Median), delta, verdict)
 	}
 	return nil
 }

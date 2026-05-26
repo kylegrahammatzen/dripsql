@@ -8,30 +8,31 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func writeUsersSegment(t *testing.T, dir string) *storage.Segment {
 	t.Helper()
-	v := types.NewVec(types.VecInt64, 10)
+	v := vector.NewVec(vector.VecInt64, 10)
 	for i := range v.I64() {
 		v.I64()[i] = int64(i)
 	}
-	name := types.NewVarVec(types.VecText, 10, 0)
+	name := vector.NewVarVec(vector.VecText, 10, 0)
 	for i := range 10 {
 		name.Var().AppendString(i, "user")
 	}
-	b, err := types.NewBatch([]types.Column{
-		{Name: "id", Type: types.Int64, V: v},
-		{Name: "name", Type: types.Text, V: name},
+	b, err := vector.NewBatch([]vector.Column{
+		{Name: "id", Type: schema.Int64, V: v},
+		{Name: "name", Type: schema.Text, V: name},
 	})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(dir, "users.dsv4")
-	if _, err := storage.WriteSegment(path, []types.Batch{b}, nil); err != nil {
+	if _, err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := storage.OpenSegment(path)
@@ -76,8 +77,8 @@ func usersDef(seg *storage.Segment) sql.BoundTableDef {
 	return sql.BoundTableDef{
 		Name: "users",
 		Columns: []sql.BoundColumnDef{
-			{ID: 1, Name: "id", Type: types.Int64},
-			{ID: 2, Name: "name", Type: types.Text},
+			{ID: 1, Name: "id", Type: schema.Int64},
+			{ID: 2, Name: "name", Type: schema.Text},
 		},
 	}
 }
@@ -240,9 +241,9 @@ func TestExec_AggregateSumMinMax(t *testing.T) {
 
 func writeSalesSegment(t *testing.T, dir string) *storage.Segment {
 	t.Helper()
-	id := types.NewVec(types.VecInt64, 6)
-	cat := types.NewVarVec(types.VecText, 6, 0)
-	price := types.NewVec(types.VecInt64, 6)
+	id := vector.NewVec(vector.VecInt64, 6)
+	cat := vector.NewVarVec(vector.VecText, 6, 0)
+	price := vector.NewVec(vector.VecInt64, 6)
 	cats := []string{"a", "b", "a", "b", "a", "c"}
 	prices := []int64{10, 20, 30, 40, 50, 60}
 	for i := range 6 {
@@ -250,16 +251,16 @@ func writeSalesSegment(t *testing.T, dir string) *storage.Segment {
 		cat.Var().AppendString(i, cats[i])
 		price.I64()[i] = prices[i]
 	}
-	b, err := types.NewBatch([]types.Column{
-		{Name: "id", Type: types.Int64, V: id},
-		{Name: "category", Type: types.Text, V: cat},
-		{Name: "price", Type: types.Int64, V: price},
+	b, err := vector.NewBatch([]vector.Column{
+		{Name: "id", Type: schema.Int64, V: id},
+		{Name: "category", Type: schema.Text, V: cat},
+		{Name: "price", Type: schema.Int64, V: price},
 	})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(dir, "sales.dsv4")
-	if _, err := storage.WriteSegment(path, []types.Batch{b}, nil); err != nil {
+	if _, err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := storage.OpenSegment(path)
@@ -273,9 +274,9 @@ func salesDef() sql.BoundTableDef {
 	return sql.BoundTableDef{
 		Name: "sales",
 		Columns: []sql.BoundColumnDef{
-			{ID: 1, Name: "id", Type: types.Int64},
-			{ID: 2, Name: "category", Type: types.Text},
-			{ID: 3, Name: "price", Type: types.Int64},
+			{ID: 1, Name: "id", Type: schema.Int64},
+			{ID: 2, Name: "category", Type: schema.Text},
+			{ID: 3, Name: "price", Type: schema.Int64},
 		},
 	}
 }
@@ -351,24 +352,24 @@ func TestExec_OrderByThenLimit(t *testing.T) {
 
 func writeWideGroupSegment(t *testing.T, dir string, groups int) *storage.Segment {
 	t.Helper()
-	if groups > types.StandardBatchRows {
+	if groups > vector.StandardBatchRows {
 		t.Fatalf("writeWideGroupSegment: cannot seed > StandardBatchRows in a single batch (got %d)", groups)
 	}
-	id := types.NewVec(types.VecInt64, groups)
-	tag := types.NewVarVec(types.VecText, groups, 0)
+	id := vector.NewVec(vector.VecInt64, groups)
+	tag := vector.NewVarVec(vector.VecText, groups, 0)
 	for i := range groups {
 		id.I64()[i] = int64(i)
 		tag.Var().AppendString(i, fmt.Sprintf("g%05d", i))
 	}
-	b, err := types.NewBatch([]types.Column{
-		{Name: "id", Type: types.Int64, V: id},
-		{Name: "tag", Type: types.Text, V: tag},
+	b, err := vector.NewBatch([]vector.Column{
+		{Name: "id", Type: schema.Int64, V: id},
+		{Name: "tag", Type: schema.Text, V: tag},
 	})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(dir, "wide.dsv4")
-	if _, err := storage.WriteSegment(path, []types.Batch{b}, nil); err != nil {
+	if _, err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := storage.OpenSegment(path)
@@ -382,8 +383,8 @@ func wideGroupDef() sql.BoundTableDef {
 	return sql.BoundTableDef{
 		Name: "wide",
 		Columns: []sql.BoundColumnDef{
-			{ID: 1, Name: "id", Type: types.Int64},
-			{ID: 2, Name: "tag", Type: types.Text},
+			{ID: 1, Name: "id", Type: schema.Int64},
+			{ID: 2, Name: "tag", Type: schema.Text},
 		},
 	}
 }
@@ -392,7 +393,7 @@ func TestExec_GroupBy_PaginatesAboveStandardBatchRows(t *testing.T) {
 	// Two segments of unique tags so the group count crosses StandardBatchRows
 	// without violating the per-batch input cap.
 	dir := t.TempDir()
-	seg1 := writeWideGroupSegment(t, dir, types.StandardBatchRows)
+	seg1 := writeWideGroupSegment(t, dir, vector.StandardBatchRows)
 	defer seg1.Close()
 	dir2 := t.TempDir()
 	seg2 := writeWideGroupSegment(t, dir2, 1000)
@@ -413,8 +414,8 @@ func TestExec_GroupBy_PaginatesAboveStandardBatchRows(t *testing.T) {
 	rows := runOperator(t, op)
 	// seg1 has 2048 unique tags (g00000..g02047), seg2 has 1000 unique tags (g00000..g00999).
 	// Overlap is the first 1000. Distinct group count = 2048.
-	if len(rows) != types.StandardBatchRows {
-		t.Fatalf("got %d groups, want %d", len(rows), types.StandardBatchRows)
+	if len(rows) != vector.StandardBatchRows {
+		t.Fatalf("got %d groups, want %d", len(rows), vector.StandardBatchRows)
 	}
 	overlap := 0
 	for _, r := range rows {

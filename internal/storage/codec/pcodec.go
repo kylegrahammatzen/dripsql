@@ -1,14 +1,15 @@
-// Pcodec: chunked FOR+BitPack for IsFORPackable kinds. Splits the page into
-// 1024-row chunks each with its own FOR base and bit-width, beating single-pass
-// FOR+BitPack on multimodal value distributions.
+﻿// Pcodec splits the page into 1024-row chunks each with its own FOR base and bit-width, beating single-pass FOR on multimodal data.
+// Accepts IsFORPackable ints plus float64 via bit-pattern reinterpretation so cascade can pick it when ALP and ALP-RD both ErrSkip.
 package codec
 
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"math/bits"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const (
@@ -23,10 +24,10 @@ func init() {
 	Register(pcodecCodec{})
 }
 
-func (pcodecCodec) Encoding() types.Encoding { return types.EncodingPcodec }
+func (pcodecCodec) Encoding() schema.Encoding { return schema.EncPcodec }
 
-func (c pcodecCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
-	if !v.Kind.IsFORPackable() {
+func (c pcodecCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
+	if !pcodecAccepts(v.Kind) {
 		return nil, ErrSkip
 	}
 	rows := int(v.Len)
@@ -35,7 +36,7 @@ func (c pcodecCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 	}
 	storageBits := int(v.Kind.FixedWidth()) * 8
 	residuals := ctxU64s(ctx, rows)
-	readFORValues(v, residuals)
+	readPcodecValues(v, residuals)
 	chunks := (rows + pcodecChunkRows - 1) / pcodecChunkRows
 	bases := make([]int64, chunks)
 	widths := make([]int, chunks)
@@ -79,12 +80,12 @@ func (c pcodecCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 	return scratch, nil
 }
 
-func (pcodecCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (pcodecCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("pcodec decode: %w", err)
 	}
-	if !kind.IsFORPackable() {
-		return fmt.Errorf("pcodec decode: kind %v not FOR-packable", kind)
+	if !pcodecAccepts(kind) {
+		return fmt.Errorf("pcodec decode: kind %v not accepted", kind)
 	}
 	if rows == 0 {
 		if len(payload) != 0 {
@@ -141,10 +142,35 @@ func (pcodecCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount in
 	}
 	dst.ResetForDecode(kind)
 	dst.EnsureFixedBytes(rows)
-	if err := writeFORValues(dst, residuals, 0); err != nil {
+	if err := writePcodecValues(dst, residuals); err != nil {
 		return fmt.Errorf("pcodec decode: %w", err)
 	}
 	return nil
+}
+
+func pcodecAccepts(k vector.VecKind) bool {
+	return k.IsFORPackable() || k == vector.VecFloat64
+}
+
+func readPcodecValues(v vector.Vec, dst []uint64) {
+	if v.Kind == vector.VecFloat64 {
+		for i, x := range v.F64() {
+			dst[i] = math.Float64bits(x)
+		}
+		return
+	}
+	readFORValues(v, dst)
+}
+
+func writePcodecValues(dst *vector.Vec, residuals []uint64) error {
+	if dst.Kind == vector.VecFloat64 {
+		out := dst.F64()
+		for i, r := range residuals {
+			out[i] = math.Float64frombits(r)
+		}
+		return nil
+	}
+	return writeFORValues(dst, residuals, 0)
 }
 
 func chunkParams(residuals []uint64, storageBits int) (base int64, width int) {

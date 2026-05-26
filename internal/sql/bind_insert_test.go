@@ -5,16 +5,16 @@ package sql
 import (
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 )
 
 func usersDef() BoundTableDef {
 	return BoundTableDef{
 		Name: "users",
 		Columns: []BoundColumnDef{
-			{ID: 1, Name: "id", Type: types.Int64, Nullable: false},
-			{ID: 2, Name: "name", Type: types.Text, Nullable: true},
-			{ID: 3, Name: "age", Type: types.Int32, Nullable: true},
+			{ID: 1, Name: "id", Type: schema.Int64, Nullable: false},
+			{ID: 2, Name: "name", Type: schema.Text, Nullable: true},
+			{ID: 3, Name: "age", Type: schema.Int32, Nullable: true},
 		},
 	}
 }
@@ -117,7 +117,7 @@ func TestBindInsert_EnumLabelValidation(t *testing.T) {
 	def := BoundTableDef{
 		Name: "events",
 		Columns: []BoundColumnDef{
-			{ID: 1, Name: "kind", Type: types.Named("event"), Labels: []string{"view", "click"}, Nullable: false},
+			{ID: 1, Name: "kind", Type: schema.Named("event"), Labels: []string{"view", "click"}, Nullable: false},
 		},
 	}
 	if _, err := bindInsert(t, "INSERT INTO events VALUES ('view')", def); err != nil {
@@ -132,9 +132,9 @@ func TestBindInsert_TemporalLiteralValidation(t *testing.T) {
 	def := BoundTableDef{
 		Name: "events",
 		Columns: []BoundColumnDef{
-			{ID: 1, Name: "id", Type: types.UUID},
-			{ID: 2, Name: "at", Type: types.Timestamp},
-			{ID: 3, Name: "day", Type: types.Date},
+			{ID: 1, Name: "id", Type: schema.UUID},
+			{ID: 2, Name: "at", Type: schema.Timestamp},
+			{ID: 3, Name: "day", Type: schema.Date},
 		},
 	}
 	if _, err := bindInsert(t, "INSERT INTO events VALUES ('11111111-2222-3333-4444-555555555555', '2026-05-14T12:00:00.000Z', '2026-05-14')", def); err != nil {

@@ -1,4 +1,4 @@
-// FSST varbytes codec. Single-round symbol-table training over the input, then
+﻿// FSST varbytes codec. Single-round symbol-table training over the input, then
 // greedy longest-prefix encoding with code 0xFF reserved as the escape byte.
 package codec
 
@@ -7,7 +7,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const (
@@ -23,9 +24,9 @@ func init() { Register(&fsstCodec{}) }
 
 type fsstCodec struct{}
 
-func (fsstCodec) Encoding() types.Encoding { return types.EncodingFSST }
+func (fsstCodec) Encoding() schema.Encoding { return schema.EncFSST }
 
-func (fsstCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+func (fsstCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !v.Kind.IsVarBytes() {
 		return nil, ErrSkip
 	}
@@ -89,7 +90,7 @@ func (fsstCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 	return out, nil
 }
 
-func (fsstCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (fsstCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("fsst decode: %w", err)
 	}
@@ -127,7 +128,7 @@ func (fsstCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int,
 		return fmt.Errorf("fsst decode: row mismatch wire=%d want=%d", encRows, rows)
 	}
 
-	*dst = types.NewVarVec(kind, rows, 0)
+	*dst = vector.NewVarVec(kind, rows, 0)
 	out := dst.Var()
 	row := make([]byte, 0, 64)
 	for i := range rows {
@@ -162,7 +163,7 @@ func (fsstCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int,
 		out.AppendBytes(i, row)
 		pos = end
 	}
-	dst.Enc = types.EncodingFlat
+	dst.Enc = schema.EncPlain
 	dst.Valid = nil
 	return nil
 }
@@ -181,7 +182,7 @@ func trainFSST(raw []byte) [][]byte {
 			break
 		}
 		end := len(sample) - L + 1
-		for i := 0; i < end; i++ {
+		for i := range end {
 			counts[string(sample[i:i+L])]++
 		}
 	}
@@ -224,7 +225,7 @@ func newFSSTCoder(symbols [][]byte) *fsstCoder {
 		head := s[0]
 		c.byHead[head] = append(c.byHead[head], uint8(i))
 	}
-	for b := 0; b < 256; b++ {
+	for b := range 256 {
 		ids := c.byHead[b]
 		sort.Slice(ids, func(i, j int) bool {
 			return len(symbols[ids[i]]) > len(symbols[ids[j]])
@@ -258,6 +259,43 @@ func (c *fsstCoder) encode(in []byte) []byte {
 		i++
 	}
 	return out
+}
+
+// ParseFSSTHeader extracts the symbol table and the offset of the encoded-rows section.
+// Callers use this to encode a comparison literal once before scanning row payloads.
+func ParseFSSTHeader(payload []byte) (symbols [][]byte, rowsOff int, rowCount int, err error) {
+	if len(payload) < fsstMagicLen+1 {
+		return nil, 0, 0, fmt.Errorf("fsst: header truncated")
+	}
+	if string(payload[:fsstMagicLen]) != string(fsstMagic) {
+		return nil, 0, 0, fmt.Errorf("fsst: bad magic")
+	}
+	pos := fsstMagicLen
+	nsyms := int(payload[pos])
+	pos++
+	symbols = make([][]byte, nsyms)
+	for i := range nsyms {
+		if pos+1 > len(payload) {
+			return nil, 0, 0, fmt.Errorf("fsst: symbol header truncated at %d", i)
+		}
+		sl := int(payload[pos])
+		pos++
+		if pos+sl > len(payload) {
+			return nil, 0, 0, fmt.Errorf("fsst: symbol %d body truncated", i)
+		}
+		symbols[i] = payload[pos : pos+sl]
+		pos += sl
+	}
+	if pos+4 > len(payload) {
+		return nil, 0, 0, fmt.Errorf("fsst: rows header truncated")
+	}
+	rowCount = int(binary.LittleEndian.Uint32(payload[pos : pos+4]))
+	return symbols, pos + 4, rowCount, nil
+}
+
+// EncodeFSSTLiteral encodes literal against the page symbol table; result aliases the coder buffer.
+func EncodeFSSTLiteral(symbols [][]byte, literal []byte) []byte {
+	return newFSSTCoder(symbols).encode(literal)
 }
 
 func bytesEqual(a, b []byte) bool {

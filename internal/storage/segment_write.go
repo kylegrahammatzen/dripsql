@@ -1,4 +1,4 @@
-// WriteSegment serializes pages column-major as one Batch per page.
+﻿// WriteSegment serializes pages column-major as one Batch per page.
 // Atomic via tmp file, fsync, rename, and a parent-directory fsync on POSIX.
 package storage
 
@@ -10,8 +10,9 @@ import (
 	"path/filepath"
 	"slices"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const segmentWriteBufferSize = 1 << 16
@@ -25,8 +26,8 @@ const (
 const maxSegmentRows = 1<<32 - 1
 
 type writerColumn struct {
-	Schema    types.Column
-	Kind      types.VecKind
+	Schema    vector.Column
+	Kind      vector.VecKind
 	Pages     []Page
 	Rows      uint32
 	NullCount uint32
@@ -36,9 +37,9 @@ type writerColumn struct {
 }
 
 // codecs may be nil to use the cascade. A non-nil entry per column overrides
-// EncodingAuto and bypasses Pick. The span is always returned, even on error,
+// EncInvalid and bypasses Pick. The span is always returned, even on error,
 // so partial timings remain visible.
-func WriteSegment(path string, pages []types.Batch, codecs map[string]types.Encoding) (*Span, error) {
+func WriteSegment(path string, pages []vector.Batch, codecs map[string]schema.Encoding) (*Span, error) {
 	root := NewSpan("write")
 	defer root.End()
 
@@ -132,7 +133,7 @@ func materializeSidecarBytes(root *Span, cols []writerColumn, sinks []*colSink) 
 	return EncodeSidecarContainer(sections)
 }
 
-func writeSegmentBody(path string, pages []types.Batch, cols []writerColumn, codecs map[string]types.Encoding, sinks []*colSink, root *Span) error {
+func writeSegmentBody(path string, pages []vector.Batch, cols []writerColumn, codecs map[string]schema.Encoding, sinks []*colSink, root *Span) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -146,7 +147,7 @@ func writeSegmentBody(path string, pages []types.Batch, cols []writerColumn, cod
 	return finishSegmentFile(f, bw)
 }
 
-func writeSegmentStream(bw *bufio.Writer, pages []types.Batch, cols []writerColumn, codecs map[string]types.Encoding, sinks []*colSink, root *Span) error {
+func writeSegmentStream(bw *bufio.Writer, pages []vector.Batch, cols []writerColumn, codecs map[string]schema.Encoding, sinks []*colSink, root *Span) error {
 	if _, err := bw.Write([]byte(Magic)); err != nil {
 		return err
 	}
@@ -199,7 +200,7 @@ func finishSegmentFile(f *os.File, bw *bufio.Writer) error {
 	return err
 }
 
-func prepareWriterColumns(pages []types.Batch) ([]writerColumn, error) {
+func prepareWriterColumns(pages []vector.Batch) ([]writerColumn, error) {
 	if len(pages) == 0 {
 		return nil, fmt.Errorf("WriteSegment: at least one page required")
 	}
@@ -209,12 +210,12 @@ func prepareWriterColumns(pages []types.Batch) ([]writerColumn, error) {
 	}
 	cols := make([]writerColumn, len(first.Columns))
 	for i, col := range first.Columns {
-		k, err := types.VecKindOf(col.Type)
+		k, err := vector.VecKindOf(col.Type)
 		if err != nil {
 			return nil, fmt.Errorf("WriteSegment: col %q: %w", col.Name, err)
 		}
 		cols[i] = writerColumn{
-			Schema: types.Column{Name: col.Name, Type: col.Type, EnumLabels: slices.Clone(col.EnumLabels)},
+			Schema: vector.Column{Name: col.Name, Type: col.Type, EnumLabels: slices.Clone(col.EnumLabels)},
 			Kind:   k,
 		}
 	}
@@ -269,9 +270,9 @@ func prepareWriterColumns(pages []types.Batch) ([]writerColumn, error) {
 	return cols, nil
 }
 
-func marshalPageStats(k types.VecKind, v types.Vec, dst []byte) {
+func marshalPageStats(k vector.VecKind, v vector.Vec, dst []byte) {
 	switch k {
-	case types.VecInt16:
+	case vector.VecInt16:
 		var s NumericStats[int32]
 		for i, x := range v.I16() {
 			if isValidRow(v, i) {
@@ -279,7 +280,7 @@ func marshalPageStats(k types.VecKind, v types.Vec, dst []byte) {
 			}
 		}
 		s.MarshalWire(dst)
-	case types.VecInt32, types.VecDate:
+	case vector.VecInt32, vector.VecDate:
 		var s NumericStats[int32]
 		for i, x := range v.I32() {
 			if isValidRow(v, i) {
@@ -287,7 +288,7 @@ func marshalPageStats(k types.VecKind, v types.Vec, dst []byte) {
 			}
 		}
 		s.MarshalWire(dst)
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		var s NumericStats[int64]
 		for i, x := range v.I64() {
 			if isValidRow(v, i) {
@@ -300,7 +301,7 @@ func marshalPageStats(k types.VecKind, v types.Vec, dst []byte) {
 	}
 }
 
-func totalNullCount(pages []types.Batch, ci int) uint32 {
+func totalNullCount(pages []vector.Batch, ci int) uint32 {
 	var n uint32
 	for _, page := range pages {
 		v := page.Columns[ci].V
@@ -312,33 +313,33 @@ func totalNullCount(pages []types.Batch, ci int) uint32 {
 	return n
 }
 
-func isValidRow(v types.Vec, row int) bool {
+func isValidRow(v vector.Vec, row int) bool {
 	if v.Valid == nil {
 		return true
 	}
 	return v.Valid.IsValid(row)
 }
 
-func marshalColumnStats(k types.VecKind, pages []types.Batch, colIdx int, dst []byte) {
+func marshalColumnStats(k vector.VecKind, pages []vector.Batch, colIdx int, dst []byte) {
 	switch k {
-	case types.VecInt16, types.VecInt32, types.VecDate, types.VecEnum32:
+	case vector.VecInt16, vector.VecInt32, vector.VecDate, vector.VecEnum32:
 		var stats NumericStats[int32]
 		for _, page := range pages {
 			v := page.Columns[colIdx].V
 			switch k {
-			case types.VecInt16:
+			case vector.VecInt16:
 				for i, x := range v.I16() {
 					if isValidRow(v, i) {
 						stats.Update(int32(x))
 					}
 				}
-			case types.VecInt32, types.VecDate:
+			case vector.VecInt32, vector.VecDate:
 				for i, x := range v.I32() {
 					if isValidRow(v, i) {
 						stats.Update(x)
 					}
 				}
-			case types.VecEnum32:
+			case vector.VecEnum32:
 				for i, x := range v.U32() {
 					if isValidRow(v, i) {
 						stats.Update(int32(x))
@@ -347,7 +348,7 @@ func marshalColumnStats(k types.VecKind, pages []types.Batch, colIdx int, dst []
 			}
 		}
 		stats.MarshalWire(dst)
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		var stats NumericStats[int64]
 		for _, page := range pages {
 			v := page.Columns[colIdx].V
@@ -358,11 +359,11 @@ func marshalColumnStats(k types.VecKind, pages []types.Batch, colIdx int, dst []
 			}
 		}
 		stats.MarshalWire(dst)
-	case types.VecFloat32, types.VecFloat64:
+	case vector.VecFloat32, vector.VecFloat64:
 		var stats FloatStats
 		for _, page := range pages {
 			v := page.Columns[colIdx].V
-			if k == types.VecFloat32 {
+			if k == vector.VecFloat32 {
 				for i, x := range v.F32() {
 					if isValidRow(v, i) {
 						stats.Update(float64(x))
@@ -377,7 +378,7 @@ func marshalColumnStats(k types.VecKind, pages []types.Batch, colIdx int, dst []
 			}
 		}
 		stats.MarshalWire(dst)
-	case types.VecBool:
+	case vector.VecBool:
 		var stats BoolStats
 		for _, page := range pages {
 			v := page.Columns[colIdx].V
@@ -394,7 +395,7 @@ func marshalColumnStats(k types.VecKind, pages []types.Batch, colIdx int, dst []
 			}
 		}
 		stats.MarshalWire(dst)
-	case types.VecText, types.VecBytes, types.VecJSON:
+	case vector.VecText, vector.VecBytes, vector.VecJSON:
 		var stats VarBytesStats
 		for _, page := range pages {
 			v := page.Columns[colIdx].V
@@ -411,14 +412,14 @@ func marshalColumnStats(k types.VecKind, pages []types.Batch, colIdx int, dst []
 	}
 }
 
-func writePayloads(w io.Writer, pages []types.Batch, cols []writerColumn, codecs map[string]types.Encoding, sinks []*colSink) error {
+func writePayloads(w io.Writer, pages []vector.Batch, cols []writerColumn, codecs map[string]schema.Encoding, sinks []*colSink) error {
 	bodyOff := uint64(MagicLen)
 	var facts codec.PageFacts
 	ctx := &codec.EncodeContext{Scratch: codec.NewScratchPool(), Facts: &facts}
 	for ci := range cols {
-		override := types.EncodingAuto
+		override := schema.EncInvalid
 		if codecs != nil {
-			override = codecs[types.NormalizeName(cols[ci].Schema.Name)]
+			override = codecs[schema.NormalizeName(cols[ci].Schema.Name)]
 		}
 		var rowStart uint32
 		for pageIdx, batch := range pages {
@@ -441,18 +442,18 @@ func writePayloads(w io.Writer, pages []types.Batch, cols []writerColumn, codecs
 			case pageRows > 0 && pageNulls == pageRows:
 				// All-null page. No codec payload; encoding marked Flat.
 				page.PayloadLength = 0
-				page.Encoding = types.EncodingFlat.Wire()
+				page.Encoding = schema.EncPlain.Wire()
 				page.Flags = PageFlagAllNull
 			case pageNulls == 0:
 				// All-valid: cascade chooser by default, user override when set.
 				analyzePage(col.V, &facts, sinks[ci], pageIdx)
 				marshalPageStatsFromFacts(col.V.Kind, &facts, col.V, cols[ci].PageStats[pageIdx][:])
 				var (
-					enc     types.Encoding
+					enc     schema.Encoding
 					payload []byte
 					err     error
 				)
-				if override != types.EncodingAuto {
+				if override != schema.EncInvalid {
 					c, lookupErr := codec.Lookup(override)
 					if lookupErr != nil {
 						return fmt.Errorf("WriteSegment: col %q codec override %v: %w", col.Name, override, lookupErr)
@@ -479,9 +480,9 @@ func writePayloads(w io.Writer, pages []types.Batch, cols []writerColumn, codecs
 				// Mixed page layout is <validity bytes><plain payload>.
 				// Plain ignores null slot values. Reader strips validity
 				// before handing the inner payload to the codec.
-				validityBytes := make([]byte, types.ValidityWords(int(col.V.Len))*8)
+				validityBytes := make([]byte, vector.ValidityWords(int(col.V.Len))*8)
 				col.V.Valid.MarshalLE(validityBytes)
-				plain, err := codec.Lookup(types.EncodingFlat)
+				plain, err := codec.Lookup(schema.EncPlain)
 				if err != nil {
 					return err
 				}
@@ -496,7 +497,7 @@ func writePayloads(w io.Writer, pages []types.Batch, cols []writerColumn, codecs
 					return err
 				}
 				page.PayloadLength = uint64(len(validityBytes) + len(inner))
-				page.Encoding = types.EncodingFlat.Wire()
+				page.Encoding = schema.EncPlain.Wire()
 				page.Flags = 0
 				bodyOff += uint64(len(validityBytes) + len(inner))
 				ctx.Scratch.SaveTrial(inner)

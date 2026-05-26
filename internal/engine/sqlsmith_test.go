@@ -28,7 +28,7 @@ func TestSQLSmith_RandomQueriesSurviveExec(t *testing.T) {
 	r := rand.New(rand.NewPCG(7, 11))
 	ctx := context.Background()
 	bad := 0
-	for i := 0; i < iters; i++ {
+	for i := range iters {
 		q := smithSelect(s, r, 0)
 		func() {
 			defer func() {

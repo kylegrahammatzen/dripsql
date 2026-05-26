@@ -1,4 +1,4 @@
-// User-declared codec end-to-end: CREATE TABLE with WITH (codec=...) per column should
+﻿// User-declared codec end-to-end: CREATE TABLE with WITH (codec=...) per column should
 // force that codec on write. Reading the segment back through the engine round-trips
 // values regardless of the override.
 package engine
@@ -7,8 +7,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
 )
 
 func TestEngine_UserCodec_PlainForcedOnDictionaryFriendlyColumn(t *testing.T) {
@@ -52,12 +52,12 @@ func TestEngine_UserCodec_PlainForcedOnDictionaryFriendlyColumn(t *testing.T) {
 		t.Fatal("label column not in segment")
 	}
 	page := seg.Cols[labelCol].Pages[0]
-	got, ok := types.EncodingFromWire(page.Encoding)
-	if !ok {
+	got := schema.Encoding(page.Encoding)
+	if !got.Valid() {
 		t.Fatalf("page encoding %d unknown", page.Encoding)
 	}
-	if got != types.EncodingFlat {
-		t.Fatalf("label codec = %v, want EncodingFlat (plain)", got)
+	if got != schema.EncPlain {
+		t.Fatalf("label codec = %v, want EncPlain (plain)", got)
 	}
 	_ = storage.MagicLen
 }

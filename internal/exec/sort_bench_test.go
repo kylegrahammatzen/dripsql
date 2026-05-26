@@ -7,27 +7,28 @@ import (
 	"math/rand"
 	"testing"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func buildSortSource(rows int, seed int64) *bufferSource {
 	r := rand.New(rand.NewSource(seed))
-	const batchSize = types.StandardBatchRows
-	var batches []types.Batch
+	const batchSize = vector.StandardBatchRows
+	var batches []vector.Batch
 	for off := 0; off < rows; off += batchSize {
 		n := batchSize
 		if off+n > rows {
 			n = rows - off
 		}
-		v := types.NewVec(types.VecInt64, n)
+		v := vector.NewVec(vector.VecInt64, n)
 		s := v.I64()
 		for i := range s {
 			s[i] = r.Int63()
 		}
-		col := types.Column{Name: "k", Type: types.Int64, V: v}
-		b, _ := types.NewBatch([]types.Column{col})
-		sel := types.NewSelectionMask(n)
+		col := vector.Column{Name: "k", Type: schema.Int64, V: v}
+		b, _ := vector.NewBatch([]vector.Column{col})
+		sel := vector.NewSelectionMask(n)
 		sel.FillAll()
 		b.Sel = &sel
 		batches = append(batches, b)
@@ -36,15 +37,15 @@ func buildSortSource(rows int, seed int64) *bufferSource {
 }
 
 type bufferSource struct {
-	batches []types.Batch
+	batches []vector.Batch
 	cursor  int
 	state   operatorState
 }
 
 func (b *bufferSource) Open(ctx context.Context) error { return b.state.open() }
-func (b *bufferSource) Next() (types.Batch, bool, error) {
+func (b *bufferSource) Next() (vector.Batch, bool, error) {
 	if b.cursor >= len(b.batches) {
-		return types.Batch{}, false, nil
+		return vector.Batch{}, false, nil
 	}
 	out := b.batches[b.cursor]
 	b.cursor++
@@ -85,7 +86,7 @@ func runSort(b *testing.B, op *SortOp) {
 }
 
 func keyExpr() sql.BoundExpr {
-	return sql.BoundExpr{Op: sql.ExprColumn, Type: types.Int64, Column: "k"}
+	return sql.BoundExpr{Op: sql.ExprColumn, Type: schema.Int64, Column: "k"}
 }
 
 func BenchmarkSort_FullAsc_Int64_10k(b *testing.B) {
@@ -128,17 +129,17 @@ func BenchmarkSort_TopK_Int64_100k_K100_Off50(b *testing.B) {
 
 func buildSortSourceWithNulls(rows int, seed int64, nullEvery int) *bufferSource {
 	r := rand.New(rand.NewSource(seed))
-	const batchSize = types.StandardBatchRows
-	var batches []types.Batch
+	const batchSize = vector.StandardBatchRows
+	var batches []vector.Batch
 	idx := 0
 	for off := 0; off < rows; off += batchSize {
 		n := batchSize
 		if off+n > rows {
 			n = rows - off
 		}
-		v := types.NewVec(types.VecInt64, n)
+		v := vector.NewVec(vector.VecInt64, n)
 		s := v.I64()
-		valid := types.NewAllValid(n)
+		valid := vector.NewAllValid(n)
 		for i := range s {
 			if idx%nullEvery == 0 {
 				valid.SetInvalid(i)
@@ -148,9 +149,9 @@ func buildSortSourceWithNulls(rows int, seed int64, nullEvery int) *bufferSource
 			idx++
 		}
 		v.Valid = valid
-		col := types.Column{Name: "k", Type: types.Int64, V: v}
-		b, _ := types.NewBatch([]types.Column{col})
-		sel := types.NewSelectionMask(n)
+		col := vector.Column{Name: "k", Type: schema.Int64, V: v}
+		b, _ := vector.NewBatch([]vector.Column{col})
+		sel := vector.NewSelectionMask(n)
 		sel.FillAll()
 		b.Sel = &sel
 		batches = append(batches, b)
@@ -169,20 +170,20 @@ func BenchmarkSort_TopK_Int64_100k_K100_NullsEvery10(b *testing.B) {
 
 func buildSortSourceText(rows int, seed int64) *bufferSource {
 	r := rand.New(rand.NewSource(seed))
-	const batchSize = types.StandardBatchRows
-	var batches []types.Batch
+	const batchSize = vector.StandardBatchRows
+	var batches []vector.Batch
 	for off := 0; off < rows; off += batchSize {
 		n := batchSize
 		if off+n > rows {
 			n = rows - off
 		}
-		v := types.NewVarVec(types.VecText, n, 0)
+		v := vector.NewVarVec(vector.VecText, n, 0)
 		for i := range n {
 			v.Var().AppendString(i, randText(r))
 		}
-		col := types.Column{Name: "s", Type: types.Text, V: v}
-		b, _ := types.NewBatch([]types.Column{col})
-		sel := types.NewSelectionMask(n)
+		col := vector.Column{Name: "s", Type: schema.Text, V: v}
+		b, _ := vector.NewBatch([]vector.Column{col})
+		sel := vector.NewSelectionMask(n)
 		sel.FillAll()
 		b.Sel = &sel
 		batches = append(batches, b)
@@ -203,7 +204,7 @@ func randText(r *rand.Rand) string {
 func BenchmarkSort_FullAsc_Text_10k(b *testing.B) {
 	op := &SortOp{
 		Source: buildSortSourceText(10_000, 1),
-		Keys:   []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: types.Text, Column: "s"}}},
+		Keys:   []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: schema.Text, Column: "s"}}},
 	}
 	runSort(b, op)
 }

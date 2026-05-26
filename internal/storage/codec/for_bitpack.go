@@ -1,4 +1,4 @@
-// FOR + bitpack codec for FOR-packable kinds (Int16/32/64, Date, Timestamp, Time, Decimal64, Enum32).
+﻿// FOR + bitpack codec for FOR-packable kinds (Int16/32/64, Date, Timestamp, Time, Decimal64, Enum32).
 // Wire [u64 LE base][u8 width][bitpack payload]. Residuals = (val - base) bit-packed via FastLanes core.
 package codec
 
@@ -8,7 +8,8 @@ import (
 	"math"
 	"math/bits"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const forHeaderSize = 9
@@ -19,9 +20,9 @@ func init() {
 	Register(forBitpackCodec{})
 }
 
-func (forBitpackCodec) Encoding() types.Encoding { return types.EncodingFORBitPack }
+func (forBitpackCodec) Encoding() schema.Encoding { return schema.EncFOR }
 
-func (c forBitpackCodec) forFits(v types.Vec, ctx *EncodeContext) (base int64, width int, ok bool) {
+func (c forBitpackCodec) forFits(v vector.Vec, ctx *EncodeContext) (base int64, width int, ok bool) {
 	if !v.Kind.IsFORPackable() {
 		return 0, 0, false
 	}
@@ -51,7 +52,7 @@ func (c forBitpackCodec) forFits(v types.Vec, ctx *EncodeContext) (base int64, w
 	return base, width, true
 }
 
-func (c forBitpackCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
+func (c forBitpackCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	base, width, ok := c.forFits(v, ctx)
 	if !ok {
 		return nil, ErrSkip
@@ -75,7 +76,7 @@ func (c forBitpackCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error)
 	return scratch, nil
 }
 
-func (forBitpackCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (forBitpackCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("for+bitpack decode: %w", err)
 	}
@@ -112,7 +113,7 @@ func (forBitpackCodec) Decode(payload []byte, kind types.VecKind, rows, nullCoun
 	return nil
 }
 
-func forParams(v types.Vec) (base int64, width int, ok bool) {
+func forParams(v vector.Vec) (base int64, width int, ok bool) {
 	rows := int(v.Len)
 	tmp := make([]uint64, rows)
 	readFORValues(v, tmp)
@@ -138,7 +139,7 @@ func forParams(v types.Vec) (base int64, width int, ok bool) {
 	return minVal, w, true
 }
 
-func readFORValues(v types.Vec, dst []uint64) {
+func readFORValues(v vector.Vec, dst []uint64) {
 	switch v.Kind.FixedWidth() {
 	case 2:
 		for i, x := range v.I16() {
@@ -146,11 +147,11 @@ func readFORValues(v types.Vec, dst []uint64) {
 		}
 	case 4:
 		switch v.Kind {
-		case types.VecInt32, types.VecDate:
+		case vector.VecInt32, vector.VecDate:
 			for i, x := range v.I32() {
 				dst[i] = uint64(int64(x))
 			}
-		case types.VecEnum32:
+		case vector.VecEnum32:
 			for i, x := range v.U32() {
 				dst[i] = uint64(x)
 			}
@@ -162,7 +163,7 @@ func readFORValues(v types.Vec, dst []uint64) {
 	}
 }
 
-func writeFORValues(dst *types.Vec, residuals []uint64, base int64) error {
+func writeFORValues(dst *vector.Vec, residuals []uint64, base int64) error {
 	switch dst.Kind.FixedWidth() {
 	case 2:
 		out := dst.I16()
@@ -175,7 +176,7 @@ func writeFORValues(dst *types.Vec, residuals []uint64, base int64) error {
 		}
 	case 4:
 		switch dst.Kind {
-		case types.VecInt32, types.VecDate:
+		case vector.VecInt32, vector.VecDate:
 			out := dst.I32()
 			for i, r := range residuals {
 				val := base + int64(r)
@@ -184,7 +185,7 @@ func writeFORValues(dst *types.Vec, residuals []uint64, base int64) error {
 				}
 				out[i] = int32(val)
 			}
-		case types.VecEnum32:
+		case vector.VecEnum32:
 			out := dst.U32()
 			for i, r := range residuals {
 				val := base + int64(r)

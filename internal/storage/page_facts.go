@@ -6,7 +6,7 @@ import (
 	"math/bits"
 
 	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 // One per column, allocated for the lifetime of a WriteSegment call.
@@ -32,7 +32,7 @@ type colSink struct {
 // id-like column (one new key per row) avoids the O(log n) growth churn.
 // Capped at 1024 because monotonically distinct columns can be huge and the
 // hint is just an opener; the map still grows as needed beyond it.
-func newColSink(kind types.VecKind, rowsHint int) *colSink {
+func newColSink(kind vector.VecKind, rowsHint int) *colSink {
 	s := &colSink{}
 	if kindEligibleForIntFilter(kind) {
 		hint := rowsHint
@@ -51,7 +51,7 @@ func newColSink(kind types.VecKind, rowsHint int) *colSink {
 	return s
 }
 
-func analyzePage(v types.Vec, facts *codec.PageFacts, sink *colSink, pageIdx int) {
+func analyzePage(v vector.Vec, facts *codec.PageFacts, sink *colSink, pageIdx int) {
 	facts.Rows = int(v.Len)
 	facts.Kind = v.Kind
 	facts.Int = nil
@@ -71,7 +71,7 @@ func analyzePage(v types.Vec, facts *codec.PageFacts, sink *colSink, pageIdx int
 	}
 }
 
-func analyzeIntPage(v types.Vec, facts *codec.PageFacts, sink *colSink) {
+func analyzeIntPage(v vector.Vec, facts *codec.PageFacts, sink *colSink) {
 	rows := facts.Rows
 	valid := v.Valid
 
@@ -206,9 +206,9 @@ func analyzeIntPage(v types.Vec, facts *codec.PageFacts, sink *colSink) {
 
 // Writes col stats from sink data for kinds the analyzer summarizes.
 // Returns false when the sink does not cover the kind; caller falls back to scan.
-func marshalColumnStatsFromSink(kind types.VecKind, sink *colSink, dst []byte) bool {
+func marshalColumnStatsFromSink(kind vector.VecKind, sink *colSink, dst []byte) bool {
 	switch kind {
-	case types.VecInt16:
+	case vector.VecInt16:
 		s := NumericStats[int32]{HasNonNull: sink.intRangeSeen}
 		if sink.intRangeSeen {
 			s.Min = int32(sink.intMin)
@@ -216,7 +216,7 @@ func marshalColumnStatsFromSink(kind types.VecKind, sink *colSink, dst []byte) b
 		}
 		s.MarshalWire(dst)
 		return true
-	case types.VecInt32, types.VecDate:
+	case vector.VecInt32, vector.VecDate:
 		s := NumericStats[int32]{HasNonNull: sink.intRangeSeen}
 		if sink.intRangeSeen {
 			s.Min = int32(sink.intMin)
@@ -224,11 +224,11 @@ func marshalColumnStatsFromSink(kind types.VecKind, sink *colSink, dst []byte) b
 		}
 		s.MarshalWire(dst)
 		return true
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		s := NumericStats[int64]{HasNonNull: sink.intRangeSeen, Min: sink.intMin, Max: sink.intMax}
 		s.MarshalWire(dst)
 		return true
-	case types.VecText, types.VecBytes, types.VecJSON:
+	case vector.VecText, vector.VecBytes, vector.VecJSON:
 		s := VarBytesStats{HasNonNull: sink.varAny, MinLen: sink.varMinLen, MaxLen: sink.varMaxLen, TotalBytes: sink.varTotal}
 		s.MarshalWire(dst)
 		return true
@@ -238,16 +238,16 @@ func marshalColumnStatsFromSink(kind types.VecKind, sink *colSink, dst []byte) b
 
 // Fast path for the all-valid int case. Falls back to a row scan for kinds
 // that analyzePage does not summarize.
-func marshalPageStatsFromFacts(kind types.VecKind, facts *codec.PageFacts, v types.Vec, dst []byte) {
+func marshalPageStatsFromFacts(kind vector.VecKind, facts *codec.PageFacts, v vector.Vec, dst []byte) {
 	if facts.Int == nil {
 		marshalPageStats(kind, v, dst)
 		return
 	}
 	switch kind {
-	case types.VecInt16, types.VecInt32, types.VecDate:
+	case vector.VecInt16, vector.VecInt32, vector.VecDate:
 		s := NumericStats[int32]{Min: int32(facts.Int.Min), Max: int32(facts.Int.Max), HasNonNull: true}
 		s.MarshalWire(dst)
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		s := NumericStats[int64]{Min: facts.Int.Min, Max: facts.Int.Max, HasNonNull: true}
 		s.MarshalWire(dst)
 	default:
@@ -255,7 +255,7 @@ func marshalPageStatsFromFacts(kind types.VecKind, facts *codec.PageFacts, v typ
 	}
 }
 
-func analyzeVarBytesPage(v types.Vec, facts *codec.PageFacts, sink *colSink, pageIdx int) {
+func analyzeVarBytesPage(v vector.Vec, facts *codec.PageFacts, sink *colSink, pageIdx int) {
 	rows := facts.Rows
 	valid := v.Valid
 	vb := v.Var()

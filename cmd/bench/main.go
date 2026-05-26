@@ -1,5 +1,5 @@
-// Bench harness MVP. Loads a synthetic dataset, runs a query N times, prints a benchstat-style line.
-// Subcommands: bench (default run), bench list, bench compare base.json head.json.
+// Bench harness that loads a synthetic dataset and runs a query N times printing a benchstat-style line.
+// Subcommand list enumerates the catalog and compare diffs two JSON outputs.
 package main
 
 import (
@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"runtime"
@@ -16,7 +17,7 @@ import (
 
 	"github.com/kylegrahammatzen/dripsql/internal/engine"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const benchDir = "./bench-db"
@@ -74,31 +75,31 @@ func runBench(args []string) {
 	runs := fs.Int("runs", 10, "number of timed query runs")
 	jsonOut := fs.Bool("json", false, "emit JSON summary on stdout instead of a benchstat-style line")
 	cpuProfile := fs.String("cpuprofile", "", "write a CPU profile to this path (captures the timed runs only)")
-	mode := fs.String("mode", "hot", "hot | cold-soft (close+reopen DB between runs) | cold-hard (also flushes OS page cache; needs root/admin)")
+	mode := fs.String("mode", "hot", "hot or cold-soft, cold-soft closes and reopens the DB between runs")
 	fs.Parse(args)
 
 	q, ok := queries[*queryName]
 	if !ok {
-		fmt.Fprintf(os.Stderr, "bench: unknown query %q. Use `bench list` to see options.\n", *queryName)
+		fmt.Fprintf(os.Stderr, "bench: unknown query %q, use `bench list` to see options\n", *queryName)
 		os.Exit(2)
 	}
 	ds, ok := datasets[q.dataset]
 	if !ok {
-		fmt.Fprintf(os.Stderr, "bench: query %q references unknown dataset %q.\n", q.name, q.dataset)
+		fmt.Fprintf(os.Stderr, "bench: query %q references unknown dataset %q\n", q.name, q.dataset)
 		os.Exit(2)
 	}
 	if *runs < 1 {
 		fmt.Fprintln(os.Stderr, "bench: -runs must be at least 1")
 		os.Exit(2)
 	}
-	if *mode != "hot" && *mode != "cold-soft" && *mode != "cold-hard" {
-		fmt.Fprintf(os.Stderr, "bench: -mode must be 'hot', 'cold-soft', or 'cold-hard' (got %q)\n", *mode)
+	if *mode != "hot" && *mode != "cold-soft" {
+		fmt.Fprintf(os.Stderr, "bench: -mode must be 'hot' or 'cold-soft' (got %q)\n", *mode)
 		os.Exit(2)
 	}
 
 	segmentRows := *rows
-	if segmentRows > types.StandardBatchRows {
-		segmentRows = types.StandardBatchRows
+	if segmentRows > vector.StandardBatchRows {
+		segmentRows = vector.StandardBatchRows
 	}
 	if segmentRows < 1 {
 		segmentRows = 1
@@ -155,21 +156,15 @@ func runBench(args []string) {
 			pf.Close()
 		}()
 	}
-	for i := 0; i < *runs; i++ {
-		if *mode == "cold-soft" || *mode == "cold-hard" {
+	for i := range *runs {
+		if *mode == "cold-soft" {
 			if err := db.Close(); err != nil {
-				fmt.Fprintln(os.Stderr, "bench: close between runs:", err)
+				fmt.Fprintln(os.Stderr, "bench: close between runs", err)
 				os.Exit(1)
-			}
-			if *mode == "cold-hard" {
-				if err := flushOSPageCache(); err != nil {
-					fmt.Fprintln(os.Stderr, "bench: flush page cache:", err)
-					os.Exit(1)
-				}
 			}
 			db, err = engine.Open(benchDir)
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "bench: reopen between runs:", err)
+				fmt.Fprintln(os.Stderr, "bench: reopen between runs", err)
 				os.Exit(1)
 			}
 		}
@@ -183,22 +178,29 @@ func runBench(args []string) {
 		}
 		durations = append(durations, elapsed)
 		lastRows = len(result.Values)
+		if i == 0 && *mode == "cold-soft" {
+			storage.ResetTimings()
+		}
 	}
 	db.Close()
 
 	statRuns := durations
 	var coldMs float64
-	if (*mode == "cold-soft" || *mode == "cold-hard") && len(durations) > 1 {
+	if *mode == "cold-soft" && len(durations) > 1 {
 		coldMs = float64(durations[0].Microseconds()) / 1000.0
 		statRuns = durations[1:]
+	}
+	denom := len(statRuns)
+	if denom < 1 {
+		denom = 1
 	}
 	ioNs, decodeNs := storage.ReadTimings()
 	rep := summarize(q.name, ds.name, *rows, segmentRows, durations, statRuns, lastRows)
 	rep.Mode = *mode
 	rep.WallSetup = setup
 	rep.Cold = coldMs
-	rep.IOReadMs = float64(ioNs) / 1e6 / float64(*runs)
-	rep.DecodeMs = float64(decodeNs) / 1e6 / float64(*runs)
+	rep.IOReadMs = float64(ioNs) / 1e6 / float64(denom)
+	rep.DecodeMs = float64(decodeNs) / 1e6 / float64(denom)
 	rep.ExecMs = rep.Median - rep.IOReadMs - rep.DecodeMs
 	if rep.ExecMs < 0 {
 		rep.ExecMs = 0
@@ -216,15 +218,15 @@ func runBench(args []string) {
 
 func runCompare(args []string) {
 	fs := flag.NewFlagSet("compare", flag.ExitOnError)
-	alpha := fs.Float64("alpha", 0.05, "significance threshold for Mann-Whitney U")
+	threshold := fs.Float64("threshold", 10.0, "absolute median-delta percent that flips the verdict away from ~")
 	fs.Parse(args)
 	rest := fs.Args()
 	if len(rest) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: bench compare base.json head.json [-alpha 0.05]")
+		fmt.Fprintln(os.Stderr, "usage: bench compare base.json head.json [-threshold 10.0]")
 		os.Exit(2)
 	}
-	if err := compareReports(rest[0], rest[1], *alpha, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "bench: compare:", err)
+	if err := compareReports(rest[0], rest[1], *threshold, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "bench: compare", err)
 		os.Exit(1)
 	}
 }
@@ -302,7 +304,7 @@ func collectEnv() envReport {
 	}
 }
 
-func printBenchstatLine(w *os.File, r runReport) {
+func printBenchstatLine(w io.Writer, r runReport) {
 	pct := 0.0
 	if r.Median > 0 {
 		pct = 100 * r.StdDev / r.Median
@@ -323,13 +325,23 @@ func formatMs(ms float64) string {
 	}
 }
 
-func listCatalog(w *os.File) {
+func listCatalog(w io.Writer) {
 	fmt.Fprintln(w, "Datasets:")
+	dsNames := make([]string, 0, len(datasets))
 	for name := range datasets {
+		dsNames = append(dsNames, name)
+	}
+	sort.Strings(dsNames)
+	for _, name := range dsNames {
 		fmt.Fprintf(w, "  %s\n", name)
 	}
 	fmt.Fprintln(w, "Queries:")
-	for name, q := range queries {
-		fmt.Fprintf(w, "  %-20s dataset=%s\n", name, q.dataset)
+	qNames := make([]string, 0, len(queries))
+	for name := range queries {
+		qNames = append(qNames, name)
+	}
+	sort.Strings(qNames)
+	for _, name := range qNames {
+		fmt.Fprintf(w, "  %-20s dataset=%s\n", name, queries[name].dataset)
 	}
 }

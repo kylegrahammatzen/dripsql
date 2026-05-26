@@ -13,7 +13,7 @@ func TestDeltaEncoded_EqMatch(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, tag text NOT NULL)")
 	var b strings.Builder
 	b.WriteString("INSERT INTO t (id, tag) VALUES ")
-	for i := 0; i < 512; i++ {
+	for i := range 512 {
 		if i > 0 {
 			b.WriteByte(',')
 		}
@@ -32,7 +32,7 @@ func TestDeltaEncoded_EqMiss(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, tag text NOT NULL)")
 	var b strings.Builder
 	b.WriteString("INSERT INTO t (id, tag) VALUES ")
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		if i > 0 {
 			b.WriteByte(',')
 		}

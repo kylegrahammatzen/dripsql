@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type TimingStats struct {
@@ -45,7 +45,7 @@ type timingOperator struct {
 func (t *timingOperator) Open(ctx context.Context) error { return t.inner.Open(ctx) }
 func (t *timingOperator) Close() error                   { return t.inner.Close() }
 
-func (t *timingOperator) Next() (types.Batch, bool, error) {
+func (t *timingOperator) Next() (vector.Batch, bool, error) {
 	start := time.Now()
 	batch, ok, err := t.inner.Next()
 	t.stats.Wall += time.Since(start)

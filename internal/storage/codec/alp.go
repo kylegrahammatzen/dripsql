@@ -1,4 +1,4 @@
-// ALP float codec encodes float32 and float64 as mantissa = round(x * 10^e) + FOR + bitpack.
+﻿// ALP float codec encodes float32 and float64 as mantissa = round(x * 10^e) + FOR + bitpack.
 // Lossless only when every value round-trips exactly. NaN, Inf, -0, or non-decimal floats trigger ErrSkip.
 package codec
 
@@ -8,7 +8,8 @@ import (
 	"math"
 	"math/bits"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 const (
@@ -27,10 +28,10 @@ func init() {
 	Register(alpCodec{})
 }
 
-func (alpCodec) Encoding() types.Encoding { return types.EncodingALP }
+func (alpCodec) Encoding() schema.Encoding { return schema.EncALP }
 
-func (c alpCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
-	if v.Kind != types.VecFloat32 && v.Kind != types.VecFloat64 {
+func (c alpCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
+	if v.Kind != vector.VecFloat32 && v.Kind != vector.VecFloat64 {
 		return nil, ErrSkip
 	}
 	rows := int(v.Len)
@@ -80,11 +81,11 @@ func (c alpCodec) Encode(v types.Vec, ctx *EncodeContext) ([]byte, error) {
 	return scratch, nil
 }
 
-func (alpCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, dst *types.Vec) error {
+func (alpCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int, dst *vector.Vec) error {
 	if err := validateDecodeArgs(rows, nullCount); err != nil {
 		return fmt.Errorf("alp decode: %w", err)
 	}
-	if kind != types.VecFloat32 && kind != types.VecFloat64 {
+	if kind != vector.VecFloat32 && kind != vector.VecFloat64 {
 		return fmt.Errorf("alp decode: kind %v not float", kind)
 	}
 	if rows == 0 {
@@ -118,7 +119,7 @@ func (alpCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, 
 	scale := alpPow10[exp]
 	dst.ResetForDecode(kind)
 	dst.EnsureFixedBytes(rows)
-	if kind == types.VecFloat64 {
+	if kind == vector.VecFloat64 {
 		out := dst.F64()
 		for i, r := range mantissas {
 			m := minVal + int64(r)
@@ -134,8 +135,8 @@ func (alpCodec) Decode(payload []byte, kind types.VecKind, rows, nullCount int, 
 	return nil
 }
 
-func alpFitExponent(v types.Vec, mantissas []uint64) (byte, bool) {
-	if v.Kind == types.VecFloat64 {
+func alpFitExponent(v vector.Vec, mantissas []uint64) (byte, bool) {
+	if v.Kind == vector.VecFloat64 {
 		src := v.F64()
 		for e := byte(0); e <= alpMaxExp; e++ {
 			if alpFitF64(src, alpPow10[e], mantissas) {

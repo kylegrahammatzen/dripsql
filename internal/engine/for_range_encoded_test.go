@@ -13,7 +13,7 @@ func TestFORRange_LessThan(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, payload text NOT NULL)")
 	var b strings.Builder
 	b.WriteString("INSERT INTO t (id, payload) VALUES ")
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		if i > 0 {
 			b.WriteByte(',')
 		}
@@ -32,7 +32,7 @@ func TestFORRange_GreaterThan(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, payload text NOT NULL)")
 	var b strings.Builder
 	b.WriteString("INSERT INTO t (id, payload) VALUES ")
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		if i > 0 {
 			b.WriteByte(',')
 		}
@@ -51,7 +51,7 @@ func TestFORRange_BetweenLowersToAnd(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, payload text NOT NULL)")
 	var b strings.Builder
 	b.WriteString("INSERT INTO t (id, payload) VALUES ")
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		if i > 0 {
 			b.WriteByte(',')
 		}

@@ -6,27 +6,28 @@ import (
 	"context"
 	"testing"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestSort_Stable_EqualKeysPreserveInputOrder(t *testing.T) {
 	const rows = 256
 	const distinctKeys = 8
-	k := types.NewVec(types.VecInt64, rows)
-	tag := types.NewVec(types.VecInt64, rows)
+	k := vector.NewVec(vector.VecInt64, rows)
+	tag := vector.NewVec(vector.VecInt64, rows)
 	for i := range rows {
 		k.I64()[i] = int64(i % distinctKeys)
 		tag.I64()[i] = int64(i)
 	}
-	batch, err := types.NewBatch([]types.Column{
-		{Name: "k", Type: types.Int64, V: k},
-		{Name: "tag", Type: types.Int64, V: tag},
+	batch, err := vector.NewBatch([]vector.Column{
+		{Name: "k", Type: schema.Int64, V: k},
+		{Name: "tag", Type: schema.Int64, V: tag},
 	})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
-	sel := types.NewSelectionMask(rows)
+	sel := vector.NewSelectionMask(rows)
 	sel.FillAll()
 	batch.Sel = &sel
 
@@ -37,15 +38,15 @@ func TestSort_Stable_EqualKeysPreserveInputOrder(t *testing.T) {
 		{
 			name: "full sort",
 			op: &SortOp{
-				Source: &bufferSource{batches: []types.Batch{batch}},
-				Keys:   []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: types.Int64, Column: "k"}}},
+				Source: &bufferSource{batches: []vector.Batch{batch}},
+				Keys:   []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: schema.Int64, Column: "k"}}},
 			},
 		},
 		{
 			name: "streaming top-K",
 			op: &SortOp{
-				Source: &bufferSource{batches: []types.Batch{batch}},
-				Keys:   []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: types.Int64, Column: "k"}}},
+				Source: &bufferSource{batches: []vector.Batch{batch}},
+				Keys:   []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: schema.Int64, Column: "k"}}},
 				K:      int64(rows),
 			},
 		},
@@ -77,5 +78,66 @@ func TestSort_Stable_EqualKeysPreserveInputOrder(t *testing.T) {
 				prevTag = tv
 			}
 		})
+	}
+}
+
+func TestSort_TopKMatchesFullSortWithOffsetAndNulls(t *testing.T) {
+	const rows = 64
+	k := vector.NewVec(vector.VecInt64, rows)
+	tag := vector.NewVec(vector.VecInt64, rows)
+	valid := vector.NewAllValid(rows)
+	for i := range rows {
+		k.I64()[i] = int64((i*17 + 3) % 19)
+		tag.I64()[i] = int64(i)
+		if i%11 == 0 {
+			valid.SetInvalid(i)
+		}
+	}
+	k.Valid = valid
+	batch, err := vector.NewBatch([]vector.Column{
+		{Name: "k", Type: schema.Int64, V: k},
+		{Name: "tag", Type: schema.Int64, V: tag},
+	})
+	if err != nil {
+		t.Fatalf("NewBatch: %v", err)
+	}
+	sel := vector.NewSelectionMask(rows)
+	sel.FillAll()
+	batch.Sel = &sel
+
+	keys := []sql.SortKey{{Expr: sql.BoundExpr{Op: sql.ExprColumn, Type: schema.Int64, Column: "k"}, Desc: true}}
+	full := &SortOp{Source: &bufferSource{batches: []vector.Batch{batch}}, Keys: keys}
+	if err := full.Open(context.Background()); err != nil {
+		t.Fatalf("full Open: %v", err)
+	}
+	fullOut, ok, err := full.Next()
+	if err != nil || !ok {
+		t.Fatalf("full Next: ok=%v err=%v", ok, err)
+	}
+	if err := full.Close(); err != nil {
+		t.Fatalf("full Close: %v", err)
+	}
+
+	top := &SortOp{Source: &bufferSource{batches: []vector.Batch{batch}}, Keys: keys, K: 7, Offset: 5}
+	if err := top.Open(context.Background()); err != nil {
+		t.Fatalf("top Open: %v", err)
+	}
+	topOut, ok, err := top.Next()
+	if err != nil || !ok {
+		t.Fatalf("top Next: ok=%v err=%v", ok, err)
+	}
+	if err := top.Close(); err != nil {
+		t.Fatalf("top Close: %v", err)
+	}
+
+	fullTags := fullOut.Columns[1].V.I64()
+	topTags := topOut.Columns[1].V.I64()
+	if topOut.Len != 7 {
+		t.Fatalf("top len=%d want 7", topOut.Len)
+	}
+	for i := range topOut.Len {
+		if topTags[i] != fullTags[i+5] {
+			t.Fatalf("row %d tag=%d want %d", i, topTags[i], fullTags[i+5])
+		}
 	}
 }

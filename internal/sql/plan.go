@@ -3,7 +3,9 @@
 // Catalog identifiers are assigned by the catalog, not by Bind.
 package sql
 
-import "github.com/kylegrahammatzen/dripsql/internal/types"
+import (
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+)
 
 type TableID uint64
 type ColumnID uint64
@@ -20,17 +22,17 @@ type TypeDef struct {
 type BoundColumnDef struct {
 	ID       ColumnID
 	Name     string
-	Type     types.Type
+	Type     schema.Type
 	Labels   []string
 	Nullable bool
-	Codec    types.Encoding
+	Codec    schema.Encoding
 }
 
 type BoundTableDef struct {
 	ID      TableID
 	Name    string
 	Columns []BoundColumnDef
-	Options types.TableOptions
+	Options schema.TableOptions
 	Path    string
 	Version SchemaVersion
 	// AsOf carries the parsed `AS OF <commit_ts>` clause from the table reference. Zero
@@ -208,8 +210,8 @@ type Plan struct {
 	Inner   *Plan
 	Analyze bool
 
-	TypeSpec  types.TypeSpec
-	TableSpec types.TableSpec
+	TypeSpec  schema.TypeSpec
+	TableSpec schema.TableSpec
 
 	Table       BoundTableDef
 	Values      InsertValues
@@ -234,7 +236,7 @@ func scanRel(table BoundTableDef, alias string, cols []ColumnID, where *BoundExp
 			if c.ID == id {
 				name := c.Name
 				if alias != "" {
-					name = alias + "." + types.NormalizeName(c.Name)
+					name = alias + "." + schema.NormalizeName(c.Name)
 				}
 				outputs = append(outputs, BoundOutput{Expr: BoundExpr{Op: ExprColumn, Type: c.Type, Column: name, ColumnID: c.ID}})
 				break
@@ -306,12 +308,13 @@ type BoundOutput struct {
 }
 
 // ExprOp identifies a BoundExpr node. Each op fixes the meaning of Args:
-//   ExprColumn, ExprLiteral: leaf; Args empty.
-//   Unary ops (ExprNot, ExprLower, ExprUpper, ExprLength): Args = [operand].
-//   Binary comparison/arithmetic/concat/coalesce/JSON/AND/OR: Args = [left, right].
-//   ExprSubstring: Args = [text, start, length?].
-//   ExprBetween: Args = [target, low, high].
-//   ExprIn: Args = [target, val1, val2, ...]; Not negates the membership test.
+//
+//	ExprColumn, ExprLiteral: leaf; Args empty.
+//	Unary ops (ExprNot, ExprLower, ExprUpper, ExprLength): Args = [operand].
+//	Binary comparison/arithmetic/concat/coalesce/JSON/AND/OR: Args = [left, right].
+//	ExprSubstring: Args = [text, start, length?].
+//	ExprBetween: Args = [target, low, high].
+//	ExprIn: Args = [target, val1, val2, ...]; Not negates the membership test.
 type ExprOp uint8
 
 const (
@@ -352,17 +355,20 @@ const (
 	ExprSubquery
 	ExprInSubquery
 	ExprExists
+	// ExprParameter is a positional ? placeholder bound to args[Parameter-1] at execution time.
+	ExprParameter
 )
 
 type BoundExpr struct {
-	Op       ExprOp
-	Type     types.Type
-	Args     []BoundExpr
-	Column   string
-	ColumnID ColumnID
-	Literal  any
-	Not      bool
-	SubPlan  *Plan
+	Op        ExprOp
+	Type      schema.Type
+	Args      []BoundExpr
+	Column    string
+	ColumnID  ColumnID
+	Literal   any
+	Parameter int
+	Not       bool
+	SubPlan   *Plan
 	// Outer marks an ExprColumn that resolves to a parent scope rather than the
 	// current batch. The evaluator reads its value from a runtime outer-row table
 	// keyed by Column name. Only meaningful for Op == ExprColumn.

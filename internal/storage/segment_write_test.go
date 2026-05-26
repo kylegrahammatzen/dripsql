@@ -8,36 +8,37 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-func makeIntBatch(t *testing.T, name string, start, n int64) types.Batch {
+func makeIntBatch(t *testing.T, name string, start, n int64) vector.Batch {
 	t.Helper()
-	v := types.NewVec(types.VecInt64, int(n))
+	v := vector.NewVec(vector.VecInt64, int(n))
 	for i := range v.I64() {
 		v.I64()[i] = start + int64(i)
 	}
-	b, err := types.NewBatch([]types.Column{{Name: name, Type: types.Int64, V: v}})
+	b, err := vector.NewBatch([]vector.Column{{Name: name, Type: schema.Int64, V: v}})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	return b
 }
 
-func makeTwoColumnBatch(t *testing.T, start, n int64) types.Batch {
+func makeTwoColumnBatch(t *testing.T, start, n int64) vector.Batch {
 	t.Helper()
-	v1 := types.NewVec(types.VecInt64, int(n))
+	v1 := vector.NewVec(vector.VecInt64, int(n))
 	for i := range v1.I64() {
 		v1.I64()[i] = start + int64(i)
 	}
-	v2 := types.NewVarVec(types.VecText, int(n), 0)
+	v2 := vector.NewVarVec(vector.VecText, int(n), 0)
 	vb := v2.Var()
 	for i := range int(n) {
 		vb.AppendString(i, "hello")
 	}
-	b, err := types.NewBatch([]types.Column{
-		{Name: "id", Type: types.Int64, V: v1},
-		{Name: "tag", Type: types.Text, V: v2},
+	b, err := vector.NewBatch([]vector.Column{
+		{Name: "id", Type: schema.Int64, V: v1},
+		{Name: "tag", Type: schema.Text, V: v2},
 	})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
@@ -47,7 +48,7 @@ func makeTwoColumnBatch(t *testing.T, start, n int64) types.Batch {
 
 func TestWriteSegment_FileExistsAndStartsWithMagic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 100)}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 100)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -64,7 +65,7 @@ func TestWriteSegment_FileExistsAndStartsWithMagic(t *testing.T) {
 
 func TestWriteSegment_FooterSuffixDecodes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 50)}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 50)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -79,7 +80,7 @@ func TestWriteSegment_FooterSuffixDecodes(t *testing.T) {
 
 func TestWriteSegment_ColumnMajorPagesContiguous(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	pages := []types.Batch{
+	pages := []vector.Batch{
 		makeTwoColumnBatch(t, 0, 100),
 		makeTwoColumnBatch(t, 100, 100),
 		makeTwoColumnBatch(t, 200, 100),
@@ -153,21 +154,21 @@ func TestWriteSegment_ColumnMajorPagesContiguous(t *testing.T) {
 }
 
 func TestWriteSegment_NullableRoundTrip(t *testing.T) {
-	v := types.NewVec(types.VecInt64, 6)
+	v := vector.NewVec(vector.VecInt64, 6)
 	for i := range v.I64() {
 		v.I64()[i] = int64(100 + i)
 	}
-	valid := make(types.Validity, types.ValidityWords(6))
+	valid := make(vector.Validity, vector.ValidityWords(6))
 	valid.SetValid(0)
 	valid.SetValid(2)
 	valid.SetValid(4)
 	v.Valid = valid
-	b, err := types.NewBatch([]types.Column{{Name: "x", Type: types.Int64, V: v}})
+	b, err := vector.NewBatch([]vector.Column{{Name: "x", Type: schema.Int64, V: v}})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "nullable.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{b}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -197,14 +198,14 @@ func TestWriteSegment_NullableRoundTrip(t *testing.T) {
 }
 
 func TestWriteSegment_AllNullRoundTrip(t *testing.T) {
-	v := types.NewVec(types.VecInt64, 4)
-	v.Valid = make(types.Validity, types.ValidityWords(4))
-	b, err := types.NewBatch([]types.Column{{Name: "x", Type: types.Int64, V: v}})
+	v := vector.NewVec(vector.VecInt64, 4)
+	v.Valid = make(vector.Validity, vector.ValidityWords(4))
+	b, err := vector.NewBatch([]vector.Column{{Name: "x", Type: schema.Int64, V: v}})
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "allnull.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{b}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -233,29 +234,29 @@ func TestWriteSegment_RejectsEmpty(t *testing.T) {
 }
 
 func TestWriteSegment_RejectsMismatchedBatchLen(t *testing.T) {
-	v := types.NewVec(types.VecInt64, 10)
-	bad := types.Batch{Len: 20, Columns: []types.Column{{Name: "id", Type: types.Int64, V: v}}}
+	v := vector.NewVec(vector.VecInt64, 10)
+	bad := vector.Batch{Len: 20, Columns: []vector.Column{{Name: "id", Type: schema.Int64, V: v}}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{bad}, nil); err == nil {
+	if _, err := WriteSegment(path, []vector.Batch{bad}, nil); err == nil {
 		t.Fatal("WriteSegment must reject Batch.Len != Vec.Len")
 	}
 }
 
 func TestWriteSegment_RejectsTypeDrift(t *testing.T) {
 	first := makeIntBatch(t, "id", 0, 10)
-	v := types.NewVec(types.VecInt32, 10)
-	second := types.Batch{Len: 10, Columns: []types.Column{{Name: "id", Type: types.Int32, V: v}}}
+	v := vector.NewVec(vector.VecInt32, 10)
+	second := vector.Batch{Len: 10, Columns: []vector.Column{{Name: "id", Type: schema.Int32, V: v}}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{first, second}, nil); err == nil {
+	if _, err := WriteSegment(path, []vector.Batch{first, second}, nil); err == nil {
 		t.Fatal("WriteSegment must reject type drift across batches")
 	}
 }
 
 func TestWriteSegment_RejectsKindMismatchVsType(t *testing.T) {
-	v := types.NewVec(types.VecInt32, 5)
-	bad := types.Batch{Len: 5, Columns: []types.Column{{Name: "id", Type: types.Int64, V: v}}}
+	v := vector.NewVec(vector.VecInt32, 5)
+	bad := vector.Batch{Len: 5, Columns: []vector.Column{{Name: "id", Type: schema.Int64, V: v}}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{bad}, nil); err == nil {
+	if _, err := WriteSegment(path, []vector.Batch{bad}, nil); err == nil {
 		t.Fatal("WriteSegment must reject Vec.Kind that does not match Column.Type")
 	}
 }
@@ -268,9 +269,9 @@ func TestWriteSegment_AtomicNoFinalOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Force a failure via Vec.Kind that does not match the declared Type.
-	v := types.NewVec(types.VecInt32, 4)
-	bad := types.Batch{Len: 4, Columns: []types.Column{{Name: "id", Type: types.Int64, V: v}}}
-	if _, err := WriteSegment(path, []types.Batch{bad}, nil); err == nil {
+	v := vector.NewVec(vector.VecInt32, 4)
+	bad := vector.Batch{Len: 4, Columns: []vector.Column{{Name: "id", Type: schema.Int64, V: v}}}
+	if _, err := WriteSegment(path, []vector.Batch{bad}, nil); err == nil {
 		t.Fatal("WriteSegment must reject kind mismatch")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -284,7 +285,7 @@ func TestWriteSegment_AtomicNoFinalOnFailure(t *testing.T) {
 func TestWriteSegment_AtomicRenamesTmpToFinal(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{makeIntBatch(t, "id", 0, 16)}, nil); err != nil {
+	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 16)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -296,16 +297,16 @@ func TestWriteSegment_AtomicRenamesTmpToFinal(t *testing.T) {
 }
 
 func TestWriteSegment_RejectsEnumLabelDrift(t *testing.T) {
-	v1 := types.NewVec(types.VecEnum32, 4)
-	v2 := types.NewVec(types.VecEnum32, 4)
-	first := types.Batch{Len: 4, Columns: []types.Column{
-		{Name: "k", Type: types.Named("status"), EnumLabels: []string{"a", "b"}, V: v1},
+	v1 := vector.NewVec(vector.VecEnum32, 4)
+	v2 := vector.NewVec(vector.VecEnum32, 4)
+	first := vector.Batch{Len: 4, Columns: []vector.Column{
+		{Name: "k", Type: schema.Named("status"), EnumLabels: []string{"a", "b"}, V: v1},
 	}}
-	second := types.Batch{Len: 4, Columns: []types.Column{
-		{Name: "k", Type: types.Named("status"), EnumLabels: []string{"a", "b", "c"}, V: v2},
+	second := vector.Batch{Len: 4, Columns: []vector.Column{
+		{Name: "k", Type: schema.Named("status"), EnumLabels: []string{"a", "b", "c"}, V: v2},
 	}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []types.Batch{first, second}, nil); err == nil {
+	if _, err := WriteSegment(path, []vector.Batch{first, second}, nil); err == nil {
 		t.Fatal("WriteSegment must reject enum-label drift across batches")
 	}
 }

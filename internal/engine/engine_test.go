@@ -604,7 +604,7 @@ func TestEngine_HashJoinOutputPagination(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE b (k int64 NOT NULL, w int64 NOT NULL)")
 	const n = 60
 	var avals, bvals []string
-	for i := 0; i < n; i++ {
+	for i := range n {
 		avals = append(avals, fmt.Sprintf("(1, %d)", i))
 		bvals = append(bvals, fmt.Sprintf("(1, %d)", i))
 	}

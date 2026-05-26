@@ -5,17 +5,17 @@ package sql
 import (
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 )
 
 func salesDef() BoundTableDef {
 	return BoundTableDef{
 		Name: "sales",
 		Columns: []BoundColumnDef{
-			{ID: 1, Name: "id", Type: types.Int64},
-			{ID: 2, Name: "category", Type: types.Text},
-			{ID: 3, Name: "price", Type: types.Int64},
-			{ID: 4, Name: "qty", Type: types.Int32},
+			{ID: 1, Name: "id", Type: schema.Int64},
+			{ID: 2, Name: "category", Type: schema.Text},
+			{ID: 3, Name: "price", Type: schema.Int64},
+			{ID: 4, Name: "qty", Type: schema.Int32},
 		},
 	}
 }

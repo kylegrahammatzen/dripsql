@@ -1,4 +1,4 @@
-// Planner turns a parsed Stmt into a bound *Plan. Single-table and joined SELECTs flow
+﻿// Planner turns a parsed Stmt into a bound *Plan. Single-table and joined SELECTs flow
 // through one planQuery tail; planFrom builds the source *Rel and scope for both shapes.
 // DDL/DML/SELECT/EXPLAIN binders all live in this file alongside the planner dispatcher.
 package sql
@@ -10,7 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type Planner struct {
@@ -220,7 +221,7 @@ func unionOutputColumns(outputs []BoundOutput) map[string]BoundColumnDef {
 		if name == "" {
 			name = fmt.Sprintf("col%d", i+1)
 		}
-		cols[types.NormalizeName(name)] = BoundColumnDef{Name: name, Type: out.Expr.Type, ID: ColumnID(i + 1)}
+		cols[schema.NormalizeName(name)] = BoundColumnDef{Name: name, Type: out.Expr.Type, ID: ColumnID(i + 1)}
 	}
 	return cols
 }
@@ -248,7 +249,7 @@ func (p *Planner) planSelectWithCTEs(stmt *SelectStmt) (*Plan, error) {
 			return nil, fmt.Errorf("CTE %q: inner statement did not yield a query plan", cte.Name)
 		}
 		def := cteDefFromRel(cte.Name, inner.Rel)
-		key := types.NormalizeName(cte.Name)
+		key := schema.NormalizeName(cte.Name)
 		if _, dup := p.ctes[key]; dup {
 			return nil, fmt.Errorf("duplicate CTE name %q", cte.Name)
 		}
@@ -270,7 +271,7 @@ func substituteCTEAtRoot(rel *Rel, ctes map[string]*cteEntry) *Rel {
 	if rel == nil || rel.Op != RelScan {
 		return rel
 	}
-	entry, ok := ctes[types.NormalizeName(rel.Table.Name)]
+	entry, ok := ctes[schema.NormalizeName(rel.Table.Name)]
 	if !ok {
 		return rel
 	}
@@ -293,10 +294,10 @@ func cteDefFromRel(name string, rel *Rel) BoundTableDef {
 		if colName == "" {
 			colName = fmt.Sprintf("col%d", i)
 		}
-		key := types.NormalizeName(colName)
+		key := schema.NormalizeName(colName)
 		if _, dup := seen[key]; dup {
 			colName = fmt.Sprintf("%s_%d", colName, i)
-			key = types.NormalizeName(colName)
+			key = schema.NormalizeName(colName)
 		}
 		seen[key] = struct{}{}
 		cols = append(cols, BoundColumnDef{
@@ -326,7 +327,7 @@ func substituteCTEScans(rel *Rel, ctes map[string]*cteEntry) {
 	}
 	for i, in := range rel.Inputs {
 		if in != nil && in.Op == RelScan {
-			if entry, ok := ctes[types.NormalizeName(in.Table.Name)]; ok {
+			if entry, ok := ctes[schema.NormalizeName(in.Table.Name)]; ok {
 				rel.Inputs[i] = &Rel{
 					Op:      RelCTE,
 					Outputs: in.Outputs,
@@ -376,7 +377,7 @@ func pruneJoinedScans(root *Rel) {
 			return
 		}
 		if r.Op == RelScan && r.Alias != "" {
-			scans[types.NormalizeName(r.Alias)] = r
+			scans[schema.NormalizeName(r.Alias)] = r
 		}
 		for _, in := range r.Inputs {
 			collectScans(in)
@@ -398,14 +399,14 @@ func pruneJoinedScans(root *Rel) {
 		if dot < 0 {
 			return
 		}
-		alias := types.NormalizeName(qualified[:dot])
-		colName := types.NormalizeName(qualified[dot+1:])
+		alias := schema.NormalizeName(qualified[:dot])
+		colName := schema.NormalizeName(qualified[dot+1:])
 		scan, ok := scans[alias]
 		if !ok {
 			return
 		}
 		for _, c := range scan.Table.Columns {
-			if types.NormalizeName(c.Name) == colName {
+			if schema.NormalizeName(c.Name) == colName {
 				set := refs[alias]
 				if set == nil {
 					set = map[ColumnID]struct{}{}
@@ -514,7 +515,7 @@ func (p *Planner) planFrom(stmt *SelectStmt) (*Rel, *scope, error) {
 		primaryAlias = primaryName.Name
 	}
 	sources := []joinedSource{{Alias: primaryAlias, Def: primary}}
-	leftAliases := map[string]bool{types.NormalizeName(primaryAlias): true}
+	leftAliases := map[string]bool{schema.NormalizeName(primaryAlias): true}
 	src := scanRel(primary, primaryAlias, allColumnIDs(primary.Columns), nil)
 	for _, join := range joins {
 		switch join.Kind {
@@ -535,7 +536,7 @@ func (p *Planner) planFrom(stmt *SelectStmt) (*Rel, *scope, error) {
 		if rightAlias == "" {
 			rightAlias = rightName.Name
 		}
-		normRight := types.NormalizeName(rightAlias)
+		normRight := schema.NormalizeName(rightAlias)
 		if leftAliases[normRight] {
 			return nil, nil, fmt.Errorf("join alias %q is already used in this query", rightAlias)
 		}
@@ -567,7 +568,7 @@ func (p *Planner) planFrom(stmt *SelectStmt) (*Rel, *scope, error) {
 
 func (p *Planner) resolveTable(name string) (BoundTableDef, error) {
 	if p.ctes != nil {
-		if entry, ok := p.ctes[types.NormalizeName(name)]; ok {
+		if entry, ok := p.ctes[schema.NormalizeName(name)]; ok {
 			return entry.def, nil
 		}
 	}
@@ -644,7 +645,7 @@ func planAggregateTail(stmt *SelectStmt, src *Rel, sc *scope, groupExprs []Bound
 		group = append([]BoundExpr(nil), groupExprs...)
 	}
 	for _, spec := range aggregates {
-		outputs = append(outputs, BoundOutput{Alias: spec.Alias, Expr: BoundExpr{Op: ExprColumn, Type: types.Int64, Column: aggregateOutputName(spec)}})
+		outputs = append(outputs, BoundOutput{Alias: spec.Alias, Expr: BoundExpr{Op: ExprColumn, Type: schema.Int64, Column: aggregateOutputName(spec)}})
 	}
 	var having *BoundExpr
 	var hidden []AggSpec
@@ -711,7 +712,7 @@ func planScanTail(stmt *SelectStmt, src *Rel, sc *scope) (*Rel, error) {
 		src = windowRel(src, windowFuncs)
 		// Synthetic columns become visible to subsequent bind passes.
 		for _, wf := range windowFuncs {
-			sc.columns[types.NormalizeName(wf.Alias)] = BoundColumnDef{
+			sc.columns[schema.NormalizeName(wf.Alias)] = BoundColumnDef{
 				Name: wf.Alias,
 				Type: windowOutputType(wf),
 			}
@@ -735,7 +736,7 @@ func extractWindowFuncs(stmt *SelectStmt, columns map[string]BoundColumnDef) (*S
 		if !ok || fc.Over == nil {
 			continue
 		}
-		kind, ok := WindowFuncByName(types.NormalizeName(fc.Name))
+		kind, ok := WindowFuncByName(schema.NormalizeName(fc.Name))
 		if !ok {
 			return nil, nil, fmt.Errorf("unsupported window function %q", fc.Name)
 		}
@@ -836,22 +837,21 @@ func windowRel(src *Rel, funcs []WindowFunc) *Rel {
 	}
 }
 
-func windowOutputType(wf WindowFunc) types.Type {
+func windowOutputType(wf WindowFunc) schema.Type {
 	if wf.Func == WindowAvg {
-		return types.Float64
+		return schema.Float64
 	}
 	if wf.Arg != nil {
 		k := wf.Arg.Type.Kind
-		if k == types.KindFloat32 || k == types.KindFloat64 {
-			return types.Float64
+		if k == schema.KindFloat32 || k == schema.KindFloat64 {
+			return schema.Float64
 		}
 	}
-	return types.Int64
+	return schema.Int64
 }
 
-// DDL binding lowers CREATE TYPE / CREATE TABLE statements into validated types.TypeSpec / types.TableSpec.
+// DDL binding lowers CREATE TYPE / CREATE TABLE statements into validated schema.TypeSpec / schema.TableSpec.
 // Option vocab (storage/profile/compression/segment_rows/sort_by/time_column) is enforced here, not at parse time.
-
 
 func BindCreateType(stmt *CreateTypeStmt) (*Plan, error) {
 	spec, err := BindCreateTypeSpec(stmt)
@@ -861,17 +861,17 @@ func BindCreateType(stmt *CreateTypeStmt) (*Plan, error) {
 	return &Plan{Kind: PlanCreateType, TypeSpec: spec}, nil
 }
 
-func BindCreateTypeSpec(stmt *CreateTypeStmt) (types.TypeSpec, error) {
+func BindCreateTypeSpec(stmt *CreateTypeStmt) (schema.TypeSpec, error) {
 	if stmt == nil {
-		return types.TypeSpec{}, fmt.Errorf("CREATE TYPE statement is nil")
+		return schema.TypeSpec{}, fmt.Errorf("CREATE TYPE statement is nil")
 	}
-	spec := types.TypeSpec{
-		Name:        types.NormalizeName(stmt.Name),
+	spec := schema.TypeSpec{
+		Name:        schema.NormalizeName(stmt.Name),
 		IfNotExists: stmt.IfNotExists,
 		EnumLabels:  slices.Clone(stmt.EnumLabels),
 	}
 	if err := spec.Validate(); err != nil {
-		return types.TypeSpec{}, err
+		return schema.TypeSpec{}, err
 	}
 	return spec, nil
 }
@@ -884,20 +884,20 @@ func BindCreateTable(stmt *CreateTableStmt) (*Plan, error) {
 	return &Plan{Kind: PlanCreateTable, TableSpec: spec}, nil
 }
 
-func BindCreateTableSpec(stmt *CreateTableStmt) (types.TableSpec, error) {
+func BindCreateTableSpec(stmt *CreateTableStmt) (schema.TableSpec, error) {
 	if stmt == nil {
-		return types.TableSpec{}, fmt.Errorf("CREATE TABLE statement is nil")
+		return schema.TableSpec{}, fmt.Errorf("CREATE TABLE statement is nil")
 	}
 
-	columns := make([]types.ColumnSpec, 0, len(stmt.Columns))
+	columns := make([]schema.ColumnSpec, 0, len(stmt.Columns))
 	for _, col := range stmt.Columns {
 		codec, err := parseCodecName(col.Codec)
 		if err != nil {
-			return types.TableSpec{}, fmt.Errorf("column %q: %w", col.Name, err)
+			return schema.TableSpec{}, fmt.Errorf("column %q: %w", col.Name, err)
 		}
-		columns = append(columns, types.ColumnSpec{
-			Name:     types.NormalizeName(col.Name),
-			Type:     types.Parse(types.NormalizeName(col.Type)),
+		columns = append(columns, schema.ColumnSpec{
+			Name:     schema.NormalizeName(col.Name),
+			Type:     schema.Parse(schema.NormalizeName(col.Type)),
 			Nullable: !col.NotNull,
 			Codec:    codec,
 		})
@@ -905,38 +905,38 @@ func BindCreateTableSpec(stmt *CreateTableStmt) (types.TableSpec, error) {
 
 	options, err := bindTableOptions(stmt.Options)
 	if err != nil {
-		return types.TableSpec{}, err
+		return schema.TableSpec{}, err
 	}
-	spec := types.TableSpec{
-		Name:        types.NormalizeName(stmt.Name),
+	spec := schema.TableSpec{
+		Name:        schema.NormalizeName(stmt.Name),
 		IfNotExists: stmt.IfNotExists,
 		Columns:     columns,
 		Options:     options,
 	}
 	if err := spec.Validate(); err != nil {
-		return types.TableSpec{}, err
+		return schema.TableSpec{}, err
 	}
 	return spec, nil
 }
 
 // Empty string means no override. Unknown names are a binder error so typos surface
 // before any catalog mutation lands.
-func parseCodecName(name string) (types.Encoding, error) {
+func parseCodecName(name string) (schema.Encoding, error) {
 	if name == "" {
-		return types.EncodingAuto, nil
+		return schema.EncInvalid, nil
 	}
-	enc, ok := types.EncodingFromName(name)
+	enc, ok := schema.ParseEncoding(name)
 	if !ok {
-		return types.EncodingAuto, fmt.Errorf("unknown codec %q", name)
+		return schema.EncInvalid, fmt.Errorf("unknown codec %q", name)
 	}
 	return enc, nil
 }
 
-func bindTableOptions(options []TableOption) (types.TableOptions, error) {
-	var out types.TableOptions
+func bindTableOptions(options []TableOption) (schema.TableOptions, error) {
+	var out schema.TableOptions
 	seen := make(map[string]struct{}, len(options))
 	for _, opt := range options {
-		name := types.NormalizeName(opt.Name)
+		name := schema.NormalizeName(opt.Name)
 		if name == "" {
 			return out, fmt.Errorf("table option name is required")
 		}
@@ -953,13 +953,13 @@ func bindTableOptions(options []TableOption) (types.TableOptions, error) {
 			}
 			switch text {
 			case "default":
-				out.Storage = types.StorageDefault
+				out.Storage = schema.StorageDefault
 			case "columnar":
-				out.Storage = types.StorageColumnar
+				out.Storage = schema.StorageColumnar
 			case "row":
-				out.Storage = types.StorageRow
+				out.Storage = schema.StorageRow
 			case "hybrid":
-				out.Storage = types.StorageHybrid
+				out.Storage = schema.StorageHybrid
 			default:
 				return out, fmt.Errorf("unsupported storage option %q", text)
 			}
@@ -970,15 +970,15 @@ func bindTableOptions(options []TableOption) (types.TableOptions, error) {
 			}
 			switch text {
 			case "default":
-				out.Profile = types.ProfileDefault
+				out.Profile = schema.ProfileDefault
 			case "event_analytics":
-				out.Profile = types.ProfileEventAnalytics
+				out.Profile = schema.ProfileEventAnalytics
 			case "time_series":
-				out.Profile = types.ProfileTimeSeries
+				out.Profile = schema.ProfileTimeSeries
 			case "dimension_table":
-				out.Profile = types.ProfileDimensionTable
+				out.Profile = schema.ProfileDimensionTable
 			case "log_analytics":
-				out.Profile = types.ProfileLogAnalytics
+				out.Profile = schema.ProfileLogAnalytics
 			default:
 				return out, fmt.Errorf("unsupported profile option %q", text)
 			}
@@ -989,15 +989,15 @@ func bindTableOptions(options []TableOption) (types.TableOptions, error) {
 			}
 			switch text {
 			case "default":
-				out.Compression = types.CompressionDefault
+				out.Compression = schema.CompressionDefault
 			case "auto":
-				out.Compression = types.CompressionAuto
+				out.Compression = schema.CompressionAuto
 			case "none":
-				out.Compression = types.CompressionNone
+				out.Compression = schema.CompressionNone
 			case "fast":
-				out.Compression = types.CompressionFast
+				out.Compression = schema.CompressionFast
 			case "best":
-				out.Compression = types.CompressionBest
+				out.Compression = schema.CompressionBest
 			default:
 				return out, fmt.Errorf("unsupported compression option %q", text)
 			}
@@ -1011,13 +1011,13 @@ func bindTableOptions(options []TableOption) (types.TableOptions, error) {
 				if text != "auto" {
 					return out, fmt.Errorf("unsupported segment_rows option %q", text)
 				}
-				out.SegmentRows = types.AutoSegmentRows
+				out.SegmentRows = schema.AutoSegmentRows
 			case ValueInt:
 				n := opt.Value.Int
 				if n <= 0 || n > math.MaxInt32 {
 					return out, fmt.Errorf("segment_rows must be positive or auto")
 				}
-				out.SegmentRows = types.SegmentRows(int(n))
+				out.SegmentRows = schema.SegmentRows(int(n))
 			default:
 				return out, fmt.Errorf("segment_rows must be positive or auto")
 			}
@@ -1027,7 +1027,7 @@ func bindTableOptions(options []TableOption) (types.TableOptions, error) {
 				return out, err
 			}
 			for c := range strings.SplitSeq(text, ",") {
-				if c = types.NormalizeName(c); c != "" {
+				if c = schema.NormalizeName(c); c != "" {
 					out.SortBy = append(out.SortBy, c)
 				}
 			}
@@ -1049,18 +1049,17 @@ func bindTableOptions(options []TableOption) (types.TableOptions, error) {
 
 func optionText(opt TableOption) (string, error) {
 	if opt.Value.Kind != ValueIdent && opt.Value.Kind != ValueString {
-		return "", fmt.Errorf("table option %q requires an identifier or string value", types.NormalizeName(opt.Name))
+		return "", fmt.Errorf("table option %q requires an identifier or string value", schema.NormalizeName(opt.Name))
 	}
-	text := types.NormalizeName(opt.Value.String)
+	text := schema.NormalizeName(opt.Value.String)
 	if text == "" {
-		return "", fmt.Errorf("table option %q requires a non-empty value", types.NormalizeName(opt.Name))
+		return "", fmt.Errorf("table option %q requires a non-empty value", schema.NormalizeName(opt.Name))
 	}
 	return text, nil
 }
 
 // INSERT binding validates VALUES rows against a catalog-resolved BoundTableDef.
 // Enum literals are validated as known labels; numeric/bool/null literals are range-checked per kind.
-
 
 type InsertValues struct {
 	Table    string
@@ -1071,7 +1070,7 @@ type InsertValues struct {
 type InsertColumn struct {
 	Name      string
 	ID        ColumnID
-	Type      types.Type
+	Type      schema.Type
 	Labels    []string
 	Nullable  bool
 	Values    []Value
@@ -1090,7 +1089,7 @@ func BindInsertValues(stmt *InsertStmt, def BoundTableDef) (InsertValues, error)
 	if stmt == nil {
 		return InsertValues{}, fmt.Errorf("INSERT statement is nil")
 	}
-	if def.Name != "" && types.NormalizeName(stmt.Table) != types.NormalizeName(def.Name) {
+	if def.Name != "" && schema.NormalizeName(stmt.Table) != schema.NormalizeName(def.Name) {
 		return InsertValues{}, fmt.Errorf("INSERT target %q does not match table %q", stmt.Table, def.Name)
 	}
 	if len(def.Columns) == 0 {
@@ -1150,12 +1149,12 @@ func insertSourceIndexes(names []string, columns []BoundColumnDef) ([]int, int, 
 
 	byName := make(map[string]int, len(columns))
 	for i, col := range columns {
-		byName[types.NormalizeName(col.Name)] = i
+		byName[schema.NormalizeName(col.Name)] = i
 	}
 	sourceByTableIndex := make([]int, len(columns))
 	usedAt := make(map[string]int, len(names))
 	for sourceIndex, name := range names {
-		norm := types.NormalizeName(name)
+		norm := schema.NormalizeName(name)
 		if prev, ok := usedAt[norm]; ok {
 			return nil, 0, fmt.Errorf("duplicate INSERT column %q (positions %d and %d)", name, prev+1, sourceIndex+1)
 		}
@@ -1171,7 +1170,7 @@ func insertSourceIndexes(names []string, columns []BoundColumnDef) ([]int, int, 
 }
 
 func validateLiteralForColumn(col BoundColumnDef, lit Value) (Value, error) {
-	if col.Type.Kind != types.KindNamed {
+	if col.Type.Kind != schema.KindNamed {
 		return lit, validateLiteralForType(col.Name, lit, col.Type)
 	}
 	if lit.Kind != ValueString {
@@ -1185,7 +1184,7 @@ func validateLiteralForColumn(col BoundColumnDef, lit Value) (Value, error) {
 	return lit, fmt.Errorf("column %q invalid enum label %q", col.Name, lit.String)
 }
 
-func validateLiteralForType(column string, lit Value, typ types.Type) error {
+func validateLiteralForType(column string, lit Value, typ schema.Type) error {
 	stringLit := func(label string) (string, error) {
 		if lit.Kind != ValueString {
 			return "", fmt.Errorf("column %q expects %s literal", column, label)
@@ -1193,25 +1192,25 @@ func validateLiteralForType(column string, lit Value, typ types.Type) error {
 		return lit.String, nil
 	}
 	switch typ.Kind {
-	case types.KindBool:
+	case schema.KindBool:
 		if lit.Kind != ValueBool {
 			return fmt.Errorf("column %q expects bool literal", column)
 		}
-	case types.KindInt16, types.KindInt32, types.KindInt64:
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64:
 		if lit.Kind != ValueInt {
 			return fmt.Errorf("column %q expects int64 literal", column)
 		}
 		min, max := int64(math.MinInt64), int64(math.MaxInt64)
 		switch typ.Kind {
-		case types.KindInt16:
+		case schema.KindInt16:
 			min, max = math.MinInt16, math.MaxInt16
-		case types.KindInt32:
+		case schema.KindInt32:
 			min, max = math.MinInt32, math.MaxInt32
 		}
 		if lit.Int < min || lit.Int > max {
 			return fmt.Errorf("column %q %s literal out of range", column, typ.Kind)
 		}
-	case types.KindFloat32, types.KindFloat64:
+	case schema.KindFloat32, schema.KindFloat64:
 		var v float64
 		switch lit.Kind {
 		case ValueInt:
@@ -1224,32 +1223,32 @@ func validateLiteralForType(column string, lit Value, typ types.Type) error {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
 			return fmt.Errorf("column %q float literal out of range", column)
 		}
-		if typ.Kind == types.KindFloat32 && (v < -math.MaxFloat32 || v > math.MaxFloat32) {
+		if typ.Kind == schema.KindFloat32 && (v < -math.MaxFloat32 || v > math.MaxFloat32) {
 			return fmt.Errorf("column %q float32 literal out of range", column)
 		}
-	case types.KindDecimal:
+	case schema.KindDecimal:
 		if lit.Kind != ValueInt && lit.Kind != ValueString {
 			return fmt.Errorf("column %q expects decimal literal", column)
 		}
-	case types.KindText, types.KindJSON, types.KindNamed, types.KindBytes:
+	case schema.KindText, schema.KindJSON, schema.KindNamed, schema.KindBytes:
 		if lit.Kind != ValueString {
 			return fmt.Errorf("column %q expects string literal", column)
 		}
-	case types.KindUUID:
+	case schema.KindUUID:
 		s, err := stringLit("uuid")
 		if err != nil {
 			return err
 		}
-		if _, err := types.ParseUUID(s); err != nil {
+		if _, err := vector.ParseUUID(s); err != nil {
 			return fmt.Errorf("column %q invalid uuid literal %q", column, s)
 		}
-	case types.KindTimestamp, types.KindDate, types.KindTime:
+	case schema.KindTimestamp, schema.KindDate, schema.KindTime:
 		layout := time.RFC3339Nano
 		label := "timestamp"
-		if typ.Kind == types.KindDate {
+		if typ.Kind == schema.KindDate {
 			layout = "2006-01-02"
 			label = "date"
-		} else if typ.Kind == types.KindTime {
+		} else if typ.Kind == schema.KindTime {
 			layout = "15:04:05.999999999"
 			label = "time"
 		}
@@ -1269,12 +1268,11 @@ func validateLiteralForType(column string, lit Value, typ types.Type) error {
 // BindDelete validates DELETE against a BoundTableDef and binds the optional WHERE expression.
 // No-WHERE form means "delete every row in the table" and is allowed.
 
-
 func BindDelete(stmt *DeleteStmt, def BoundTableDef) (*Plan, error) {
 	if stmt == nil {
 		return nil, fmt.Errorf("DELETE statement is nil")
 	}
-	if def.Name != "" && types.NormalizeName(stmt.Table) != types.NormalizeName(def.Name) {
+	if def.Name != "" && schema.NormalizeName(stmt.Table) != schema.NormalizeName(def.Name) {
 		return nil, fmt.Errorf("DELETE target %q does not match table %q", stmt.Table, def.Name)
 	}
 	plan := &Plan{Kind: PlanDelete, Table: def}
@@ -1292,12 +1290,11 @@ func BindDelete(stmt *DeleteStmt, def BoundTableDef) (*Plan, error) {
 // BindUpdate validates UPDATE against a BoundTableDef and binds assignments and WHERE.
 // Each SET target must be a distinct table column and the literal must match the column type.
 
-
 func BindUpdate(stmt *UpdateStmt, def BoundTableDef) (*Plan, error) {
 	if stmt == nil {
 		return nil, fmt.Errorf("UPDATE statement is nil")
 	}
-	if def.Name != "" && types.NormalizeName(stmt.Table) != types.NormalizeName(def.Name) {
+	if def.Name != "" && schema.NormalizeName(stmt.Table) != schema.NormalizeName(def.Name) {
 		return nil, fmt.Errorf("UPDATE target %q does not match table %q", stmt.Table, def.Name)
 	}
 	if len(stmt.Assignments) == 0 {
@@ -1305,12 +1302,12 @@ func BindUpdate(stmt *UpdateStmt, def BoundTableDef) (*Plan, error) {
 	}
 	columnsByName := make(map[string]BoundColumnDef, len(def.Columns))
 	for _, c := range def.Columns {
-		columnsByName[types.NormalizeName(c.Name)] = c
+		columnsByName[schema.NormalizeName(c.Name)] = c
 	}
 	seen := make(map[string]struct{}, len(stmt.Assignments))
 	assignments := make([]BoundAssignment, 0, len(stmt.Assignments))
 	for _, a := range stmt.Assignments {
-		key := types.NormalizeName(a.Column)
+		key := schema.NormalizeName(a.Column)
 		if _, dup := seen[key]; dup {
 			return nil, fmt.Errorf("UPDATE assigns column %q twice", a.Column)
 		}
@@ -1348,7 +1345,6 @@ func BindUpdate(stmt *UpdateStmt, def BoundTableDef) (*Plan, error) {
 
 // Joined SELECT helpers: ON-clause splitting, qualified output expansion, and qualified
 // ORDER BY binding. The join chain itself is built in planner.go's planFrom.
-
 
 type TableResolver func(name string) (BoundTableDef, error)
 
@@ -1428,9 +1424,9 @@ func bindJoinedOutputs(stmt *SelectStmt, sources []joinedSource, columns map[str
 		if _, ok := stmt.Select[0].Expr.(*StarRef); ok {
 			var outputs []BoundOutput
 			for _, s := range sources {
-				alias := types.NormalizeName(s.Alias)
+				alias := schema.NormalizeName(s.Alias)
 				for _, col := range s.Def.Columns {
-					qual := alias + "." + types.NormalizeName(col.Name)
+					qual := alias + "." + schema.NormalizeName(col.Name)
 					outputs = append(outputs, BoundOutput{Expr: BoundExpr{Op: ExprColumn, Type: col.Type, Column: qual}})
 				}
 			}
@@ -1459,7 +1455,6 @@ func bindJoinedOutputs(stmt *SelectStmt, sources []joinedSource, columns map[str
 // aggregate extraction, ORDER BY/LIMIT lowering. The single-table BindSelect wrapper exists
 // for tests that supply a known def directly; production planning runs through planner.go.
 
-
 func BindSelect(stmt *SelectStmt, def BoundTableDef) (*Plan, error) {
 	if stmt == nil {
 		return nil, fmt.Errorf("SELECT statement is nil")
@@ -1471,7 +1466,7 @@ func BindSelect(stmt *SelectStmt, def BoundTableDef) (*Plan, error) {
 	if len(joins) != 0 {
 		return nil, fmt.Errorf("BindSelect does not accept joined queries")
 	}
-	if def.Name != "" && types.NormalizeName(primary.Name) != types.NormalizeName(def.Name) {
+	if def.Name != "" && schema.NormalizeName(primary.Name) != schema.NormalizeName(def.Name) {
 		return nil, fmt.Errorf("SELECT target %q does not match table %q", primary.Name, def.Name)
 	}
 	sc := &scope{
@@ -1658,7 +1653,7 @@ func bindWhereLogicalExpr(columns map[string]BoundColumnDef, expr Expr) (BoundEx
 		if err != nil {
 			return BoundExpr{}, err
 		}
-		return BoundExpr{Op: ExprAnd, Type: types.Bool, Args: []BoundExpr{left, right}}, nil
+		return BoundExpr{Op: ExprAnd, Type: schema.Bool, Args: []BoundExpr{left, right}}, nil
 	case *OrExpr:
 		left, err := bindWhereLogicalExpr(columns, expr.Left)
 		if err != nil {
@@ -1668,13 +1663,13 @@ func bindWhereLogicalExpr(columns map[string]BoundColumnDef, expr Expr) (BoundEx
 		if err != nil {
 			return BoundExpr{}, err
 		}
-		return BoundExpr{Op: ExprOr, Type: types.Bool, Args: []BoundExpr{left, right}}, nil
+		return BoundExpr{Op: ExprOr, Type: schema.Bool, Args: []BoundExpr{left, right}}, nil
 	case *NotExpr:
 		child, err := bindWhereLogicalExpr(columns, expr.Expr)
 		if err != nil {
 			return BoundExpr{}, err
 		}
-		return BoundExpr{Op: ExprNot, Type: types.Bool, Args: []BoundExpr{child}}, nil
+		return BoundExpr{Op: ExprNot, Type: schema.Bool, Args: []BoundExpr{child}}, nil
 	case *BinaryExpr:
 		op, err := bindBinaryOp(expr.Op)
 		if err != nil {
@@ -1688,7 +1683,7 @@ func bindWhereLogicalExpr(columns map[string]BoundColumnDef, expr Expr) (BoundEx
 			return BoundExpr{}, err
 		}
 		normalizeComparison(&left, &right)
-		return BoundExpr{Op: op, Type: types.Bool, Args: []BoundExpr{left, right}}, nil
+		return BoundExpr{Op: op, Type: schema.Bool, Args: []BoundExpr{left, right}}, nil
 	case *BetweenExpr:
 		target, err := bindExpr(columns, expr.Expr)
 		if err != nil {
@@ -1707,7 +1702,7 @@ func bindWhereLogicalExpr(columns map[string]BoundColumnDef, expr Expr) (BoundEx
 		}
 		normalizeBound(target, &low)
 		normalizeBound(target, &high)
-		return BoundExpr{Op: ExprBetween, Type: types.Bool, Args: []BoundExpr{target, low, high}}, nil
+		return BoundExpr{Op: ExprBetween, Type: schema.Bool, Args: []BoundExpr{target, low, high}}, nil
 	case *InExpr:
 		target, err := bindExpr(columns, expr.Expr)
 		if err != nil {
@@ -1731,7 +1726,7 @@ func bindWhereLogicalExpr(columns map[string]BoundColumnDef, expr Expr) (BoundEx
 			normalizeBound(target, &bound)
 			args = append(args, bound)
 		}
-		return BoundExpr{Op: ExprIn, Type: types.Bool, Args: args, Not: expr.Not}, nil
+		return BoundExpr{Op: ExprIn, Type: schema.Bool, Args: args, Not: expr.Not}, nil
 	case *ExistsExpr:
 		return bindExistsExpr(columns, expr)
 	default:
@@ -1775,7 +1770,7 @@ func bindHavingLogicalExpr(acc *hiddenAggs, columns map[string]BoundColumnDef, b
 		if err != nil {
 			return BoundExpr{}, err
 		}
-		return BoundExpr{Op: ExprAnd, Type: types.Bool, Args: []BoundExpr{left, right}}, nil
+		return BoundExpr{Op: ExprAnd, Type: schema.Bool, Args: []BoundExpr{left, right}}, nil
 	case *OrExpr:
 		left, err := bindHavingLogicalExpr(acc, columns, baseColumns, expr.Left)
 		if err != nil {
@@ -1785,13 +1780,13 @@ func bindHavingLogicalExpr(acc *hiddenAggs, columns map[string]BoundColumnDef, b
 		if err != nil {
 			return BoundExpr{}, err
 		}
-		return BoundExpr{Op: ExprOr, Type: types.Bool, Args: []BoundExpr{left, right}}, nil
+		return BoundExpr{Op: ExprOr, Type: schema.Bool, Args: []BoundExpr{left, right}}, nil
 	case *NotExpr:
 		child, err := bindHavingLogicalExpr(acc, columns, baseColumns, expr.Expr)
 		if err != nil {
 			return BoundExpr{}, err
 		}
-		return BoundExpr{Op: ExprNot, Type: types.Bool, Args: []BoundExpr{child}}, nil
+		return BoundExpr{Op: ExprNot, Type: schema.Bool, Args: []BoundExpr{child}}, nil
 	case *BinaryExpr:
 		if isArithmeticOp(expr.Op) {
 			return BoundExpr{}, fmt.Errorf("HAVING requires a predicate expression")
@@ -1812,7 +1807,7 @@ func bindHavingLogicalExpr(acc *hiddenAggs, columns map[string]BoundColumnDef, b
 			return BoundExpr{}, err
 		}
 		normalizeComparison(&left, &right)
-		return BoundExpr{Op: op, Type: types.Bool, Args: []BoundExpr{left, right}}, nil
+		return BoundExpr{Op: op, Type: schema.Bool, Args: []BoundExpr{left, right}}, nil
 	case *BetweenExpr:
 		target, err := bindHavingScalarExpr(acc, columns, baseColumns, expr.Expr)
 		if err != nil {
@@ -1831,7 +1826,7 @@ func bindHavingLogicalExpr(acc *hiddenAggs, columns map[string]BoundColumnDef, b
 		}
 		normalizeBound(target, &low)
 		normalizeBound(target, &high)
-		return BoundExpr{Op: ExprBetween, Type: types.Bool, Args: []BoundExpr{target, low, high}}, nil
+		return BoundExpr{Op: ExprBetween, Type: schema.Bool, Args: []BoundExpr{target, low, high}}, nil
 	case *InExpr:
 		target, err := bindHavingScalarExpr(acc, columns, baseColumns, expr.Expr)
 		if err != nil {
@@ -1850,7 +1845,7 @@ func bindHavingLogicalExpr(acc *hiddenAggs, columns map[string]BoundColumnDef, b
 			normalizeBound(target, &bound)
 			args = append(args, bound)
 		}
-		return BoundExpr{Op: ExprIn, Type: types.Bool, Args: args, Not: expr.Not}, nil
+		return BoundExpr{Op: ExprIn, Type: schema.Bool, Args: args, Not: expr.Not}, nil
 	default:
 		return BoundExpr{}, fmt.Errorf("unsupported HAVING expression")
 	}
@@ -1893,7 +1888,7 @@ func bindHavingScalarExpr(acc *hiddenAggs, columns map[string]BoundColumnDef, ba
 		if !ok {
 			return BoundExpr{}, fmt.Errorf("unsupported HAVING arithmetic operator")
 		}
-		return BoundExpr{Op: op, Type: types.Int64, Args: []BoundExpr{left, right}}, nil
+		return BoundExpr{Op: op, Type: schema.Int64, Args: []BoundExpr{left, right}}, nil
 	default:
 		return BoundExpr{}, fmt.Errorf("unsupported HAVING scalar expression")
 	}
@@ -1908,8 +1903,8 @@ func bindHavingAggregate(acc *hiddenAggs, baseColumns map[string]BoundColumnDef,
 		return BoundExpr{}, err
 	}
 	for _, selected := range acc.selected {
-		if selected.Func == want && selected.Star == star && types.NormalizeName(selected.ArgName) == types.NormalizeName(argName) {
-			return BoundExpr{Op: ExprColumn, Type: types.Int64, Column: aggregateOutputName(selected)}, nil
+		if selected.Func == want && selected.Star == star && schema.NormalizeName(selected.ArgName) == schema.NormalizeName(argName) {
+			return BoundExpr{Op: ExprColumn, Type: schema.Int64, Column: aggregateOutputName(selected)}, nil
 		}
 	}
 	hidden, err := bindHiddenHavingAggregate(baseColumns, want, argName, star)
@@ -1918,11 +1913,11 @@ func bindHavingAggregate(acc *hiddenAggs, baseColumns map[string]BoundColumnDef,
 	}
 	for _, existing := range acc.hidden {
 		if existing.Func == hidden.Func && existing.ArgColumn == hidden.ArgColumn && existing.Star == hidden.Star {
-			return BoundExpr{Op: ExprColumn, Type: types.Int64, Column: existing.Alias}, nil
+			return BoundExpr{Op: ExprColumn, Type: schema.Int64, Column: existing.Alias}, nil
 		}
 	}
 	acc.hidden = append(acc.hidden, hidden)
-	return BoundExpr{Op: ExprColumn, Type: types.Int64, Column: hidden.Alias}, nil
+	return BoundExpr{Op: ExprColumn, Type: schema.Int64, Column: hidden.Alias}, nil
 }
 
 func bindHiddenHavingAggregate(columns map[string]BoundColumnDef, fn AggregateFunc, argName string, star bool) (AggSpec, error) {
@@ -1945,7 +1940,7 @@ func hiddenHavingAggregateName(fn AggregateFunc, column string, star bool) strin
 	if fn == AggregateCount && star {
 		return "__having_count_star"
 	}
-	return "__having_" + defaultAggregateName(fn) + "_" + types.NormalizeName(column)
+	return "__having_" + defaultAggregateName(fn) + "_" + schema.NormalizeName(column)
 }
 
 func decomposeAggregateCall(call *FuncCall) (AggregateFunc, string, bool, error) {
@@ -1982,7 +1977,7 @@ func bindGroupExprs(columns map[string]BoundColumnDef, groupBy []Expr) ([]BoundE
 			}
 			return nil, err
 		}
-		if bound.Type.Kind == types.KindInvalid {
+		if bound.Type.Kind == schema.KindInvalid {
 			return nil, fmt.Errorf("unsupported GROUP BY expression")
 		}
 		out = append(out, bound)
@@ -2056,12 +2051,12 @@ func validateAggregateColumn(agg AggregateFunc, column string, columns map[strin
 	if column == "" || agg == AggregateCount {
 		return nil
 	}
-	col, ok := columns[types.NormalizeName(column)]
+	col, ok := columns[schema.NormalizeName(column)]
 	if !ok {
 		return nil
 	}
 	switch col.Type.Kind {
-	case types.KindInt32, types.KindInt64, types.KindFloat32, types.KindFloat64:
+	case schema.KindInt32, schema.KindInt64, schema.KindFloat32, schema.KindFloat64:
 		return nil
 	default:
 		return fmt.Errorf("%s column %q is %s, want int32/int64/float32/float64", strings.ToUpper(defaultAggregateName(agg)), col.Name, col.Type)
@@ -2120,10 +2115,10 @@ func applyOrderLimit(src *Rel, stmt *SelectStmt, outputs []BoundOutput, columns 
 func bindSortKeys(orderBy []OrderExpr, outputs []BoundOutput, columns map[string]BoundColumnDef) ([]SortKey, error) {
 	keys := make([]SortKey, 0, len(orderBy))
 	for _, order := range orderBy {
-		name := types.NormalizeName(order.Name)
+		name := schema.NormalizeName(order.Name)
 		matched := false
 		for _, output := range outputs {
-			if name == types.NormalizeName(outputExprName(output)) {
+			if name == schema.NormalizeName(outputExprName(output)) {
 				keys = append(keys, SortKey{Name: outputExprName(output), Expr: output.Expr, Desc: order.Desc})
 				matched = true
 				break
@@ -2176,9 +2171,9 @@ func aggregateOutputName(spec AggSpec) string {
 	return defaultAggregateName(spec.Func)
 }
 
-func groupableKind(kind types.Kind) bool {
+func groupableKind(kind schema.Kind) bool {
 	switch kind {
-	case types.KindText, types.KindBytes, types.KindUUID, types.KindInt16, types.KindInt32, types.KindInt64, types.KindBool, types.KindDate, types.KindTimestamp, types.KindNamed:
+	case schema.KindText, schema.KindBytes, schema.KindUUID, schema.KindInt16, schema.KindInt32, schema.KindInt64, schema.KindBool, schema.KindDate, schema.KindTimestamp, schema.KindNamed:
 		return true
 	default:
 		return false
@@ -2191,7 +2186,7 @@ func boundExprEqual(left BoundExpr, right BoundExpr) bool {
 	}
 	switch left.Op {
 	case ExprColumn:
-		return types.NormalizeName(left.Column) == types.NormalizeName(right.Column)
+		return schema.NormalizeName(left.Column) == schema.NormalizeName(right.Column)
 	case ExprLiteral:
 		return left.Literal == right.Literal
 	}
@@ -2267,3 +2262,26 @@ func allColumnIDs(columns []BoundColumnDef) []ColumnID {
 	return ids
 }
 
+func fusePlan(root *Rel) *Rel {
+	if root == nil {
+		return nil
+	}
+	for i, in := range root.Inputs {
+		root.Inputs[i] = fusePlan(in)
+	}
+	if root.Op == RelFilter && len(root.Inputs) == 1 && root.Inputs[0] != nil && root.Inputs[0].Op == RelFilter {
+		child := root.Inputs[0]
+		combined := BoundExpr{
+			Op:   ExprAnd,
+			Type: root.Predicate.Type,
+			Args: []BoundExpr{child.Predicate, root.Predicate},
+		}
+		root = &Rel{
+			Op:        RelFilter,
+			Outputs:   root.Outputs,
+			Inputs:    child.Inputs,
+			Predicate: combined,
+		}
+	}
+	return root
+}

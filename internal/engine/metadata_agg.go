@@ -1,18 +1,18 @@
-// Metadata-only aggregate short-circuit. Resolves count, min, max, and varbytes
-// GROUP BY count from manifest row counts, per-column stats, and the dict-histogram
-// sidecar. Skipped when any segment carries a deletion vector.
+// Metadata-only aggregate short-circuit that resolves count plus min and max and sum and varbytes GROUP BY count from manifest row counts and per-column stats and the dict-histogram sidecar.
+// count(*) and non-nullable count(col) survive a deletion vector via a popcount on the loaded DV bits, the other aggregates bail to the scan path because their math depends on individual row values.
 package engine
 
 import (
 	"fmt"
 	"math"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-func (db *DB) tryMetadataAggregate(plan *sql.Plan) (*Rows, bool, error) {
+func (db *DB) answerFromMetadata(plan *sql.Plan) (*Rows, bool, error) {
 	if plan == nil || plan.Kind != sql.PlanQuery || plan.Rel == nil {
 		return nil, false, nil
 	}
@@ -25,19 +25,22 @@ func (db *DB) tryMetadataAggregate(plan *sql.Plan) (*Rows, bool, error) {
 		return nil, false, nil
 	}
 	scan := agg.Inputs[0]
-	if scan.Op != sql.RelScan || scan.Where != nil {
+	if scan.Op != sql.RelScan {
 		return nil, false, nil
+	}
+	if scan.Where != nil {
+		return db.tryCountWithFilter(plan, rel, agg, scan)
 	}
 	segs, err := db.openSegmentsForQuery(scan.Table.Name)
 	if err != nil {
 		return nil, false, err
 	}
-	for _, seg := range segs {
-		if seg.DV != nil {
-			return nil, false, nil
-		}
-	}
 	if len(agg.GroupBy) == 1 {
+		for _, seg := range segs {
+			if seg.DV != nil {
+				return nil, false, nil
+			}
+		}
 		return db.tryGroupByDictHistogram(plan, rel, agg, scan, segs)
 	}
 	if len(agg.GroupBy) != 0 {
@@ -73,6 +76,93 @@ func (db *DB) tryMetadataAggregate(plan *sql.Plan) (*Rows, bool, error) {
 	return rows, true, nil
 }
 
+// tryCountWithFilter answers count(*) WHERE varbytes_col = literal by summing dict-hist entries.
+// Falls through to the operator path when the WHERE is not a single varbytes equality leaf or any segment lacks the dict-hist sidecar.
+func (db *DB) tryCountWithFilter(plan *sql.Plan, rel, agg, scan *sql.Rel) (*Rows, bool, error) {
+	if len(agg.GroupBy) != 0 || len(agg.Aggregates) != 1 {
+		return nil, false, nil
+	}
+	a := agg.Aggregates[0]
+	if a.Func != sql.AggregateCount || !a.Star {
+		return nil, false, nil
+	}
+	where := *scan.Where
+	col, lit, ok := singleEqLeaf(where)
+	if !ok {
+		return nil, false, nil
+	}
+	colDef, ok := scanColumnDefByName(scan, col)
+	if !ok {
+		return nil, false, nil
+	}
+	switch colDef.Type.Kind {
+	case schema.KindText, schema.KindBytes, schema.KindJSON:
+	default:
+		return nil, false, nil
+	}
+	segs, err := db.openSegmentsForQuery(scan.Table.Name)
+	if err != nil {
+		return nil, false, err
+	}
+	keyNorm := schema.NormalizeName(colDef.Name)
+	var total int64
+	for _, seg := range segs {
+		if seg.DV != nil {
+			return nil, false, nil
+		}
+		hists, err := seg.DictHistograms()
+		if err != nil || hists == nil {
+			return nil, false, nil
+		}
+		hist, ok := hists[keyNorm]
+		if !ok {
+			return nil, false, nil
+		}
+		total += int64(hist[lit])
+	}
+	key := a.Alias
+	if key == "" {
+		key = defaultAggOutputName(a.Func)
+	}
+	row := make([]any, len(rel.Outputs))
+	for i, o := range rel.Outputs {
+		if o.Expr.Op != sql.ExprColumn || o.Expr.Column != key {
+			return nil, false, nil
+		}
+		row[i] = total
+	}
+	rows := &Rows{Columns: planOutputNames(plan), Values: [][]any{row}}
+	return rows, true, nil
+}
+
+func singleEqLeaf(e sql.BoundExpr) (col string, lit string, ok bool) {
+	if e.Op != sql.ExprEqual || len(e.Args) != 2 {
+		return "", "", false
+	}
+	c, l := e.Args[0], e.Args[1]
+	if c.Op == sql.ExprLiteral && l.Op == sql.ExprColumn {
+		c, l = l, c
+	}
+	if c.Op != sql.ExprColumn || l.Op != sql.ExprLiteral {
+		return "", "", false
+	}
+	s, ok := l.Literal.(string)
+	if !ok {
+		return "", "", false
+	}
+	return c.Column, s, true
+}
+
+func scanColumnDefByName(scan *sql.Rel, name string) (sql.BoundColumnDef, bool) {
+	want := schema.NormalizeName(name)
+	for _, c := range scan.Table.Columns {
+		if schema.NormalizeName(c.Name) == want {
+			return c, true
+		}
+	}
+	return sql.BoundColumnDef{}, false
+}
+
 // All aggregates must be count() (Star or over a non-nullable column). Every segment
 // must have a .dh sidecar for the group column or we fall back to the operator path.
 func (db *DB) tryGroupByDictHistogram(plan *sql.Plan, rel, agg, scan *sql.Rel, segs []*storage.Segment) (*Rows, bool, error) {
@@ -90,13 +180,13 @@ func (db *DB) tryGroupByDictHistogram(plan *sql.Plan, rel, agg, scan *sql.Rel, s
 			}
 		}
 	}
-	keyName := types.NormalizeName(agg.GroupBy[0].Column)
+	keyName := schema.NormalizeName(agg.GroupBy[0].Column)
 	keyCol, ok := scanColumnDefByID(scan, agg.GroupBy[0].ColumnID)
 	if !ok {
 		return nil, false, nil
 	}
 	switch keyCol.Type.Kind {
-	case types.KindText, types.KindBytes, types.KindJSON:
+	case schema.KindText, schema.KindBytes, schema.KindJSON:
 	default:
 		return nil, false, nil
 	}
@@ -165,12 +255,18 @@ func computeMetadataAggregate(a sql.AggSpec, scan *sql.Rel, segs []*storage.Segm
 		}
 		return countColumn(segs, col)
 	case sql.AggregateMin, sql.AggregateMax:
+		if anySegHasDV(segs) {
+			return nil, false, nil
+		}
 		col, ok := scanColumnDefByID(scan, a.ArgColumn)
 		if !ok {
 			return nil, false, fmt.Errorf("metadata aggregate: column id %d not in scan", a.ArgColumn)
 		}
 		return mergeMinMax(segs, col.Name, col.Type.Kind, a.Func == sql.AggregateMax)
 	case sql.AggregateSum:
+		if anySegHasDV(segs) {
+			return nil, false, nil
+		}
 		col, ok := scanColumnDefByID(scan, a.ArgColumn)
 		if !ok {
 			return nil, false, fmt.Errorf("metadata aggregate: column id %d not in scan", a.ArgColumn)
@@ -180,10 +276,23 @@ func computeMetadataAggregate(a sql.AggSpec, scan *sql.Rel, segs []*storage.Segm
 	return nil, false, nil
 }
 
+func anySegHasDV(segs []*storage.Segment) bool {
+	for _, seg := range segs {
+		if seg.DV != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func countAllRows(segs []*storage.Segment) int64 {
 	var total int64
 	for _, seg := range segs {
-		total += int64(seg.Rows())
+		rows := int(seg.Rows())
+		if seg.DV != nil {
+			rows -= seg.DV.NullCount(rows)
+		}
+		total += int64(rows)
 	}
 	return total
 }
@@ -191,6 +300,9 @@ func countAllRows(segs []*storage.Segment) int64 {
 func countColumn(segs []*storage.Segment, col sql.BoundColumnDef) (any, bool, error) {
 	if !col.Nullable {
 		return countAllRows(segs), true, nil
+	}
+	if anySegHasDV(segs) {
+		return nil, false, nil
 	}
 	var total int64
 	for _, seg := range segs {
@@ -203,9 +315,9 @@ func countColumn(segs []*storage.Segment, col sql.BoundColumnDef) (any, bool, er
 	return total, true, nil
 }
 
-func mergeMinMax(segs []*storage.Segment, name string, kind types.Kind, wantMax bool) (any, bool, error) {
+func mergeMinMax(segs []*storage.Segment, name string, kind schema.Kind, wantMax bool) (any, bool, error) {
 	switch kind {
-	case types.KindInt16, types.KindInt32, types.KindInt64, types.KindDate, types.KindTimestamp, types.KindTime, types.KindDecimal:
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64, schema.KindDate, schema.KindTimestamp, schema.KindTime, schema.KindDecimal:
 	default:
 		return nil, false, nil
 	}
@@ -243,11 +355,11 @@ func mergeMinMax(segs []*storage.Segment, name string, kind types.Kind, wantMax 
 
 func mergeSum(segs []*storage.Segment, col sql.BoundColumnDef) (any, bool, error) {
 	switch col.Type.Kind {
-	case types.KindInt16, types.KindInt32, types.KindInt64, types.KindDate, types.KindTimestamp, types.KindTime, types.KindDecimal:
+	case schema.KindInt16, schema.KindInt32, schema.KindInt64, schema.KindDate, schema.KindTimestamp, schema.KindTime, schema.KindDecimal:
 	default:
 		return nil, false, nil
 	}
-	name := types.NormalizeName(col.Name)
+	name := schema.NormalizeName(col.Name)
 	var total int64
 	for _, seg := range segs {
 		sums, err := seg.NumericSums()
@@ -280,23 +392,23 @@ func addOverflows(a, b int64) bool {
 
 func segColInt64MinMax(c *storage.SegmentColumn) (int64, int64, bool) {
 	switch c.Kind {
-	case types.VecInt16, types.VecInt32, types.VecDate:
+	case vector.VecInt16, vector.VecInt32, vector.VecDate:
 		s := storage.UnmarshalNumericStats[int32](c.Stats[:], true)
 		return int64(s.Min), int64(s.Max), true
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		s := storage.UnmarshalNumericStats[int64](c.Stats[:], true)
 		return s.Min, s.Max, true
 	}
 	return 0, 0, false
 }
 
-func narrowInt(v int64, kind types.Kind) any {
+func narrowInt(v int64, kind schema.Kind) any {
 	switch kind {
-	case types.KindInt16:
+	case schema.KindInt16:
 		if v >= math.MinInt16 && v <= math.MaxInt16 {
 			return int16(v)
 		}
-	case types.KindInt32, types.KindDate:
+	case schema.KindInt32, schema.KindDate:
 		if v >= math.MinInt32 && v <= math.MaxInt32 {
 			return int32(v)
 		}
@@ -306,7 +418,7 @@ func narrowInt(v int64, kind types.Kind) any {
 
 func findSegColumn(seg *storage.Segment, name string) (*storage.SegmentColumn, bool) {
 	for i := range seg.Cols {
-		if types.NormalizeName(seg.Cols[i].Name) == types.NormalizeName(name) {
+		if schema.NormalizeName(seg.Cols[i].Name) == schema.NormalizeName(name) {
 			return &seg.Cols[i], true
 		}
 	}

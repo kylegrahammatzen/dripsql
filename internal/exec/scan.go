@@ -6,10 +6,11 @@ package exec
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type ScanOp struct {
@@ -19,7 +20,7 @@ type ScanOp struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
-	out    chan types.Batch
+	out    chan vector.Batch
 	err    chan error
 	wg     sync.WaitGroup
 	state  operatorState
@@ -42,7 +43,7 @@ func (s *ScanOp) Open(ctx context.Context) error {
 		workers = len(s.Opts.Segments)
 	}
 
-	s.out = make(chan types.Batch, workers)
+	s.out = make(chan vector.Batch, workers)
 	s.err = make(chan error, workers)
 
 	if workers == 1 {
@@ -77,10 +78,12 @@ func (s *ScanOp) runShard(segs []*storage.Segment) {
 func (s *ScanOp) runScan(segs []*storage.Segment) {
 	opts := s.Opts
 	opts.Segments = segs
-	err := storage.Scan(opts, func(batch types.Batch, sel *types.SelectionMask) error {
+	err := storage.Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error {
 		cloned := cloneBatch(batch, s.ColumnAlias)
 		clonedSel := sel.Clone()
-		cloned.Sel = &clonedSel
+		if err := cloned.SetSel(&clonedSel); err != nil {
+			return fmt.Errorf("scan: %w", err)
+		}
 		select {
 		case <-s.ctx.Done():
 			return s.ctx.Err()
@@ -105,37 +108,37 @@ func partitionSegments(segs []*storage.Segment, workers int) [][]*storage.Segmen
 	return out
 }
 
-func cloneBatch(b types.Batch, alias string) types.Batch {
-	cols := make([]types.Column, len(b.Columns))
+func cloneBatch(b vector.Batch, alias string) vector.Batch {
+	cols := make([]vector.Column, len(b.Columns))
 	for i, c := range b.Columns {
 		name := c.Name
 		if alias != "" {
 			name = alias + "." + c.Name
 		}
-		cols[i] = types.Column{
+		cols[i] = vector.Column{
 			Name:       name,
 			Type:       c.Type,
 			EnumLabels: c.EnumLabels,
 			V:          c.V.Clone(),
 		}
 	}
-	return types.Batch{Len: b.Len, Columns: cols}
+	return vector.Batch{Len: b.Len, Columns: cols}
 }
 
-func (s *ScanOp) Next() (types.Batch, bool, error) {
+func (s *ScanOp) Next() (vector.Batch, bool, error) {
 	if err := s.state.requireOpen(); err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	select {
 	case <-s.ctx.Done():
-		return types.Batch{}, false, s.ctx.Err()
+		return vector.Batch{}, false, s.ctx.Err()
 	case batch, ok := <-s.out:
 		if !ok {
 			select {
 			case err := <-s.err:
-				return types.Batch{}, false, err
+				return vector.Batch{}, false, err
 			default:
-				return types.Batch{}, false, nil
+				return vector.Batch{}, false, nil
 			}
 		}
 		return batch, true, nil

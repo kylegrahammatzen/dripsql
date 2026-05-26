@@ -1,21 +1,29 @@
-// DB wires the parser/binder, plan cache, exec operators, and storage manifests behind Open/Exec/Query.
+﻿// DB wires the parser/binder, plan cache, exec operators, and storage manifests behind Open/Exec/Query.
 // One sync.Mutex serializes catalog and table state. The plan cache carries its own internal lock.
 package engine
 
 import (
-	"container/list"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+)
+
+// Sentinels callers branch on with errors.Is.
+var (
+	ErrClosed   = errors.New("database is closed")
+	ErrReadOnly = errors.New("database is read-only")
+	ErrTxDone   = errors.New("transaction already committed or rolled back")
 )
 
 type DB struct {
@@ -27,26 +35,43 @@ type DB struct {
 	plans         *sql.PlanCache
 	manifests     map[string]*storage.Manifest
 	segCount      map[string]uint64
-	segCache      map[segCacheKey]*list.Element
-	segLRU        *list.List
+	segments      *segmentCache
 	closed        bool
 	lastWriteSpan atomic.Pointer[storage.Span]
 	wal           *storage.WAL
 	nextTxnID     uint64
-	nextCommitTs atomic.Uint64
-	pinnedReadTs map[uint64]int
-	opts         OpenOpts
+	nextCommitTs  atomic.Uint64
+	pinnedReadTs  map[uint64]int
+
+	autoRetention atomic.Bool
+	retentionLag  atomic.Uint64
+	cacheSize     atomic.Int64
+	readOnly      atomic.Bool
 }
 
-type segCacheEntry struct {
-	key segCacheKey
-	seg *storage.Segment
+func (db *DB) SetAutoRetention(on bool) { db.autoRetention.Store(on) }
+
+func (db *DB) SetRetentionLag(lag uint64) { db.retentionLag.Store(lag) }
+
+// Values below 1 fall back to the compiled-in default so callers cannot wedge the cache at zero.
+func (db *DB) SetCacheSize(n int) {
+	if n < 1 {
+		n = defaultSegCacheLimit
+	}
+	db.cacheSize.Store(int64(n))
 }
 
-// segCacheLimit caps the number of open segment file handles. Default of 256 keeps
-// us well below the Windows default-handle ceiling without thrashing on typical
-// workloads. Tunable later if we hit a working set that doesn't fit.
-const segCacheLimit = 256
+func (db *DB) SetReadOnly(on bool) { db.readOnly.Store(on) }
+
+// Default keeps us well below the Windows default-handle ceiling without thrashing on typical workloads.
+const defaultSegCacheLimit = 256
+
+func (db *DB) segCacheLimit() int {
+	if n := db.cacheSize.Load(); n > 0 {
+		return int(n)
+	}
+	return defaultSegCacheLimit
+}
 
 // Returns the most recent statement's write-phase span tree, or nil. The
 // pointer is replaced atomically. The tree it points to is never mutated
@@ -62,14 +87,29 @@ func (db *DB) publishWriteSpan(s *storage.Span) {
 	db.lastWriteSpan.Store(s)
 }
 
-type segCacheKey struct {
-	path   string
-	dvPath string
-}
-
 type Result struct {
 	Statements   int
 	RowsAffected int64
+}
+
+// Seam between DB's auto-commit path and Tx's staged path; DB binds db.commitManifestTxn, Tx binds tx.commit.
+type commitFn func(table string, adds []storage.ManifestSegmentAdd, dvUpdates []storage.ManifestDVUpdate) error
+
+// lockOpen acquires db.mu and rejects when the DB has been closed; on success the caller must defer db.mu.Unlock.
+func (db *DB) lockOpen() error {
+	db.mu.Lock()
+	if db.closed {
+		db.mu.Unlock()
+		return ErrClosed
+	}
+	return nil
+}
+
+func ctxOrBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }
 
 type Rows struct {
@@ -77,16 +117,7 @@ type Rows struct {
 	Values  [][]any
 }
 
-type OpenOpts struct {
-	AutoRetention bool
-	RetentionLag  uint64
-}
-
 func Open(path string) (*DB, error) {
-	return OpenWith(path, OpenOpts{})
-}
-
-func OpenWith(path string, opts OpenOpts) (*DB, error) {
 	if path == "" {
 		return nil, fmt.Errorf("engine: database path is required")
 	}
@@ -98,18 +129,16 @@ func OpenWith(path string, opts OpenOpts) (*DB, error) {
 		return nil, err
 	}
 	db := &DB{
-		root:      path,
-		types:     typesByName,
-		tables:    tablesByName,
-		version:   version,
-		plans:     sql.NewPlanCache(256),
-		manifests: make(map[string]*storage.Manifest),
-		segCount:  make(map[string]uint64),
-		segCache:     make(map[segCacheKey]*list.Element),
-		segLRU:       list.New(),
+		root:         path,
+		types:        typesByName,
+		tables:       tablesByName,
+		version:      version,
+		plans:        sql.NewPlanCache(256),
+		manifests:    make(map[string]*storage.Manifest),
+		segCount:     make(map[string]uint64),
 		pinnedReadTs: make(map[uint64]int),
-		opts:         opts,
 	}
+	db.segments = newSegmentCache(db.segCacheLimit)
 	var maxCommitTs uint64
 	for name := range tablesByName {
 		m, err := db.manifestFor(name)
@@ -136,14 +165,7 @@ func (db *DB) Close() error {
 		return nil
 	}
 	db.closed = true
-	var firstErr error
-	for e := db.segLRU.Front(); e != nil; e = e.Next() {
-		if err := e.Value.(*segCacheEntry).seg.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	db.segCache = nil
-	db.segLRU = nil
+	firstErr := db.segments.close()
 	for _, m := range db.manifests {
 		if err := m.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -160,11 +182,11 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) tableDir(name string) string {
-	return filepath.Join(db.root, "segments", types.NormalizeName(name))
+	return filepath.Join(db.root, "segments", schema.NormalizeName(name))
 }
 
 func (db *DB) manifestFor(name string) (*storage.Manifest, error) {
-	key := types.NormalizeName(name)
+	key := schema.NormalizeName(name)
 	if m, ok := db.manifests[key]; ok {
 		return m, nil
 	}
@@ -197,30 +219,65 @@ func parseSegmentID(filename string) (uint64, bool) {
 }
 
 func (db *DB) nextSegmentPath(name string) string {
-	key := types.NormalizeName(name)
+	key := schema.NormalizeName(name)
 	id := db.segCount[key]
 	db.segCount[key] = id + 1
 	return filepath.Join(db.tableDir(key), fmt.Sprintf("%06d.dsv4", id))
 }
 
 func (db *DB) table(name string) (tableEntry, error) {
-	entry, ok := db.tables[types.NormalizeName(name)]
+	entry, ok := db.tables[schema.NormalizeName(name)]
 	if !ok {
 		return tableEntry{}, fmt.Errorf("table %q does not exist", name)
 	}
 	return entry, nil
 }
 
-func columnCodecs(def sql.BoundTableDef) map[string]types.Encoding {
-	var out map[string]types.Encoding
+type ColumnInfo struct {
+	Name     string
+	Type     string
+	Nullable bool
+}
+
+func (db *DB) Tables() []string {
+	if err := db.lockOpen(); err != nil {
+		return nil
+	}
+	defer db.mu.Unlock()
+	out := make([]string, 0, len(db.tables))
+	for _, e := range db.tables {
+		out = append(out, e.spec.Name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (db *DB) TableSchema(name string) ([]ColumnInfo, error) {
+	if err := db.lockOpen(); err != nil {
+		return nil, err
+	}
+	defer db.mu.Unlock()
+	entry, ok := db.tables[schema.NormalizeName(name)]
+	if !ok {
+		return nil, fmt.Errorf("table %q does not exist", name)
+	}
+	out := make([]ColumnInfo, len(entry.spec.Columns))
+	for i, c := range entry.spec.Columns {
+		out[i] = ColumnInfo{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}
+	}
+	return out, nil
+}
+
+func columnCodecs(def sql.BoundTableDef) map[string]schema.Encoding {
+	var out map[string]schema.Encoding
 	for _, c := range def.Columns {
-		if c.Codec == types.EncodingAuto {
+		if c.Codec == schema.EncInvalid {
 			continue
 		}
 		if out == nil {
-			out = make(map[string]types.Encoding, len(def.Columns))
+			out = make(map[string]schema.Encoding, len(def.Columns))
 		}
-		out[types.NormalizeName(c.Name)] = c.Codec
+		out[schema.NormalizeName(c.Name)] = c.Codec
 	}
 	return out
 }
@@ -229,8 +286,8 @@ func (db *DB) boundTable(entry tableEntry) sql.BoundTableDef {
 	cols := make([]sql.BoundColumnDef, len(entry.spec.Columns))
 	for i, col := range entry.spec.Columns {
 		var labels []string
-		if col.Type.Kind == types.KindNamed {
-			if t, ok := db.types[types.NormalizeName(col.Type.Name)]; ok {
+		if col.Type.Kind == schema.KindNamed {
+			if t, ok := db.types[schema.NormalizeName(col.Type.Name)]; ok {
 				labels = append([]string(nil), t.spec.EnumLabels...)
 			}
 		}
@@ -261,8 +318,8 @@ func (db *DB) boundTableByName(name string) (sql.BoundTableDef, error) {
 	return db.boundTable(entry), nil
 }
 
-func (db *DB) registerType(spec types.TypeSpec) error {
-	key := types.NormalizeName(spec.Name)
+func (db *DB) registerType(spec schema.TypeSpec) error {
+	key := schema.NormalizeName(spec.Name)
 	if _, ok := db.types[key]; ok {
 		if spec.IfNotExists {
 			return nil
@@ -280,8 +337,8 @@ func (db *DB) registerType(spec types.TypeSpec) error {
 	return nil
 }
 
-func (db *DB) registerTable(spec types.TableSpec) error {
-	key := types.NormalizeName(spec.Name)
+func (db *DB) registerTable(spec schema.TableSpec) error {
+	key := schema.NormalizeName(spec.Name)
 	if _, ok := db.tables[key]; ok {
 		if spec.IfNotExists {
 			return nil
@@ -305,44 +362,41 @@ func (db *DB) registerTable(spec types.TableSpec) error {
 	return nil
 }
 
-func (db *DB) resolveTableTypes(spec *types.TableSpec) error {
-	spec.Name = types.NormalizeName(spec.Name)
+func (db *DB) resolveTableTypes(spec *schema.TableSpec) error {
+	spec.Name = schema.NormalizeName(spec.Name)
 	for i := range spec.Columns {
 		col := &spec.Columns[i]
-		col.Name = types.NormalizeName(col.Name)
-		if col.Type.Kind == types.KindNamed {
-			name := types.NormalizeName(col.Type.Name)
+		col.Name = schema.NormalizeName(col.Name)
+		if col.Type.Kind == schema.KindNamed {
+			name := schema.NormalizeName(col.Type.Name)
 			if _, ok := db.types[name]; !ok {
 				return fmt.Errorf("unknown type %q", col.Type.Name)
 			}
-			col.Type = types.Named(name)
+			col.Type = schema.Named(name)
 		}
 	}
 	return nil
 }
 
-func (db *DB) Exec(ctx context.Context, sqlText string) (Result, error) {
-	if db == nil {
-		return Result{}, fmt.Errorf("engine: nil DB")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func (db *DB) Exec(ctx context.Context, sqlText string, args ...any) (Result, error) {
+	ctx = ctxOrBackground(ctx)
 	stmts, err := sql.Parse(sqlText)
 	if err != nil {
 		return Result{}, err
 	}
-	db.mu.Lock()
+	if err := db.lockOpen(); err != nil {
+		return Result{}, err
+	}
 	defer db.mu.Unlock()
-	if db.closed {
-		return Result{}, fmt.Errorf("engine: database is closed")
+	if db.readOnly.Load() {
+		return Result{}, ErrReadOnly
 	}
 	var result Result
 	for _, stmt := range stmts {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		affected, err := db.execStmt(ctx, stmt)
+		affected, err := db.execStmt(ctx, stmt, args)
 		if err != nil {
 			return result, err
 		}
@@ -352,15 +406,19 @@ func (db *DB) Exec(ctx context.Context, sqlText string) (Result, error) {
 	return result, nil
 }
 
-func (db *DB) execStmt(ctx context.Context, stmt sql.Stmt) (int64, error) {
+func (db *DB) execStmt(ctx context.Context, stmt sql.Stmt, args []any) (int64, error) {
 	plan, err := db.planner().Plan(stmt)
+	if err != nil {
+		return 0, err
+	}
+	plan, err = sql.BindParameters(plan, args)
 	if err != nil {
 		return 0, err
 	}
 	switch plan.Kind {
 	case sql.PlanCreateType:
 		spec := plan.TypeSpec
-		spec.Name = types.NormalizeName(spec.Name)
+		spec.Name = schema.NormalizeName(spec.Name)
 		if err := spec.Validate(); err != nil {
 			return 0, err
 		}
@@ -375,11 +433,11 @@ func (db *DB) execStmt(ctx context.Context, stmt sql.Stmt) (int64, error) {
 		}
 		return 0, db.registerTable(spec)
 	case sql.PlanInsert:
-		return db.insert(ctx, plan, autoCommitTarget{db})
+		return db.insert(ctx, plan, db.commitManifestTxn)
 	case sql.PlanDelete:
-		return db.delete(ctx, plan, autoCommitTarget{db})
+		return db.delete(ctx, plan, db.commitManifestTxn)
 	case sql.PlanUpdate:
-		return db.update(ctx, plan, autoCommitTarget{db})
+		return db.update(ctx, plan, db.commitManifestTxn)
 	}
 	return 0, fmt.Errorf("engine: unsupported plan kind %v", plan.Kind)
 }
@@ -388,42 +446,38 @@ func (db *DB) planner() *sql.Planner {
 	return sql.NewPlanner(db.boundTableByName)
 }
 
-func (db *DB) Query(ctx context.Context, sqlText string) (*Rows, error) {
-	if db == nil {
-		return nil, fmt.Errorf("engine: nil DB")
+func (db *DB) Query(ctx context.Context, sqlText string, args ...any) (*Rows, error) {
+	ctx = ctxOrBackground(ctx)
+	if err := db.lockOpen(); err != nil {
+		return nil, err
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	db.mu.Lock()
 	defer db.mu.Unlock()
-	if db.closed {
-		return nil, fmt.Errorf("engine: database is closed")
-	}
 	plan, err := db.planForQuery(sqlText)
 	if err != nil {
 		return nil, err
 	}
-	return db.runQuery(ctx, plan)
+	bound, err := sql.BindParameters(plan, args)
+	if err != nil {
+		return nil, err
+	}
+	return db.runQuery(ctx, bound)
 }
 
-func (db *DB) QueryAt(ctx context.Context, sqlText string, readTs uint64) (*Rows, error) {
-	if db == nil {
-		return nil, fmt.Errorf("engine: nil DB")
+func (db *DB) QueryAt(ctx context.Context, sqlText string, readTs uint64, args ...any) (*Rows, error) {
+	ctx = ctxOrBackground(ctx)
+	if err := db.lockOpen(); err != nil {
+		return nil, err
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	db.mu.Lock()
 	defer db.mu.Unlock()
-	if db.closed {
-		return nil, fmt.Errorf("engine: database is closed")
-	}
 	plan, err := db.planForQuery(sqlText)
 	if err != nil {
 		return nil, err
 	}
-	return db.runQueryWith(ctx, plan, func(d sql.BoundTableDef) ([]*storage.Segment, error) {
+	bound, err := sql.BindParameters(plan, args)
+	if err != nil {
+		return nil, err
+	}
+	return db.runQueryWith(ctx, bound, func(d sql.BoundTableDef) ([]*storage.Segment, error) {
 		ts := readTs
 		if d.AsOf != 0 {
 			ts = d.AsOf

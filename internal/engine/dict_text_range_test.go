@@ -15,7 +15,7 @@ func TestDictText_LessThan(t *testing.T) {
 	b.WriteString("INSERT INTO t (id, label) VALUES ")
 	labels := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
 	want := int64(0)
-	for i := 0; i < 250; i++ {
+	for i := range 250 {
 		if i > 0 {
 			b.WriteByte(',')
 		}
@@ -38,7 +38,7 @@ func TestDictText_GreaterThanInclusive(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, label text NOT NULL)")
 	var b strings.Builder
 	b.WriteString("INSERT INTO t (id, label) VALUES ")
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		if i > 0 {
 			b.WriteByte(',')
 		}

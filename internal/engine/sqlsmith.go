@@ -62,7 +62,7 @@ func smithSeed(s smithSchema, rows int, r *rand.Rand) string {
 		b.WriteString(c)
 	}
 	b.WriteString(") VALUES ")
-	for i := 0; i < rows; i++ {
+	for i := range rows {
 		if i > 0 {
 			b.WriteByte(',')
 		}
@@ -111,7 +111,7 @@ func smithSelect(s smithSchema, r *rand.Rand, depth int) string {
 		}
 	default:
 		n := 1 + r.IntN(3)
-		for i := 0; i < n; i++ {
+		for range n {
 			projCols = append(projCols, pickAny(s, r))
 		}
 	}

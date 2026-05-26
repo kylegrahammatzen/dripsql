@@ -1,4 +1,4 @@
-// FOR+bitpack round-trip + estimate tests across FOR-packable kinds and width edges.
+﻿// FOR+bitpack round-trip + estimate tests across FOR-packable kinds and width edges.
 package codec
 
 import (
@@ -7,11 +7,12 @@ import (
 	"math"
 	"testing"
 
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestFORBitpack_EncodingIsFOR(t *testing.T) {
-	if (forBitpackCodec{}).Encoding() != types.EncodingFORBitPack {
+	if (forBitpackCodec{}).Encoding() != schema.EncFOR {
 		t.Fatal("forBitpackCodec must claim FORBitPack encoding")
 	}
 }
@@ -19,56 +20,56 @@ func TestFORBitpack_EncodingIsFOR(t *testing.T) {
 func TestFORBitpack_RoundTrip(t *testing.T) {
 	cases := []struct {
 		name string
-		kind types.VecKind
+		kind vector.VecKind
 		rows int
-		fill func(v types.Vec)
-		read func(v types.Vec, i int) int64
+		fill func(v vector.Vec)
+		read func(v vector.Vec, i int) int64
 	}{
-		{"Int64", types.VecInt64, 2048,
-			func(v types.Vec) {
+		{"Int64", vector.VecInt64, 2048,
+			func(v vector.Vec) {
 				for i := range v.I64() {
 					v.I64()[i] = 1_000_000 + int64(i)*7
 				}
 			},
-			func(v types.Vec, i int) int64 { return v.I64()[i] }},
-		{"Int32", types.VecInt32, 1500,
-			func(v types.Vec) {
+			func(v vector.Vec, i int) int64 { return v.I64()[i] }},
+		{"Int32", vector.VecInt32, 1500,
+			func(v vector.Vec) {
 				for i := range v.I32() {
 					v.I32()[i] = -500 + int32(i)
 				}
 			},
-			func(v types.Vec, i int) int64 { return int64(v.I32()[i]) }},
-		{"Int16", types.VecInt16, 200,
-			func(v types.Vec) {
+			func(v vector.Vec, i int) int64 { return int64(v.I32()[i]) }},
+		{"Int16", vector.VecInt16, 200,
+			func(v vector.Vec) {
 				for i := range v.I16() {
 					v.I16()[i] = int16(i)
 				}
 			},
-			func(v types.Vec, i int) int64 { return int64(v.I16()[i]) }},
-		{"Timestamp", types.VecTimestamp, 128,
-			func(v types.Vec) {
+			func(v vector.Vec, i int) int64 { return int64(v.I16()[i]) }},
+		{"Timestamp", vector.VecTimestamp, 128,
+			func(v vector.Vec) {
 				for i := range v.I64() {
 					v.I64()[i] = 1700000000_000_000_000 + int64(i)*1_000_000_000
 				}
 			},
-			func(v types.Vec, i int) int64 { return v.I64()[i] }},
-		{"Enum32", types.VecEnum32, 64,
-			func(v types.Vec) {
+			func(v vector.Vec, i int) int64 { return v.I64()[i] }},
+		{"Enum32", vector.VecEnum32, 64,
+			func(v vector.Vec) {
 				for i := range v.U32() {
 					v.U32()[i] = uint32(100 + i)
 				}
 			},
-			func(v types.Vec, i int) int64 { return int64(v.U32()[i]) }},
+			func(v vector.Vec, i int) int64 { return int64(v.U32()[i]) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			src := types.NewVec(tc.kind, tc.rows)
+			src := vector.NewVec(tc.kind, tc.rows)
 			tc.fill(src)
 			payload, err := forBitpackCodec{}.Encode(src, nil)
 			if err != nil {
 				t.Fatalf("Encode: %v", err)
 			}
-			var dst types.Vec
+			var dst vector.Vec
 			if err := (forBitpackCodec{}).Decode(payload, tc.kind, tc.rows, 0, &dst); err != nil {
 				t.Fatalf("Decode: %v", err)
 			}
@@ -82,7 +83,7 @@ func TestFORBitpack_RoundTrip(t *testing.T) {
 }
 
 func TestFORBitpack_EstimateRejectsConstant(t *testing.T) {
-	src := types.NewVec(types.VecInt64, 100)
+	src := vector.NewVec(vector.VecInt64, 100)
 	for i := range src.I64() {
 		src.I64()[i] = 42
 	}
@@ -92,7 +93,7 @@ func TestFORBitpack_EstimateRejectsConstant(t *testing.T) {
 }
 
 func TestFORBitpack_EstimateRejectsWidthExceedsStorage(t *testing.T) {
-	src := types.NewVec(types.VecInt16, 100)
+	src := vector.NewVec(vector.VecInt16, 100)
 	for i := range src.I16() {
 		if i%2 == 0 {
 			src.I16()[i] = -30000
@@ -106,12 +107,12 @@ func TestFORBitpack_EstimateRejectsWidthExceedsStorage(t *testing.T) {
 }
 
 func TestFORBitpack_EstimateRejectsNonFORKinds(t *testing.T) {
-	for _, kind := range []types.VecKind{types.VecBool, types.VecFloat64, types.VecText, types.VecUUID} {
-		var v types.Vec
-		if kind == types.VecText {
-			v = types.NewVarVec(kind, 4, 0)
+	for _, kind := range []vector.VecKind{vector.VecBool, vector.VecFloat64, vector.VecText, vector.VecUUID} {
+		var v vector.Vec
+		if kind == vector.VecText {
+			v = vector.NewVarVec(kind, 4, 0)
 		} else {
-			v = types.NewVec(kind, 4)
+			v = vector.NewVec(kind, 4)
 		}
 		if _, ok := Estimate(forBitpackCodec{}, v); ok {
 			t.Fatalf("Estimate must reject %v", kind)
@@ -123,16 +124,16 @@ func TestFORBitpack_DecodeRejects(t *testing.T) {
 	cases := []struct {
 		name    string
 		payload []byte
-		kind    types.VecKind
+		kind    vector.VecKind
 		rows    int
 	}{
-		{"truncatedHeader", make([]byte, 5), types.VecInt64, 4},
-		{"zeroRowsNonEmpty", []byte{1}, types.VecInt64, 0},
-		{"negativeRows", nil, types.VecInt64, -1},
-		{"nonFORKind", make([]byte, forHeaderSize+128), types.VecText, 1},
+		{"truncatedHeader", make([]byte, 5), vector.VecInt64, 4},
+		{"zeroRowsNonEmpty", []byte{1}, vector.VecInt64, 0},
+		{"negativeRows", nil, vector.VecInt64, -1},
+		{"nonFORKind", make([]byte, forHeaderSize+128), vector.VecText, 1},
 	}
 	for _, tc := range cases {
-		var dst types.Vec
+		var dst vector.Vec
 		if err := (forBitpackCodec{}).Decode(tc.payload, tc.kind, tc.rows, 0, &dst); err == nil {
 			t.Fatalf("%s: Decode must reject", tc.name)
 		}
@@ -140,7 +141,7 @@ func TestFORBitpack_DecodeRejects(t *testing.T) {
 }
 
 func TestFORBitpack_EstimateMatchesEncode(t *testing.T) {
-	src := types.NewVec(types.VecInt64, 100)
+	src := vector.NewVec(vector.VecInt64, 100)
 	for i := range src.I64() {
 		src.I64()[i] = int64(i) * 13
 	}
@@ -158,8 +159,8 @@ func TestFORBitpack_EstimateMatchesEncode(t *testing.T) {
 }
 
 func TestCodec_BitpackShared_FORDeltaIdentical(t *testing.T) {
-	makeVec := func(vals ...int64) types.Vec {
-		v := types.NewVec(types.VecInt64, len(vals))
+	makeVec := func(vals ...int64) vector.Vec {
+		v := vector.NewVec(vector.VecInt64, len(vals))
 		copy(v.I64(), vals)
 		return v
 	}
@@ -187,21 +188,21 @@ func TestCodec_BitpackShared_FORDeltaIdentical(t *testing.T) {
 }
 
 func TestFORBitpack_DecodeRangeChecksInt16(t *testing.T) {
-	src := types.NewVec(types.VecInt16, 2)
+	src := vector.NewVec(vector.VecInt16, 2)
 	src.I16()[0], src.I16()[1] = 0, 100
 	payload, err := forBitpackCodec{}.Encode(src, nil)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
 	binary.LittleEndian.PutUint64(payload[0:8], uint64(int64(math.MaxInt16+1)))
-	var dst types.Vec
-	if err := (forBitpackCodec{}).Decode(payload, types.VecInt16, 2, 0, &dst); err == nil {
+	var dst vector.Vec
+	if err := (forBitpackCodec{}).Decode(payload, vector.VecInt16, 2, 0, &dst); err == nil {
 		t.Fatal("FOR decode must error when residuals would overflow int16")
 	}
 }
 
 func TestFORBitpack_DecodeRangeChecksEnum32(t *testing.T) {
-	src := types.NewVec(types.VecEnum32, 2)
+	src := vector.NewVec(vector.VecEnum32, 2)
 	src.U32()[0], src.U32()[1] = 1, 2
 	payload, err := forBitpackCodec{}.Encode(src, nil)
 	if err != nil {
@@ -209,8 +210,8 @@ func TestFORBitpack_DecodeRangeChecksEnum32(t *testing.T) {
 	}
 	negBase := int64(-1000)
 	binary.LittleEndian.PutUint64(payload[0:8], uint64(negBase))
-	var dst types.Vec
-	if err := (forBitpackCodec{}).Decode(payload, types.VecEnum32, 2, 0, &dst); err == nil {
+	var dst vector.Vec
+	if err := (forBitpackCodec{}).Decode(payload, vector.VecEnum32, 2, 0, &dst); err == nil {
 		t.Fatal("FOR decode must error when residuals would underflow uint32")
 	}
 }

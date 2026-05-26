@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
-	"github.com/kylegrahammatzen/dripsql/internal/types"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 type FilterOp struct {
@@ -21,7 +21,7 @@ type FilterOp struct {
 }
 
 type filterResult struct {
-	sel   types.SelectionMask
+	sel   vector.SelectionMask
 	count int
 }
 
@@ -37,9 +37,9 @@ func (f *FilterOp) Open(ctx context.Context) error {
 	return nil
 }
 
-func (f *FilterOp) Next() (types.Batch, bool, error) {
+func (f *FilterOp) Next() (vector.Batch, bool, error) {
 	if err := f.state.requireOpen(); err != nil {
-		return types.Batch{}, false, err
+		return vector.Batch{}, false, err
 	}
 	for {
 		batch, ok, err := f.Source.Next()
@@ -49,12 +49,14 @@ func (f *FilterOp) Next() (types.Batch, bool, error) {
 		in := selectionForBatch(batch)
 		res, err := filterPredicate(batch, in, f.Predicate, nil, f.outer, f.subBuild)
 		if err != nil {
-			return types.Batch{}, false, err
+			return vector.Batch{}, false, err
 		}
 		if res.count == 0 {
 			continue
 		}
-		batch.Sel = &res.sel
+		if err := batch.SetSel(&res.sel); err != nil {
+			return vector.Batch{}, false, fmt.Errorf("filter: %w", err)
+		}
 		return batch, true, nil
 	}
 }
@@ -63,7 +65,7 @@ func (f *FilterOp) Next() (types.Batch, bool, error) {
 // left's output mask (instead of the original input) so a selective left predicate skips
 // rows on the right; OR keeps both children on the same input and unions the results.
 // A non-nil scratch mask is reused in place by leaves so a chain of ANDs needs only one alloc.
-func filterPredicate(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
+func filterPredicate(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, scratch *vector.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
 	switch pred.Op {
 	case sql.ExprAnd:
 		return filterAnd(batch, sel, pred, scratch, outer, subBuild)
@@ -72,7 +74,7 @@ func filterPredicate(batch types.Batch, sel types.SelectionMask, pred sql.BoundE
 	case sql.ExprNot:
 		return filterNotPred(batch, sel, pred, scratch, outer, subBuild)
 	}
-	out, count, ok, err := tryFilterLeaf(batch, sel, pred, scratch)
+	out, count, ok, err := applyLeaf(batch, sel, pred, scratch)
 	if err != nil {
 		return filterResult{}, err
 	}
@@ -86,7 +88,7 @@ func filterPredicate(batch types.Batch, sel types.SelectionMask, pred sql.BoundE
 	return filterResult{sel: out, count: count}, nil
 }
 
-func filterAnd(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
+func filterAnd(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, scratch *vector.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
 	if len(pred.Args) != 2 {
 		return filterResult{}, fmt.Errorf("filter: AND expects 2 args, got %d", len(pred.Args))
 	}
@@ -100,7 +102,7 @@ func filterAnd(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, s
 	return filterPredicate(batch, left.sel, pred.Args[1], &left.sel, outer, subBuild)
 }
 
-func filterOr(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
+func filterOr(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, scratch *vector.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
 	if len(pred.Args) != 2 {
 		return filterResult{}, fmt.Errorf("filter: OR expects 2 args, got %d", len(pred.Args))
 	}
@@ -116,7 +118,7 @@ func filterOr(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, sc
 	return filterResult{sel: left.sel, count: count}, nil
 }
 
-func filterNotPred(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
+func filterNotPred(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, scratch *vector.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
 	if len(pred.Args) != 1 {
 		return filterResult{}, fmt.Errorf("filter: NOT expects 1 arg, got %d", len(pred.Args))
 	}
@@ -129,13 +131,11 @@ func filterNotPred(batch types.Batch, sel types.SelectionMask, pred sql.BoundExp
 	return filterResult{sel: child.sel, count: count}, nil
 }
 
-// filterLeaf is a normalized col-op-lit / col BETWEEN lo AND hi shape produced from a
-// BoundExpr predicate. tryFilterLeaf dispatches on the column kind once and routes both
-// the comparison and BETWEEN forms through the same per-kind branch.
+// Normalized col-op-lit and col-BETWEEN-lo-AND-hi shape so applyLeaf dispatches on column kind once.
 type filterLeaf struct {
 	col     sql.BoundExpr
 	lo, hi  any
-	op      types.FilterOp
+	op      vector.FilterOp
 	between bool
 }
 
@@ -160,114 +160,114 @@ func makeFilterLeaf(pred sql.BoundExpr) (filterLeaf, bool) {
 	return filterLeaf{}, false
 }
 
-func tryFilterLeaf(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask) (types.SelectionMask, int, bool, error) {
+func applyLeaf(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, scratch *vector.SelectionMask) (vector.SelectionMask, int, bool, error) {
 	leaf, ok := makeFilterLeaf(pred)
 	if !ok || leaf.lo == nil {
-		return types.SelectionMask{}, 0, false, nil
+		return vector.SelectionMask{}, 0, false, nil
 	}
 	col, ok := batch.ColumnByName(leaf.col.Column)
 	if !ok {
-		return types.SelectionMask{}, 0, false, nil
+		return vector.SelectionMask{}, 0, false, nil
 	}
 	out := ensureOutMask(scratch, batch.Len)
 	switch col.V.Kind {
-	case types.VecInt16:
+	case vector.VecInt16:
 		lo, lok := leaf.lo.(int64)
 		if !lok {
-			return types.SelectionMask{}, 0, false, nil
+			return vector.SelectionMask{}, 0, false, nil
 		}
 		if leaf.between {
 			hi, hok := leaf.hi.(int64)
 			if !hok {
-				return types.SelectionMask{}, 0, false, nil
+				return vector.SelectionMask{}, 0, false, nil
 			}
-			return out, types.BetweenOrdered(col.V.I16(), col.V.Valid, int16(lo), int16(hi), sel, &out), true, nil
+			return out, vector.BetweenOrdered(col.V.I16(), col.V.Valid, int16(lo), int16(hi), sel, &out), true, nil
 		}
-		return out, types.FilterOrdered(col.V.I16(), col.V.Valid, int16(lo), leaf.op, sel, &out), true, nil
-	case types.VecInt32, types.VecDate:
+		return out, vector.FilterOrdered(col.V.I16(), col.V.Valid, int16(lo), leaf.op, sel, &out), true, nil
+	case vector.VecInt32, vector.VecDate:
 		lo, lok := leaf.lo.(int64)
 		if !lok {
-			return types.SelectionMask{}, 0, false, nil
+			return vector.SelectionMask{}, 0, false, nil
 		}
 		if leaf.between {
 			hi, hok := leaf.hi.(int64)
 			if !hok {
-				return types.SelectionMask{}, 0, false, nil
+				return vector.SelectionMask{}, 0, false, nil
 			}
-			return out, types.BetweenOrdered(col.V.I32(), col.V.Valid, int32(lo), int32(hi), sel, &out), true, nil
+			return out, vector.BetweenOrdered(col.V.I32(), col.V.Valid, int32(lo), int32(hi), sel, &out), true, nil
 		}
-		return out, types.FilterOrdered(col.V.I32(), col.V.Valid, int32(lo), leaf.op, sel, &out), true, nil
-	case types.VecInt64, types.VecTimestamp, types.VecTime, types.VecDecimal64:
+		return out, vector.FilterOrdered(col.V.I32(), col.V.Valid, int32(lo), leaf.op, sel, &out), true, nil
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		lo, lok := leaf.lo.(int64)
 		if !lok {
-			return types.SelectionMask{}, 0, false, nil
+			return vector.SelectionMask{}, 0, false, nil
 		}
 		if leaf.between {
 			hi, hok := leaf.hi.(int64)
 			if !hok {
-				return types.SelectionMask{}, 0, false, nil
+				return vector.SelectionMask{}, 0, false, nil
 			}
-			return out, types.BetweenOrdered(col.V.I64(), col.V.Valid, lo, hi, sel, &out), true, nil
+			return out, vector.BetweenOrdered(col.V.I64(), col.V.Valid, lo, hi, sel, &out), true, nil
 		}
-		return out, types.FilterOrdered(col.V.I64(), col.V.Valid, lo, leaf.op, sel, &out), true, nil
-	case types.VecFloat32:
+		return out, vector.FilterOrdered(col.V.I64(), col.V.Valid, lo, leaf.op, sel, &out), true, nil
+	case vector.VecFloat32:
 		lo, lok := asFloat64(leaf.lo)
 		if !lok {
-			return types.SelectionMask{}, 0, false, nil
+			return vector.SelectionMask{}, 0, false, nil
 		}
 		if leaf.between {
 			hi, hok := asFloat64(leaf.hi)
 			if !hok {
-				return types.SelectionMask{}, 0, false, nil
+				return vector.SelectionMask{}, 0, false, nil
 			}
-			return out, types.BetweenOrdered(col.V.F32(), col.V.Valid, float32(lo), float32(hi), sel, &out), true, nil
+			return out, vector.BetweenOrdered(col.V.F32(), col.V.Valid, float32(lo), float32(hi), sel, &out), true, nil
 		}
-		return out, types.FilterOrdered(col.V.F32(), col.V.Valid, float32(lo), leaf.op, sel, &out), true, nil
-	case types.VecFloat64:
+		return out, vector.FilterOrdered(col.V.F32(), col.V.Valid, float32(lo), leaf.op, sel, &out), true, nil
+	case vector.VecFloat64:
 		lo, lok := asFloat64(leaf.lo)
 		if !lok {
-			return types.SelectionMask{}, 0, false, nil
+			return vector.SelectionMask{}, 0, false, nil
 		}
 		if leaf.between {
 			hi, hok := asFloat64(leaf.hi)
 			if !hok {
-				return types.SelectionMask{}, 0, false, nil
+				return vector.SelectionMask{}, 0, false, nil
 			}
-			return out, types.BetweenOrdered(col.V.F64(), col.V.Valid, lo, hi, sel, &out), true, nil
+			return out, vector.BetweenOrdered(col.V.F64(), col.V.Valid, lo, hi, sel, &out), true, nil
 		}
-		return out, types.FilterOrdered(col.V.F64(), col.V.Valid, lo, leaf.op, sel, &out), true, nil
-	case types.VecText, types.VecBytes, types.VecJSON:
+		return out, vector.FilterOrdered(col.V.F64(), col.V.Valid, lo, leaf.op, sel, &out), true, nil
+	case vector.VecText, vector.VecBytes, vector.VecJSON:
 		if leaf.between {
 			lo, lok := leaf.lo.(string)
 			hi, hok := leaf.hi.(string)
 			if !lok || !hok {
-				return types.SelectionMask{}, 0, false, nil
+				return vector.SelectionMask{}, 0, false, nil
 			}
-			ge := types.FilterBytes(col.V.Var(), col.V.Valid, []byte(lo), types.FilterGreaterEqual, sel, &out)
+			ge := vector.FilterBytes(col.V.Var(), col.V.Valid, []byte(lo), vector.FilterGreaterEqual, sel, &out)
 			if ge == 0 {
 				return out, 0, true, nil
 			}
-			return out, types.FilterBytes(col.V.Var(), col.V.Valid, []byte(hi), types.FilterLessEqual, out, &out), true, nil
+			return out, vector.FilterBytes(col.V.Var(), col.V.Valid, []byte(hi), vector.FilterLessEqual, out, &out), true, nil
 		}
 		lit, ok := leaf.lo.(string)
 		if !ok {
-			return types.SelectionMask{}, 0, false, nil
+			return vector.SelectionMask{}, 0, false, nil
 		}
-		return out, types.FilterBytes(col.V.Var(), col.V.Valid, []byte(lit), leaf.op, sel, &out), true, nil
+		return out, vector.FilterBytes(col.V.Var(), col.V.Valid, []byte(lit), leaf.op, sel, &out), true, nil
 	}
-	return types.SelectionMask{}, 0, false, nil
+	return vector.SelectionMask{}, 0, false, nil
 }
 
 // ensureOutMask returns scratch if it already holds rows bits, otherwise a fresh mask.
 // Reusing the caller's mask is what makes a chain of ANDs single-alloc.
-func ensureOutMask(scratch *types.SelectionMask, rows int) types.SelectionMask {
+func ensureOutMask(scratch *vector.SelectionMask, rows int) vector.SelectionMask {
 	if scratch != nil && scratch.Rows() == rows {
 		return *scratch
 	}
-	return types.NewSelectionMask(rows)
+	return vector.NewSelectionMask(rows)
 }
 
-func filterRowByRow(batch types.Batch, sel types.SelectionMask, pred sql.BoundExpr, scratch *types.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (types.SelectionMask, int, error) {
+func filterRowByRow(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, scratch *vector.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (vector.SelectionMask, int, error) {
 	ctx := newEvalCtxWith(batch, outer, subBuild)
 	out := ensureOutMask(scratch, batch.Len)
 	out.Clear()
@@ -290,34 +290,34 @@ func filterRowByRow(batch types.Batch, sel types.SelectionMask, pred sql.BoundEx
 	return out, count, evalErr
 }
 
-func mapCompareOp(op sql.ExprOp) (types.FilterOp, bool) {
+func mapCompareOp(op sql.ExprOp) (vector.FilterOp, bool) {
 	switch op {
 	case sql.ExprEqual:
-		return types.FilterEqual, true
+		return vector.FilterEqual, true
 	case sql.ExprNotEqual:
-		return types.FilterNotEqual, true
+		return vector.FilterNotEqual, true
 	case sql.ExprLess:
-		return types.FilterLess, true
+		return vector.FilterLess, true
 	case sql.ExprLessEqual:
-		return types.FilterLessEqual, true
+		return vector.FilterLessEqual, true
 	case sql.ExprGreater:
-		return types.FilterGreater, true
+		return vector.FilterGreater, true
 	case sql.ExprGreaterEqual:
-		return types.FilterGreaterEqual, true
+		return vector.FilterGreaterEqual, true
 	}
 	return 0, false
 }
 
-func swapCompareOp(op types.FilterOp) types.FilterOp {
+func swapCompareOp(op vector.FilterOp) vector.FilterOp {
 	switch op {
-	case types.FilterLess:
-		return types.FilterGreater
-	case types.FilterLessEqual:
-		return types.FilterGreaterEqual
-	case types.FilterGreater:
-		return types.FilterLess
-	case types.FilterGreaterEqual:
-		return types.FilterLessEqual
+	case vector.FilterLess:
+		return vector.FilterGreater
+	case vector.FilterLessEqual:
+		return vector.FilterGreaterEqual
+	case vector.FilterGreater:
+		return vector.FilterLess
+	case vector.FilterGreaterEqual:
+		return vector.FilterLessEqual
 	}
 	return op
 }
@@ -329,14 +329,14 @@ func (f *FilterOp) Close() error {
 
 // EvalPredicate routes DELETE/UPDATE through the same vectorized path. Honors batch.Sel so
 // already-deleted rows are excluded from evaluation.
-func EvalPredicate(batch types.Batch, where sql.BoundExpr) (types.SelectionMask, error) {
+func EvalPredicate(batch vector.Batch, where sql.BoundExpr) (vector.SelectionMask, error) {
 	if err := checkExecExpr(where); err != nil {
-		return types.SelectionMask{}, err
+		return vector.SelectionMask{}, err
 	}
 	in := selectionForBatch(batch)
 	res, err := filterPredicate(batch, in, where, nil, nil, nil)
 	if err != nil {
-		return types.SelectionMask{}, err
+		return vector.SelectionMask{}, err
 	}
 	return res.sel, nil
 }
