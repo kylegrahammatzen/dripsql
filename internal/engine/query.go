@@ -40,20 +40,7 @@ func (db *DB) runQueryWith(ctx context.Context, plan *sql.Plan, resolveBase func
 	if plan != nil && plan.Kind == sql.PlanExplain {
 		return db.runExplain(ctx, plan)
 	}
-	openSegs := make(map[string][]*storage.Segment)
-	resolve := func(d sql.BoundTableDef) ([]*storage.Segment, error) {
-		key := schema.NormalizeName(d.Name)
-		if segs, ok := openSegs[key]; ok {
-			return segs, nil
-		}
-		segs, err := resolveBase(d)
-		if err != nil {
-			return nil, err
-		}
-		openSegs[key] = segs
-		return segs, nil
-	}
-	op, err := exec.BuildOperator(plan, resolve)
+	op, err := exec.BuildOperator(plan, cachedSegmentResolver(resolveBase))
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +159,23 @@ func columnNames(batch vector.Batch) []string {
 		names[i] = c.Name
 	}
 	return names
+}
+
+// cachedSegmentResolver wraps base in a per-call cache so a multi-Rel plan does not reopen the same table twice.
+func cachedSegmentResolver(base func(sql.BoundTableDef) ([]*storage.Segment, error)) exec.SegmentsFn {
+	opened := make(map[string][]*storage.Segment)
+	return func(d sql.BoundTableDef) ([]*storage.Segment, error) {
+		key := schema.NormalizeName(d.Name)
+		if segs, ok := opened[key]; ok {
+			return segs, nil
+		}
+		segs, err := base(d)
+		if err != nil {
+			return nil, err
+		}
+		opened[key] = segs
+		return segs, nil
+	}
 }
 
 func appendBatchRows(rows *Rows, batch vector.Batch) error {
