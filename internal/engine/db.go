@@ -98,6 +98,23 @@ type Result struct {
 // Seam between DB's auto-commit path and Tx's staged path; DB binds db.commitManifestTxn, Tx binds tx.commit.
 type commitFn func(table string, adds []storage.ManifestSegmentAdd, dvUpdates []storage.ManifestDVUpdate) error
 
+// lockOpen acquires db.mu and rejects when the DB has been closed; on success the caller must defer db.mu.Unlock.
+func (db *DB) lockOpen() error {
+	db.mu.Lock()
+	if db.closed {
+		db.mu.Unlock()
+		return fmt.Errorf("engine: database is closed")
+	}
+	return nil
+}
+
+func ctxOrBackground(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
 type Rows struct {
 	Columns []string
 	Values  [][]any
@@ -341,18 +358,15 @@ func (db *DB) Exec(ctx context.Context, sqlText string, args ...any) (Result, er
 	if db == nil {
 		return Result{}, fmt.Errorf("engine: nil DB")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = ctxOrBackground(ctx)
 	stmts, err := sql.Parse(sqlText)
 	if err != nil {
 		return Result{}, err
 	}
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.closed {
-		return Result{}, fmt.Errorf("engine: database is closed")
+	if err := db.lockOpen(); err != nil {
+		return Result{}, err
 	}
+	defer db.mu.Unlock()
 	if db.readOnly.Load() {
 		return Result{}, fmt.Errorf("engine: database is read-only")
 	}
@@ -415,19 +429,12 @@ func (db *DB) Query(ctx context.Context, sqlText string, args ...any) (*Rows, er
 	if db == nil {
 		return nil, fmt.Errorf("engine: nil DB")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.closed {
-		return nil, fmt.Errorf("engine: database is closed")
-	}
-	plan, err := db.planForQuery(sqlText)
-	if err != nil {
+	ctx = ctxOrBackground(ctx)
+	if err := db.lockOpen(); err != nil {
 		return nil, err
 	}
-	bound, err := sql.BindParameters(plan, args)
+	defer db.mu.Unlock()
+	bound, err := db.prepareLocked(sqlText, args)
 	if err != nil {
 		return nil, err
 	}
@@ -438,19 +445,12 @@ func (db *DB) QueryAt(ctx context.Context, sqlText string, readTs uint64, args .
 	if db == nil {
 		return nil, fmt.Errorf("engine: nil DB")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.closed {
-		return nil, fmt.Errorf("engine: database is closed")
-	}
-	plan, err := db.planForQuery(sqlText)
-	if err != nil {
+	ctx = ctxOrBackground(ctx)
+	if err := db.lockOpen(); err != nil {
 		return nil, err
 	}
-	bound, err := sql.BindParameters(plan, args)
+	defer db.mu.Unlock()
+	bound, err := db.prepareLocked(sqlText, args)
 	if err != nil {
 		return nil, err
 	}
@@ -461,6 +461,14 @@ func (db *DB) QueryAt(ctx context.Context, sqlText string, readTs uint64, args .
 		}
 		return db.openSegmentsAt(d.Name, ts)
 	})
+}
+
+func (db *DB) prepareLocked(sqlText string, args []any) (*sql.Plan, error) {
+	plan, err := db.planForQuery(sqlText)
+	if err != nil {
+		return nil, err
+	}
+	return sql.BindParameters(plan, args)
 }
 
 // planForQuery resolves a SELECT into a bound *Plan. Hits the plan cache before parsing so

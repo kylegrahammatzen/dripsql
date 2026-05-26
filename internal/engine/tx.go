@@ -30,16 +30,12 @@ func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
 	if db == nil {
 		return nil, fmt.Errorf("engine: nil DB")
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = ctxOrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	db.mu.Lock()
-	if db.closed {
-		db.mu.Unlock()
-		return nil, fmt.Errorf("engine: database is closed")
+	if err := db.lockOpen(); err != nil {
+		return nil, err
 	}
 	if db.readOnly.Load() {
 		db.mu.Unlock()

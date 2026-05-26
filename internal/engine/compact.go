@@ -15,11 +15,10 @@ import (
 )
 
 func (db *DB) Compact(ctx context.Context, table string) (int, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.closed {
-		return 0, fmt.Errorf("engine: database is closed")
+	if err := db.lockOpen(); err != nil {
+		return 0, err
 	}
+	defer db.mu.Unlock()
 	m, err := db.manifestFor(table)
 	if err != nil {
 		return 0, err
@@ -98,11 +97,10 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 }
 
 func (db *DB) Vacuum() (int, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.closed {
-		return 0, fmt.Errorf("engine: database is closed")
+	if err := db.lockOpen(); err != nil {
+		return 0, err
 	}
+	defer db.mu.Unlock()
 	total := 0
 	for name := range db.tables {
 		n, err := db.vacuumTableLocked(name)
@@ -127,11 +125,10 @@ func (db *DB) Vacuum() (int, error) {
 }
 
 func (db *DB) VacuumRetention(retainBefore uint64) (int, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.closed {
-		return 0, fmt.Errorf("engine: database is closed")
+	if err := db.lockOpen(); err != nil {
+		return 0, err
 	}
+	defer db.mu.Unlock()
 	return db.vacuumRetentionLocked(retainBefore)
 }
 
