@@ -12,7 +12,8 @@ will change.
 - `internal/storage` owns immutable columnar segments, the manifest with atomic transaction records, deletion vectors, and predicate plus top-K page pruning.
 - `internal/sql` owns the lexer, parser, binder, unified `Plan` + `Rel` IR, and plan cache.
 - `internal/exec` owns the pull-based vector operators (scan, filter, project, aggregate, sort, limit, hash join).
-- `internal/types` owns table specs, typed batches, vectors, validity bitmaps, and selection masks.
+- `internal/schema` owns table specs, column types, encoding enums, and name normalization.
+- `internal/vector` owns typed vectors, batches, validity bitmaps, selection masks, and kernel routines.
 
 ## Tests
 
@@ -30,28 +31,67 @@ All numbers below were captured on `AMD Ryzen 7 3700X` / `Windows amd64` /
 ### Exec microbenchmarks
 
 ```
-go test ./internal/exec -bench=. -benchmem -run=^$ -count=1
+go test ./internal/exec -bench=. -benchmem -run=^$ -count=10
 ```
 
-Snapshot:
+Snapshot (median of 10 runs):
 
 | Bench | ns/op | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `Filter_Int64Less` | 2504 | 256 | 1 |
-| `Filter_Int64Between` | 3215 | 256 | 1 |
-| `Filter_Int64AndCompound` | 5467 | 256 | 1 |
-| `Filter_Int64Equal` | 2620 | 256 | 1 |
-| `Sort_FullAsc_Int64_10k` | 1.51 ms | 252 K | 38 |
-| `Sort_FullDesc_Int64_10k` | 1.52 ms | 252 K | 38 |
-| `Sort_TopK_Int64_10k_K100` | 164 us | 7.7 K | 17 |
-| `Sort_TopK_Int64_100k_K100` | 1.11 ms | 29.6 K | 64 |
-| `Sort_TopK_Int64_100k_K100_Off50` | 1.20 ms | 31.0 K | 64 |
-| `Sort_TopK_Int64_100k_K100_NullsEvery10` | 1.20 ms | 29.6 K | 64 |
-| `Sort_FullAsc_Text_10k` | 3.97 ms | 253 K | 43 |
+| `Filter_Int64Less` | 3176 | 256 | 1 |
+| `Filter_Int64Between` | 3824 | 256 | 1 |
+| `Filter_Int64AndCompound` | 4428 | 256 | 1 |
+| `Filter_Int64Equal` | 2418 | 256 | 1 |
+| `Sort_FullAsc_Int64_10k` | 1.43 ms | 252 K | 38 |
+| `Sort_FullDesc_Int64_10k` | 1.41 ms | 252 K | 38 |
+| `Sort_TopK_Int64_10k_K100` | 158 us | 7.7 K | 17 |
+| `Sort_TopK_Int64_100k_K100` | 1.09 ms | 29.6 K | 64 |
+| `Sort_TopK_Int64_100k_K100_Off50` | 1.11 ms | 31.0 K | 64 |
+| `Sort_TopK_Int64_100k_K100_NullsEvery10` | 1.11 ms | 29.6 K | 64 |
+| `Sort_FullAsc_Text_10k` | 3.39 ms | 253 K | 43 |
 
 Streaming top-K stays bounded at `K+Offset` entries regardless of input size.
-The text full-sort now rides a typed `bytes.Compare` fast path, dropping
-allocs from ~30k to under 50 per run.
+The text full-sort rides a typed `bytes.Compare` fast path, dropping allocs
+from ~30k to under 50 per run.
+
+### Storage microbenchmarks
+
+```
+go test ./internal/storage -bench=. -benchmem -run=^$ -count=10
+go test ./internal/storage/codec -bench=. -benchmem -run=^$ -count=10
+```
+
+Snapshot (median of 10 runs):
+
+| Bench | ns/op | B/op | allocs/op |
+| --- | --- | --- | --- |
+| `Storage_ScanFull` | 313 us | 467 K | 70 |
+| `Storage_ScanEqInt64Hit` | 320 us | 467 K | 80 |
+| `Storage_ScanEqInt64Miss` | 648 | 232 | 6 |
+| `Storage_ScanEqBytesHit` | 325 us | 465 K | 79 |
+| `Storage_WriteSegment_Int64Random` | 2.84 ms | 294 K | 91 |
+| `Storage_WriteSegment_Int64Constant` | 2.37 ms | 150 K | 85 |
+| `Storage_WriteSegment_Int64Monotonic` | 2.54 ms | 277 K | 98 |
+| `Storage_WriteSegment_Int64SparseNulls` | 1.90 ms | 132 K | 53 |
+| `Storage_WriteSegment_Float64Plain` | 2.99 ms | 263 K | 81 |
+| `Storage_WriteSegment_Float64Decimal` | 3.20 ms | 287 K | 119 |
+| `Storage_WriteSegment_TextLowCardinality` | 16.4 ms | 2.99 M | 307 K |
+| `Storage_OpenCold` | 81 us | 3.4 K | 20 |
+| `Storage_LoadDictHist` | 23 us | 42 K | 18 |
+| `Storage_LoadIntFilter` | 24 us | 46 K | 14 |
+| `Storage_LoadNumericSums` | 22 us | 42 K | 8 |
+| `Codec_Decode/for_int64` | 30 us | 118 K | 16 K |
+| `Codec_Decode/delta_int64` | 19 us | 26 K | 33 K |
+| `Codec_Decode/pcodec_int64` | 26 us | 74 K | 16 K |
+| `Codec_Decode/constant_int64` | 5.6 us | 1.5 K | 0 |
+| `Codec_Decode/sequence_int64` | 1.7 us | 9.7 K | 0 |
+| `Codec_Decode/plain_int64` | 185 | 104 K | 0 |
+| `Codec_Decode/dict_text_lowcard` | 8.8 us | 227 K | 33 K |
+| `Codec_Decode/plain_text` | 50 us | 593 K | 55 K |
+
+`Storage_ScanEqInt64Miss` is the page-prune fast path resolving in
+microseconds via the Binary Fuse 8 `.bf` sidecar. Sidecar loaders all sit
+below 25us and run once per segment open.
 
 ### Workload benchmark
 
@@ -123,7 +163,7 @@ What the engine currently supports versus what's still on the list:
 | SELECT DISTINCT (single or multi-column) | yes | Lowers to GROUP BY over the named columns; rides the composite-key aggregate path |
 | Multi-column GROUP BY | yes | Composite-key path encodes (col1, col2, ...) per row, single-col stays on the typed fast paths |
 | CASE WHEN ... THEN ... [ELSE ...] END | yes | Searched form. Branches must share a kind. |
-| Configurable retention via OpenWith(OpenOpts) | yes | AutoRetention + RetentionLag makes DB.Vacuum also retire fully-DV'd-out segments below the cutoff |
+| Configurable retention via DB.SetAutoRetention / DB.SetRetentionLag | yes | AutoRetention + RetentionLag makes DB.Vacuum also retire fully-DV'd-out segments below the cutoff |
 | JSON path operators (`->`, `->>`) | yes | `->` returns JSON, `->>` returns Text; both wired through Project |
 | CTEs (`WITH ... AS`) | yes | Plan substitution; CTE name resolves to inner Rel at plan time |
 | Scalar / `IN` / `EXISTS` subqueries | yes | Uncorrelated subqueries materialized once at BuildOperator |
