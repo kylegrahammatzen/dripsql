@@ -5,15 +5,21 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/kylegrahammatzen/dripsql"
 )
 
 func main() {
-	dbPath := flag.String("db", "", "directory to open as the database (required)")
+	dbPath := flag.String("db", "", "database directory (defaults to a fresh temp dir)")
 	flag.Parse()
 	if *dbPath == "" {
-		log.Fatal("missing -db <path>")
+		d, err := os.MkdirTemp("", "dripsql-view-*")
+		if err != nil {
+			log.Fatal(err)
+		}
+		*dbPath = d
+		fmt.Println("using temp db:", d)
 	}
 
 	ctx := context.Background()

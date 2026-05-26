@@ -10,8 +10,10 @@
 
 Runnable demos of the public API. Each example is its own `package main`.
 
+Each example takes an optional `-db <path>`; when omitted it uses a fresh temp directory and prints the location.
+
 ```
-go run ./examples/<name> -db ./demo-db
+go run ./examples/<name>
 ```
 
 | Name | Demonstrates |
@@ -24,3 +26,5 @@ go run ./examples/<name> -db ./demo-db
 | `group_by` | Streaming `Rows.Next` loop over a multi-row aggregate result |
 | `explain` | `EXPLAIN` output for a filter plus group-by plan |
 | `rename_column` | `ALTER TABLE RENAME COLUMN` as a metadata-only operation that scans existing segments by stable column id |
+| `time_travel` | `QueryAt` and SQL `AS OF` reading a snapshot pinned to an earlier commit timestamp |
+| `alter_table` | `ALTER TABLE ADD COLUMN` with a default, `ALTER COLUMN TYPE` widening, and `DROP COLUMN` |

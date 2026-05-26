@@ -6,15 +6,21 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/kylegrahammatzen/dripsql"
 )
 
 func main() {
-	dbPath := flag.String("db", "", "directory to open as the database (required)")
+	dbPath := flag.String("db", "", "database directory (defaults to a fresh temp dir)")
 	flag.Parse()
 	if *dbPath == "" {
-		log.Fatal("missing -db <path>")
+		d, err := os.MkdirTemp("", "dripsql-read-only-*")
+		if err != nil {
+			log.Fatal(err)
+		}
+		*dbPath = d
+		fmt.Println("using temp db:", d)
 	}
 
 	ctx := context.Background()
@@ -32,8 +38,14 @@ func main() {
 	}
 
 	db.SetReadOnly(true)
-	if _, err := db.Exec(ctx, "INSERT INTO readonly_nums (id) VALUES (4)"); errors.Is(err, dripsql.ErrReadOnly) {
+	_, writeErr := db.Exec(ctx, "INSERT INTO readonly_nums (id) VALUES (4)")
+	switch {
+	case errors.Is(writeErr, dripsql.ErrReadOnly):
 		fmt.Println("write rejected by read-only mode")
+	case writeErr != nil:
+		log.Fatalf("unexpected error: %v", writeErr)
+	default:
+		log.Fatal("write succeeded but read-only mode should have rejected it")
 	}
 
 	var n int64

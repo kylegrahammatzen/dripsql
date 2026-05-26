@@ -1,3 +1,4 @@
+// Demonstrates ALTER TABLE RENAME COLUMN as a metadata-only operation.
 package main
 
 import (
@@ -5,15 +6,21 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/kylegrahammatzen/dripsql"
 )
 
 func main() {
-	dbPath := flag.String("db", "", "directory to open as the database (required)")
+	dbPath := flag.String("db", "", "fresh database directory (defaults to a temp dir; persisted dbs may fail re-runs)")
 	flag.Parse()
 	if *dbPath == "" {
-		log.Fatal("missing -db <path>")
+		d, err := os.MkdirTemp("", "dripsql-rename-column-*")
+		if err != nil {
+			log.Fatal(err)
+		}
+		*dbPath = d
+		fmt.Println("using temp db:", d)
 	}
 
 	ctx := context.Background()
@@ -46,9 +53,6 @@ func main() {
 	}
 	fmt.Printf("after rename:  label = %q\n", after)
 
-	// The old column name no longer resolves, even though the segment files on disk
-	// still reference it. The catalog owns the user-visible name; the scan path
-	// resolves columns by stable id so the rename is metadata only.
 	if _, err := db.Query(ctx, "SELECT name FROM users"); err == nil {
 		log.Fatal("expected error querying old column name")
 	} else {
