@@ -38,25 +38,38 @@ type DB struct {
 
 	autoRetention atomic.Bool
 	retentionLag  atomic.Uint64
+	cacheSize     atomic.Int64
+	readOnly      atomic.Bool
 }
 
-// SetAutoRetention toggles whether Vacuum runs VacuumRetention with the current lag.
-// Safe to call from any goroutine; Vacuum reads the latest value on entry.
 func (db *DB) SetAutoRetention(on bool) { db.autoRetention.Store(on) }
 
-// SetRetentionLag sets the retention cutoff in commit-ts ticks for VacuumRetention.
-// Safe to call from any goroutine; Vacuum reads the latest value on entry.
 func (db *DB) SetRetentionLag(lag uint64) { db.retentionLag.Store(lag) }
+
+// Values below 1 fall back to the compiled-in default so callers cannot wedge the cache at zero.
+func (db *DB) SetCacheSize(n int) {
+	if n < 1 {
+		n = defaultSegCacheLimit
+	}
+	db.cacheSize.Store(int64(n))
+}
+
+func (db *DB) SetReadOnly(on bool) { db.readOnly.Store(on) }
 
 type segCacheEntry struct {
 	key segCacheKey
 	seg *storage.Segment
 }
 
-// segCacheLimit caps the number of open segment file handles. Default of 256 keeps
-// us well below the Windows default-handle ceiling without thrashing on typical
-// workloads. Tunable later if we hit a working set that doesn't fit.
-const segCacheLimit = 256
+// Default keeps us well below the Windows default-handle ceiling without thrashing on typical workloads.
+const defaultSegCacheLimit = 256
+
+func (db *DB) segCacheLimit() int {
+	if n := db.cacheSize.Load(); n > 0 {
+		return int(n)
+	}
+	return defaultSegCacheLimit
+}
 
 // Returns the most recent statement's write-phase span tree, or nil. The
 // pointer is replaced atomically. The tree it points to is never mutated
@@ -336,6 +349,9 @@ func (db *DB) Exec(ctx context.Context, sqlText string) (Result, error) {
 	defer db.mu.Unlock()
 	if db.closed {
 		return Result{}, fmt.Errorf("engine: database is closed")
+	}
+	if db.readOnly.Load() {
+		return Result{}, fmt.Errorf("engine: database is read-only")
 	}
 	var result Result
 	for _, stmt := range stmts {

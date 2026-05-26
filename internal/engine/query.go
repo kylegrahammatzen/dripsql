@@ -143,10 +143,11 @@ func (db *DB) openSegmentsAt(table string, readTs uint64) ([]*storage.Segment, e
 }
 
 // evictColdSegments closes the oldest cached segments that are not in the current
-// query's working set, until the cache fits under segCacheLimit. Segments needed
+// query's working set, until the cache fits under db.segCacheLimit. Segments needed
 // by the in-progress query stay open. Called while db.mu is held.
 func (db *DB) evictColdSegments(working map[segCacheKey]struct{}) {
-	for db.segLRU.Len() > segCacheLimit {
+	limit := db.segCacheLimit()
+	for db.segLRU.Len() > limit {
 		evicted := false
 		for e := db.segLRU.Front(); e != nil; e = e.Next() {
 			entry := e.Value.(*segCacheEntry)

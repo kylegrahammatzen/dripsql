@@ -41,6 +41,10 @@ func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
 		db.mu.Unlock()
 		return nil, fmt.Errorf("engine: database is closed")
 	}
+	if db.readOnly.Load() {
+		db.mu.Unlock()
+		return nil, fmt.Errorf("engine: database is read-only")
+	}
 	readTs := db.nextCommitTs.Load()
 	db.pinnedReadTs[readTs]++
 	return &Tx{
