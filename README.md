@@ -1,19 +1,24 @@
 # DripSQL
 
-Experimental single-node SQL analytics engine for exploring columnar storage,
-compression, and memory-efficient query execution. APIs and storage formats
-will change.
+Embeddable single-node SQL analytics engine for Go with columnar storage and vectorized execution.
 
-## Layout
+- Embedded analytical queries in a single binary
+- Time-travel reads against any committed snapshot
+- Columnar storage with FOR, Delta, Dictionary, FSST, ALP, and Pcodec cascades
+- ACID transactions with snapshot isolation and atomic multi-table commit
+- Window functions, CTEs, hash joins, and correlated subqueries
 
-- `cmd/cli` is the single-shot SQL runner (`-db <path> -exec <sql>`).
-- `cmd/bench` is the workload benchmark driver.
-- `internal/engine` owns DB lifecycle, plan dispatch, INSERT/UPDATE/DELETE, the query runner, and the segment open cache.
-- `internal/storage` owns immutable columnar segments, the manifest with atomic transaction records, deletion vectors, and predicate plus top-K page pruning.
-- `internal/sql` owns the lexer, parser, binder, unified `Plan` + `Rel` IR, and plan cache.
-- `internal/exec` owns the pull-based vector operators (scan, filter, project, aggregate, sort, limit, hash join).
-- `internal/schema` owns table specs, column types, encoding enums, and name normalization.
-- `internal/vector` owns typed vectors, batches, validity bitmaps, selection masks, and kernel routines.
+## Examples
+
+```
+go run ./examples -db <path> <name>
+```
+
+| Name | Source | Demonstrates |
+| --- | --- | --- |
+| `embed` | `examples/embed.go` | `Open`, `Exec`, `QueryRow` with a parameterized argument |
+| `read_only` | `examples/read_only.go` | `SetReadOnly` plus the `ErrReadOnly` sentinel via `errors.Is` |
+| `transactions` | `examples/transactions.go` | `Update` closure that commits on nil and rolls back on error |
 
 ## Tests
 
@@ -132,66 +137,6 @@ go run ./cmd/cli -db <path> -exec "SELECT count(*) FROM events"
 
 Each invocation runs a single SQL string against the required `-db`
 directory, which is created automatically if it does not exist.
-
-## Examples
-
-```
-go run ./examples -db <path> <name>
-```
-
-| Name | Source | Demonstrates |
-| --- | --- | --- |
-| `embed` | `examples/embed.go` | `Open`, `Exec`, `QueryRow` with a parameterized argument |
-| `read_only` | `examples/read_only.go` | `SetReadOnly` plus the `ErrReadOnly` sentinel via `errors.Is` |
-| `transactions` | `examples/transactions.go` | `Update` closure that commits on nil and rolls back on error |
-
-## Feature coverage
-
-What the engine currently supports versus what's still on the list:
-
-| Area | Status | Notes |
-| --- | --- | --- |
-| Columnar segments, per-column + per-page min/max | yes | |
-| Codecs (plain, dictionary, constant, sequence, FOR+BitPack, delta+BitPack, Flate, Zstd, ALP, ALP-RD, FSST) | yes | Cascade chooses by encoded size; ALP for decimal floats, ALP-RD for irrational/sci floats, FSST for long/repetitive varbytes |
-| 15 types (numeric, text, bytes, UUID, date/time/timestamp, JSON, enum) | yes | |
-| Validity bitmaps, null-aware filter/sort/aggregate | yes | |
-| SQL parser, binder, plan + rel IR, plan cache | yes | |
-| Pull-based vectorized operators (scan/filter/aggregate/project/sort/limit) | yes | |
-| Hash join (inner/left/right/full) | yes | maphash-keyed probe |
-| INSERT, UPDATE, DELETE, BulkInsert | yes | UPDATE/DELETE atomic via versioned DV + manifest transaction record |
-| Multi-statement transactions (`BeginTx` / Exec / Query / Commit / Rollback) | yes | Single-writer; reads inside the txn see staged adds/DV overlays |
-| Cross-table atomic commit | yes | One (TxnID, CommitTs) per `Tx.Commit`; recovery forward-rolls partial groups |
-| MVCC snapshot reads | yes | `runQuery` pins `read_ts` at statement start; segment-level visibility via `ScanOpts.ReadTs` |
-| Time travel (`DB.QueryAt`, SQL `... FROM t AS OF <commit_ts>`) | yes | Per-table-reference snapshot in joins |
-| Retention vacuum | yes | `DB.VacuumRetention(cutoff)`; pin registry blocks retiring snapshots in use; honors max(seg.CommitTs, DV-out CommitTs) |
-| WAL with append-only framing + truncate-after-commit | yes | CRC32 per record; orphan cleanup + forward-roll on `Open` |
-| Top-K page pruning (single-column ORDER BY ... LIMIT) | yes | Sound: only prunes pages strictly dominated by others |
-| Streaming top-K with bounded heap | yes | `K+Offset` items, no `O(N)` materialization |
-| Segment handle cache | yes | DB-level LRU bounded at 256, keyed by `(path, dvPath)` |
-| EXPLAIN / EXPLAIN ANALYZE | yes | Per-operator wall + rows + calls tree |
-| Parallel per-segment scans | yes | `ScanOp.Parallelism = GOMAXPROCS` when >1 segment and no TopK pushdown |
-| Bloom skip filters (int columns) | yes | In-house ~10 bits/key, k=8 in `.bf` sidecar |
-| Cross-column SMA (sum/count from metadata alone) | yes | `tryMetadataAggregate` consults `.sm` numsum sidecar |
-| SELECT DISTINCT (single or multi-column) | yes | Lowers to GROUP BY over the named columns; rides the composite-key aggregate path |
-| Multi-column GROUP BY | yes | Composite-key path encodes (col1, col2, ...) per row, single-col stays on the typed fast paths |
-| CASE WHEN ... THEN ... [ELSE ...] END | yes | Searched form. Branches must share a kind. |
-| Configurable retention via DB.SetAutoRetention / DB.SetRetentionLag | yes | AutoRetention + RetentionLag makes DB.Vacuum also retire fully-DV'd-out segments below the cutoff |
-| JSON path operators (`->`, `->>`) | yes | `->` returns JSON, `->>` returns Text; both wired through Project |
-| CTEs (`WITH ... AS`) | yes | Plan substitution; CTE name resolves to inner Rel at plan time |
-| Scalar / `IN` / `EXISTS` subqueries | yes | Uncorrelated subqueries materialized once at BuildOperator |
-| Correlated subqueries | yes | Outer column refs bind to parent scope; inner plan rebuilt per outer row with values threaded through a shared carrier |
-| Qualified column refs (`tbl.col`, `alias.col`) | yes | Resolve in single-table and joined scopes |
-| Window functions | yes | `ROW_NUMBER/RANK/DENSE_RANK` and aggregate `SUM/COUNT/MIN/MAX/AVG OVER (PARTITION BY ... ORDER BY ...)`; `ROWS` and `RANGE BETWEEN` frame clauses |
-| Predicate-on-encoded execution | yes | FOR-bitpacked int64 equality + LT/GT/BETWEEN, delta-bitpack int64 equality, dictionary-text equality + LT/GT/LE/GE all run on encoded bytes via a per-page accept mask |
-| Lazy footer / sidecar / validation decode | yes | PageStats, sidecars, and `validateColumnDirectory` all defer to first access |
-| Page-level varbytes pruning | yes | Per-page bloom filter sidecar (`.tbf`), FNV-1a-64 keyed; consulted by `boundEqBytes.PrunePage` after the segment-level dict-hist check |
-| Compaction / vacuum (for DV path) | yes | `DB.Compact` rewrites half-or-more-deleted segments; `DB.Vacuum` drops unreferenced DV files |
-| User-declared codecs in DDL | yes | `CREATE TABLE ... col WITH (codec = 'dictionary' | ... | 'fsst')` overrides cascade |
-| Bench harness (TPC-H Q1/Q6, ClickBench Q1/Q4/Q5/Q7/Q9, SQLsmith fuzz, CI) | yes | Synthetic loaders for `lineitem` and `hits` plus a deterministic SELECT fuzzer; GitHub Actions runs build/vet/test + smoke bench |
-| UNION / UNION ALL | yes | Parser + planner lower to `RelUnion`; UNION distinct wraps in GROUP BY over all output columns for dedup |
-| Selective Late Materialization | yes | `Scan` decodes predicate-needed columns first, evaluates the filter, then decodes projection-only columns only when the page survives |
-| Pcodec (chunked FOR + bitpack) | yes | Splits FOR-packable pages into 1024-row sub-chunks each with its own base + bit-width; cascade picks it when multimodal distributions beat single-base FOR |
-| Operator fusion pass | yes | `fusePlan` collapses stacked `RelFilter` nodes into one `AND`-merged filter post-bind |
 
 ## License
 
