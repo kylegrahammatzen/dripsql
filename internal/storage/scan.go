@@ -47,8 +47,14 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 		}
 	}
 	var predCols []string
+	var compiled *CompiledPred
 	if opts.Pred != nil {
 		predCols = opts.Pred.Columns()
+		c, err := CompilePred(*opts.Pred)
+		if err != nil {
+			return err
+		}
+		compiled = &c
 	}
 	decode := projection
 	if len(predCols) != 0 {
@@ -78,9 +84,9 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 		if err != nil {
 			return fmt.Errorf("Scan: %w", err)
 		}
-		if opts.Pred != nil {
+		if compiled != nil {
 			seg.LoadPageStats()
-			if opts.Pred.Skips(seg) {
+			if compiled.Skips(seg) {
 				continue
 			}
 		}
@@ -92,7 +98,7 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 				pageMask[pi] = topKPages[[2]int{si, pi}]
 			}
 		}
-		if err := scanSegment(seg, decode, decodeIdx, projIdx, predNeeded, opts.Pred, pageMask, fn); err != nil {
+		if err := scanSegment(seg, decode, decodeIdx, projIdx, predNeeded, compiled, pageMask, fn); err != nil {
 			return err
 		}
 	}
@@ -252,7 +258,7 @@ func resolveSegmentColumns(seg *Segment, decode, projection []string) (decodeIdx
 	return decodeIdx, projIdx, nil
 }
 
-func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNeeded []bool, pred *Pred, pageMask []bool, fn ScanFn) error {
+func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNeeded []bool, pred *CompiledPred, pageMask []bool, fn ScanFn) error {
 	if len(decodeIdx) == 0 {
 		return nil
 	}

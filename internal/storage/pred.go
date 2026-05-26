@@ -208,6 +208,40 @@ func cloneBytes(b []byte) []byte {
 	return out
 }
 
+// CompiledPred caches one Pred -> BoundPredicate conversion so Scan can reuse it across every page and segment instead of paying for toBound on each call.
+type CompiledPred struct {
+	bp BoundPredicate
+	ee EncodedEvaluator
+}
+
+func CompilePred(p Pred) (CompiledPred, error) {
+	bp, err := p.toBound()
+	if err != nil {
+		return CompiledPred{}, err
+	}
+	ee, _ := bp.(EncodedEvaluator)
+	return CompiledPred{bp: bp, ee: ee}, nil
+}
+
+func (c CompiledPred) Skips(seg *Segment) bool {
+	return c.bp.PruneSegment(seg)
+}
+
+func (c CompiledPred) SkipsPage(seg *Segment, pageIdx int) bool {
+	return c.bp.PrunePage(seg, pageIdx)
+}
+
+func (c CompiledPred) Apply(batch vector.Batch, sel *vector.SelectionMask) {
+	c.bp.Eval(batch, sel)
+}
+
+func (c CompiledPred) ApplyEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
+	if c.ee == nil {
+		return false, scratch, nil
+	}
+	return c.ee.EvalEncoded(seg, pageIdx, sel, scratch)
+}
+
 // Skips reports whether no row in seg can satisfy p.
 func (p Pred) Skips(seg *Segment) bool {
 	bp, err := p.toBound()
