@@ -1,4 +1,4 @@
-﻿// Constant codec stores one value on disk regardless of row count.
+// Constant codec stores one value on disk regardless of row count.
 // Returns ErrSkip when rows differ so cascade selection naturally skips it.
 package codec
 
@@ -93,6 +93,9 @@ func constantValueSize(v vector.Vec) int {
 func (c constantCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	n, ok := c.constantSize(v, ctx)
 	if !ok {
+		return nil, ErrSkip
+	}
+	if maxLen, ok := ctxMaxEncodedLen(ctx); ok && n > maxLen {
 		return nil, ErrSkip
 	}
 	scratch := ctxTrial(ctx)

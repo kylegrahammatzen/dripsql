@@ -1,4 +1,4 @@
-﻿// FOR + bitpack codec for FOR-packable kinds (Int16/32/64, Date, Timestamp, Time, Decimal64, Enum32).
+// FOR + bitpack codec for FOR-packable kinds (Int16/32/64, Date, Timestamp, Time, Decimal64, Enum32).
 // Wire [u64 LE base][u8 width][bitpack payload]. Residuals = (val - base) bit-packed via FastLanes core.
 package codec
 
@@ -59,6 +59,9 @@ func (c forBitpackCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error
 	}
 	rows := int(v.Len)
 	n := forHeaderSize + PackedSize(rows, width)
+	if maxLen, ok := ctxMaxEncodedLen(ctx); ok && n > maxLen {
+		return nil, ErrSkip
+	}
 	scratch := ctxTrial(ctx)
 	if cap(scratch) < n {
 		scratch = make([]byte, n)

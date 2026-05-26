@@ -80,15 +80,15 @@ go test ./internal/storage/codec '-bench=.' '-benchmem' '-run=^$' '-count=10'
 
 | Bench | Time | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `Storage_ScanFull` | 279 us | 467 K | 70 |
-| `Storage_ScanEqInt64Hit` | 289 us | 467 K | 72 |
-| `Storage_ScanEqInt64Miss` | 671 ns | 232 | 6 |
-| `Storage_ScanEqBytesHit` | 318 us | 465 K | 71 |
-| `Storage_ScanLtInt64AllMatchUnprojected` | 65 us | 132 K | 27 |
-| `Storage_WriteSegment_Int64Random` | 2.99 ms | 294 K | 91 |
-| `Storage_WriteSegment_Int64Constant` | 2.20 ms | 150 K | 85 |
-| `Storage_WriteSegment_Int64Monotonic` | 2.28 ms | 277 K | 98 |
-| `Storage_WriteSegment_Int64SparseNulls` | 1.94 ms | 132 K | 53 |
+| `Storage_ScanFull` | 288 us | 467 K | 70 |
+| `Storage_ScanEqInt64Hit` | 359 us | 467 K | 72 |
+| `Storage_ScanEqInt64Miss` | 698 ns | 232 | 6 |
+| `Storage_ScanEqBytesHit` | 471 us | 465 K | 71 |
+| `Storage_ScanLtInt64AllMatchMetadata` | 105 us | 132 K | 27 |
+| `Storage_WriteSegment_Int64Random` | 1.99 ms | 290 K | 91 |
+| `Storage_WriteSegment_Int64Constant` | 1.91 ms | 116 K | 68 |
+| `Storage_WriteSegment_Int64Monotonic` | 1.77 ms | 240 K | 82 |
+| `Storage_WriteSegment_Int64SparseNulls` | 1.62 ms | 132 K | 53 |
 | `Storage_WriteSegment_Float64Plain` | 2.30 ms | 115 K | 80 |
 | `Storage_WriteSegment_Float64Decimal` | 2.11 ms | 97 K | 60 |
 | `Storage_WriteSegment_TextLowCardinality` | 2.52 ms | 426 K | 206 |

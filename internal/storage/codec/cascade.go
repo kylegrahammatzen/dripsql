@@ -68,11 +68,25 @@ func Encode(v vector.Vec, ctx *EncodeContext) (schema.Encoding, []byte, error) {
 		sp.SaveTrial(p)
 		return c.Encoding(), p, nil
 	}
+	if c, ok := dominantIntFactCodec(v, ctx); ok {
+		p, err := c.Encode(v, ctx)
+		if err != nil {
+			return 0, nil, fmt.Errorf("cascade encode: %v: %w", c.Encoding(), err)
+		}
+		sp.SaveTrial(p)
+		return c.Encoding(), p, nil
+	}
+	plainBound := 0
+	if n, ok := (plainCodec{}).plainSize(v); ok {
+		plainBound = n
+	}
 
 	for _, c := range Candidates(v.Kind) {
 		sp.trial = sp.trial[:0]
 		if haveBest {
 			ctx.MaxEncodedLen = len(sp.best)
+		} else if plainBound > 0 {
+			ctx.MaxEncodedLen = plainBound
 		} else {
 			ctx.MaxEncodedLen = 0
 		}
@@ -110,6 +124,20 @@ func dominantFactCodec(v vector.Vec, ctx *EncodeContext) (Codec, bool) {
 		return nil, false
 	}
 	return mustLookup(schema.EncDict), true
+}
+
+func dominantIntFactCodec(v vector.Vec, ctx *EncodeContext) (Codec, bool) {
+	if ctx == nil || ctx.Facts == nil || ctx.Facts.Int == nil || !v.Kind.IsFORPackable() {
+		return nil, false
+	}
+	f := ctx.Facts.Int
+	if f.ConstantOK {
+		return mustLookup(schema.EncConstant), true
+	}
+	if v.Kind.FixedWidth() == 8 && f.SequenceOK {
+		return mustLookup(schema.EncSequence), true
+	}
+	return nil, false
 }
 
 // Thin wrapper for callers that only need the chosen codec and a size.

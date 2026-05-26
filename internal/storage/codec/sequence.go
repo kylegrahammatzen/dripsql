@@ -1,4 +1,4 @@
-﻿// Sequence codec: arithmetic progression start + step*i in 16 bytes regardless of row count.
+// Sequence codec: arithmetic progression start + step*i in 16 bytes regardless of row count.
 // Scope is width-8 FOR-packable kinds (Int64, Timestamp, Time, Decimal64). Int64 wrap semantics on overflow are tolerated.
 package codec
 
@@ -41,6 +41,9 @@ func (c sequenceCodec) sequenceFits(v vector.Vec, ctx *EncodeContext) bool {
 
 func (c sequenceCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !c.sequenceFits(v, ctx) {
+		return nil, ErrSkip
+	}
+	if maxLen, ok := ctxMaxEncodedLen(ctx); ok && 16 > maxLen {
 		return nil, ErrSkip
 	}
 	scratch := ctxTrial(ctx)

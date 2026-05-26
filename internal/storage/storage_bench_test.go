@@ -177,7 +177,7 @@ func BenchmarkStorage_ScanEqBytesHit(b *testing.B) {
 	}
 }
 
-func BenchmarkStorage_ScanLtInt64AllMatchUnprojected(b *testing.B) {
+func BenchmarkStorage_ScanLtInt64AllMatchMetadata(b *testing.B) {
 	seg := openBenchSegment(b, 4)
 	defer seg.Close()
 	pred := Pred{Op: OpLt, Col: "id", Kind: vector.VecInt64, I64: benchPageRows}

@@ -1,4 +1,4 @@
-﻿// Delta + bitpack codec: stores PackFirst (vals[0]), bitpacks (vals[i]-vals[i-1]) - min(deltas).
+// Delta + bitpack codec: stores PackFirst (vals[0]), bitpacks (vals[i]-vals[i-1]) - min(deltas).
 // Wire: [u64 LE PackFirst][u64 LE PackBase][u8 PackWidth][bitpack payload of rows-1 residuals].
 package codec
 
@@ -58,6 +58,9 @@ func (c deltaBitpackCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, err
 	}
 	rows := int(v.Len)
 	n := deltaHeaderSize + PackedSize(rows-1, width)
+	if maxLen, ok := ctxMaxEncodedLen(ctx); ok && n > maxLen {
+		return nil, ErrSkip
+	}
 	scratch := ctxTrial(ctx)
 	if cap(scratch) < n {
 		scratch = make([]byte, n)
