@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/kylegrahammatzen/dripsql/internal/exec"
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
@@ -178,97 +177,32 @@ func (db *DB) applyUpdateToSegment(ctx context.Context, entry storage.ManifestEn
 	if rows == 0 {
 		return 0, nil, nil
 	}
-	if len(seg.Cols) == 0 {
-		return 0, nil, fmt.Errorf("update: segment has no columns")
-	}
-
-	hadDV := seg.DV != nil
 	dv := cloneOrAllValidDV(seg, rows)
-
-	idxByName := segmentColumnIndex(seg)
-	segIdxs := make([]int, len(up.decodeDefs))
-	for i, d := range up.decodeDefs {
-		idx, ok := idxByName[schema.NormalizeName(d.Name)]
-		if !ok {
-			return 0, nil, fmt.Errorf("column %q not in segment", d.Name)
-		}
-		segIdxs[i] = idx
-	}
-
-	pageCount := len(seg.Cols[0].Pages)
 	var updated int64
-	// Single scratch is safe: every codec.Decode either copies into a fresh fixed-width
-	// buffer or appends into a fresh VarVec, so the returned Vec never aliases scratch.
-	var scratch []byte
-	decoded := make([]vector.Column, len(up.decodeDefs))
 	anyMatch := false
-
-	for pi := range pageCount {
-		if err := ctx.Err(); err != nil {
-			return updated, nil, err
-		}
-		page := seg.Cols[0].Pages[pi]
-		pageRows := int(page.Rows)
-		rowStart := int(page.RowStart)
-		live := vector.NewSelectionMask(pageRows)
-		liveCount := 0
-		if !hadDV {
-			live.FillAll()
-			liveCount = pageRows
-		} else {
-			for row := range pageRows {
-				if dv.IsValid(rowStart + row) {
-					live.Set(row)
-					liveCount++
-				}
-			}
-		}
-		if liveCount == 0 {
-			continue
-		}
-		for ci, d := range up.decodeDefs {
-			v, s, err := seg.ReadPageInto(segIdxs[ci], pi, scratch)
-			if err != nil {
-				return updated, nil, fmt.Errorf("page %d col %q: %w", pi, d.Name, err)
-			}
-			scratch = s
-			decoded[ci] = vector.Column{Name: d.Name, Type: d.Type, EnumLabels: d.Labels, V: v}
-		}
-		batch := vector.Batch{Len: pageRows, Columns: decoded, Sel: &live}
-
-		var sel vector.SelectionMask
-		if plan.Where == nil {
-			sel = live
-		} else {
-			sel, err = exec.EvalPredicate(batch, *plan.Where)
-			if err != nil {
-				return updated, nil, fmt.Errorf("page %d: %w", pi, err)
-			}
-		}
-
+	err = walkLivePages(ctx, seg, dv, up.decodeDefs, plan.Where, func(batch vector.Batch, sel vector.SelectionMask, rowStart int) error {
 		var loopErr error
 		sel.IterSet(func(row int) {
 			if loopErr != nil {
 				return
 			}
-			abs := rowStart + row
 			if err := pending.appendRow(batch, row); err != nil {
 				loopErr = err
 				return
 			}
-			dv.SetInvalid(abs)
+			dv.SetInvalid(rowStart + row)
 			updated++
 			anyMatch = true
 			if pending.rows == vector.StandardBatchRows {
 				if err := flush(); err != nil {
 					loopErr = err
-					return
 				}
 			}
 		})
-		if loopErr != nil {
-			return updated, nil, loopErr
-		}
+		return loopErr
+	})
+	if err != nil {
+		return updated, nil, err
 	}
 	if !anyMatch {
 		return updated, nil, nil

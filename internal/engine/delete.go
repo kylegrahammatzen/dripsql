@@ -75,22 +75,13 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 		return n, &storage.ManifestDVUpdate{SegmentPath: entry.Path, DVPath: dvPath, Rows: uint32(rows)}, nil
 	}
 
-	if len(seg.Cols) == 0 {
-		return 0, nil, fmt.Errorf("delete: WHERE requires pages but segment has no columns")
-	}
-
-	type predCol struct {
-		def    sql.BoundColumnDef
-		segIdx int
-	}
 	predNames := exprColumnNames(*plan.Where)
-	preds := make([]predCol, 0, len(predNames))
+	defs := make([]sql.BoundColumnDef, 0, len(predNames))
 	for _, name := range predNames {
-		var def sql.BoundColumnDef
 		found := false
 		for _, c := range plan.Table.Columns {
 			if schema.NormalizeName(c.Name) == name {
-				def = c
+				defs = append(defs, c)
 				found = true
 				break
 			}
@@ -98,25 +89,51 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 		if !found {
 			return 0, nil, fmt.Errorf("delete: column %q referenced in WHERE not in table", name)
 		}
-		idx, err := findSegmentColumn(seg, def.Name)
-		if err != nil {
-			return 0, nil, err
-		}
-		preds = append(preds, predCol{def: def, segIdx: idx})
 	}
 
-	hadDV := seg.DV != nil
 	dv := cloneOrAllValidDV(seg, rows)
-	pageCount := len(seg.Cols[0].Pages)
 	var deleted int64
-	// Single scratch is safe: every codec.Decode either copies into a fresh fixed-width
-	// buffer or appends into a fresh VarVec, so the returned Vec never aliases scratch.
-	var scratch []byte
-	decoded := make([]vector.Column, len(preds))
+	err = walkLivePages(ctx, seg, dv, defs, plan.Where, func(_ vector.Batch, sel vector.SelectionMask, rowStart int) error {
+		sel.IterSet(func(row int) {
+			deleted++
+			dv.SetInvalid(rowStart + row)
+		})
+		return nil
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	if deleted == 0 {
+		return 0, nil, nil
+	}
+	dvPath := versionedDVPath(entry.Path)
+	if err := storage.WriteDVAtPath(dvPath, rows, dv); err != nil {
+		return 0, nil, err
+	}
+	return deleted, &storage.ManifestDVUpdate{SegmentPath: entry.Path, DVPath: dvPath, Rows: uint32(rows)}, nil
+}
 
+// walkLivePages iterates each page of seg, decoding only defs columns into a reused scratch, and invokes fn with the page batch plus a sel mask of rows matching where (or all live rows when where is nil).
+func walkLivePages(ctx context.Context, seg *storage.Segment, dv vector.Validity, defs []sql.BoundColumnDef, where *sql.BoundExpr, fn func(batch vector.Batch, sel vector.SelectionMask, rowStart int) error) error {
+	if len(seg.Cols) == 0 {
+		return fmt.Errorf("walk: segment has no columns")
+	}
+	hadDV := seg.DV != nil
+	idxByName := segmentColumnIndex(seg)
+	segIdxs := make([]int, len(defs))
+	for i, d := range defs {
+		idx, ok := idxByName[schema.NormalizeName(d.Name)]
+		if !ok {
+			return fmt.Errorf("column %q not in segment", d.Name)
+		}
+		segIdxs[i] = idx
+	}
+	var scratch []byte
+	decoded := make([]vector.Column, len(defs))
+	pageCount := len(seg.Cols[0].Pages)
 	for pi := range pageCount {
 		if err := ctx.Err(); err != nil {
-			return deleted, nil, err
+			return err
 		}
 		page := seg.Cols[0].Pages[pi]
 		pageRows := int(page.Rows)
@@ -137,32 +154,28 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 		if liveCount == 0 {
 			continue
 		}
-		for ci, p := range preds {
-			v, s, err := seg.ReadPageInto(p.segIdx, pi, scratch)
+		for ci, d := range defs {
+			v, s, err := seg.ReadPageInto(segIdxs[ci], pi, scratch)
 			if err != nil {
-				return 0, nil, fmt.Errorf("page %d col %q: %w", pi, p.def.Name, err)
+				return fmt.Errorf("page %d col %q: %w", pi, d.Name, err)
 			}
 			scratch = s
-			decoded[ci] = vector.Column{Name: p.def.Name, Type: p.def.Type, EnumLabels: p.def.Labels, V: v}
+			decoded[ci] = vector.Column{Name: d.Name, Type: d.Type, EnumLabels: d.Labels, V: v}
 		}
 		batch := vector.Batch{Len: pageRows, Columns: decoded, Sel: &live}
-		sel, err := exec.EvalPredicate(batch, *plan.Where)
-		if err != nil {
-			return 0, nil, fmt.Errorf("page %d: %w", pi, err)
+		sel := live
+		if where != nil {
+			s, err := exec.EvalPredicate(batch, *where)
+			if err != nil {
+				return fmt.Errorf("page %d: %w", pi, err)
+			}
+			sel = s
 		}
-		sel.IterSet(func(row int) {
-			deleted++
-			dv.SetInvalid(rowStart + row)
-		})
+		if err := fn(batch, sel, rowStart); err != nil {
+			return err
+		}
 	}
-	if deleted == 0 {
-		return 0, nil, nil
-	}
-	dvPath := versionedDVPath(entry.Path)
-	if err := storage.WriteDVAtPath(dvPath, rows, dv); err != nil {
-		return 0, nil, err
-	}
-	return deleted, &storage.ManifestDVUpdate{SegmentPath: entry.Path, DVPath: dvPath, Rows: uint32(rows)}, nil
+	return nil
 }
 
 func cloneOrAllValidDV(seg *storage.Segment, rows int) vector.Validity {
