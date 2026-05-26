@@ -86,6 +86,20 @@ func findSegmentColumn(seg *Segment, name string) (*SegmentColumn, bool) {
 	return nil, false
 }
 
+// findSegmentColumnByID prefers a column id match when both the segment carries the
+// identity sidecar and the caller supplied a non-zero id. Falls back to name match so
+// legacy segments still resolve and so callers without an id stay correct.
+func findSegmentColumnByID(seg *Segment, name string, colID uint64) (*SegmentColumn, bool) {
+	if colID != 0 && seg.TableID != 0 {
+		for i := range seg.Cols {
+			if seg.Cols[i].ColumnID == colID {
+				return &seg.Cols[i], true
+			}
+		}
+	}
+	return findSegmentColumn(seg, name)
+}
+
 func numericStatsFromCol(c *SegmentColumn) (NumericStats[int64], bool) {
 	if c.Rows == 0 {
 		return NumericStats[int64]{}, false
@@ -118,6 +132,7 @@ func pageMinMaxInt(c *SegmentColumn, pageIdx int) (min, max int64, ok bool) {
 
 type boundEqInt64 struct {
 	column string
+	colID  uint64
 	value  int64
 }
 
@@ -132,7 +147,7 @@ func (b boundEqInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 }
 
 func (b boundEqInt64) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumn(seg, b.column)
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
@@ -157,7 +172,7 @@ func (b boundEqInt64) PruneSegment(seg *Segment) bool {
 }
 
 func (b boundEqInt64) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumn(seg, b.column)
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
@@ -170,6 +185,7 @@ func (b boundEqInt64) PrunePage(seg *Segment, pageIdx int) bool {
 
 type boundLtInt64 struct {
 	column string
+	colID  uint64
 	value  int64
 }
 
@@ -184,7 +200,7 @@ func (b boundLtInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 }
 
 func (b boundLtInt64) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumn(seg, b.column)
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
@@ -199,7 +215,7 @@ func (b boundLtInt64) PruneSegment(seg *Segment) bool {
 }
 
 func (b boundLtInt64) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumn(seg, b.column)
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
@@ -212,6 +228,7 @@ func (b boundLtInt64) PrunePage(seg *Segment, pageIdx int) bool {
 
 type boundGtInt64 struct {
 	column string
+	colID  uint64
 	value  int64
 }
 
@@ -226,7 +243,7 @@ func (b boundGtInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 }
 
 func (b boundGtInt64) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumn(seg, b.column)
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
@@ -241,7 +258,7 @@ func (b boundGtInt64) PruneSegment(seg *Segment) bool {
 }
 
 func (b boundGtInt64) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumn(seg, b.column)
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
@@ -254,6 +271,7 @@ func (b boundGtInt64) PrunePage(seg *Segment, pageIdx int) bool {
 
 type boundEqBytes struct {
 	column string
+	colID  uint64
 	value  []byte
 }
 
@@ -268,7 +286,7 @@ func (b boundEqBytes) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 }
 
 func (b boundEqBytes) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumn(seg, b.column)
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
@@ -290,7 +308,7 @@ func (b boundEqBytes) PruneSegment(seg *Segment) bool {
 }
 
 func (b boundEqBytes) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumn(seg, b.column)
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
@@ -318,6 +336,7 @@ func (b boundEqBytes) PrunePage(seg *Segment, pageIdx int) bool {
 
 type boundLtBytes struct {
 	column    string
+	colID     uint64
 	value     []byte
 	inclusive bool
 }
@@ -341,6 +360,7 @@ func (boundLtBytes) PrunePage(*Segment, int) bool { return false }
 
 type boundGtBytes struct {
 	column    string
+	colID     uint64
 	value     []byte
 	inclusive bool
 }
@@ -362,7 +382,10 @@ func (b boundGtBytes) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 func (boundGtBytes) PruneSegment(*Segment) bool   { return false }
 func (boundGtBytes) PrunePage(*Segment, int) bool { return false }
 
-type boundIsNull struct{ column string }
+type boundIsNull struct {
+	column string
+	colID  uint64
+}
 
 func (b boundIsNull) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	ensureMaskSize(sel, batch.Len)
@@ -380,7 +403,7 @@ func (b boundIsNull) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 }
 
 func (b boundIsNull) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumn(seg, b.column)
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
@@ -388,7 +411,7 @@ func (b boundIsNull) PruneSegment(seg *Segment) bool {
 }
 
 func (b boundIsNull) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumn(seg, b.column)
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
@@ -490,13 +513,13 @@ func (b boundNot) PrunePage(seg *Segment, pageIdx int) bool {
 func childAlwaysMatchesSegment(child BoundPredicate, seg *Segment) bool {
 	switch c := child.(type) {
 	case boundIsNull:
-		col, ok := findSegmentColumn(seg, c.column)
+		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || col.Rows == 0 {
 			return false
 		}
 		return col.NullCount == col.Rows
 	case boundEqInt64:
-		col, ok := findSegmentColumn(seg, c.column)
+		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || col.NullCount != 0 {
 			return false
 		}
@@ -506,7 +529,7 @@ func childAlwaysMatchesSegment(child BoundPredicate, seg *Segment) bool {
 		}
 		return stats.Min == c.value && stats.Max == c.value
 	case boundLtInt64:
-		col, ok := findSegmentColumn(seg, c.column)
+		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || col.NullCount != 0 {
 			return false
 		}
@@ -516,7 +539,7 @@ func childAlwaysMatchesSegment(child BoundPredicate, seg *Segment) bool {
 		}
 		return stats.Max < c.value
 	case boundGtInt64:
-		col, ok := findSegmentColumn(seg, c.column)
+		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || col.NullCount != 0 {
 			return false
 		}
@@ -557,14 +580,14 @@ func predicateAlwaysMatchesPage(pred BoundPredicate, seg *Segment, pageIdx int) 
 func childAlwaysMatchesPage(child BoundPredicate, seg *Segment, pageIdx int) bool {
 	switch c := child.(type) {
 	case boundIsNull:
-		col, ok := findSegmentColumn(seg, c.column)
+		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || pageIdx < 0 || pageIdx >= len(col.Pages) {
 			return false
 		}
 		p := col.Pages[pageIdx]
 		return p.Rows > 0 && p.Flags&PageFlagAllNull != 0
 	case boundEqInt64:
-		col, ok := findSegmentColumn(seg, c.column)
+		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || pageIdx < 0 || pageIdx >= len(col.Pages) {
 			return false
 		}
@@ -577,7 +600,7 @@ func childAlwaysMatchesPage(child BoundPredicate, seg *Segment, pageIdx int) boo
 		}
 		return min == c.value && max == c.value
 	case boundLtInt64:
-		col, ok := findSegmentColumn(seg, c.column)
+		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || pageIdx < 0 || pageIdx >= len(col.Pages) {
 			return false
 		}
@@ -590,7 +613,7 @@ func childAlwaysMatchesPage(child BoundPredicate, seg *Segment, pageIdx int) boo
 		}
 		return max < c.value
 	case boundGtInt64:
-		col, ok := findSegmentColumn(seg, c.column)
+		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || pageIdx < 0 || pageIdx >= len(col.Pages) {
 			return false
 		}

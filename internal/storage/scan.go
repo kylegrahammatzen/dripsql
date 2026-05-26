@@ -86,7 +86,11 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 		if opts.ReadTs != 0 && seg.CommitTs > opts.ReadTs {
 			continue
 		}
-		decodeIdx, projIdx, err := resolveSegmentColumns(seg, decode, projection, decodeIDs(decode, projection, opts.Columns, opts.ColumnIDs))
+		var predIDs []uint64
+		if opts.Pred != nil {
+			predIDs = opts.Pred.ColumnIDs()
+		}
+		decodeIdx, projIdx, err := resolveSegmentColumns(seg, decode, projection, decodeIDs(decode, opts.Columns, opts.ColumnIDs, predCols, predIDs))
 		if err != nil {
 			return fmt.Errorf("Scan: %w", err)
 		}
@@ -233,21 +237,38 @@ func unionNames(a, b []string) []string {
 }
 
 // decodeIDs builds the id slice that lines up with the decode set produced from
-// projection + predicate columns. Predicate columns have no id today so their slot
-// stays zero and falls back to name match in resolveSegmentColumns.
-func decodeIDs(decode, projection, projNames []string, projIDs []uint64) []uint64 {
-	if len(projIDs) != len(projNames) || len(projIDs) == 0 {
+// projection + predicate columns. Projection ids come from opts.ColumnIDs; predicate
+// ids come from pred.ColumnIDs(). A zero entry signals "no id known, fall back to
+// name match" inside resolveSegmentColumns.
+func decodeIDs(decode []string, projNames []string, projIDs []uint64, predNames []string, predIDs []uint64) []uint64 {
+	if len(projIDs) != len(projNames) {
+		projIDs = nil
+	}
+	if len(predIDs) != len(predNames) {
+		predIDs = nil
+	}
+	if len(projIDs) == 0 && len(predIDs) == 0 {
 		return nil
 	}
-	byName := make(map[string]uint64, len(projNames))
+	byName := make(map[string]uint64, len(projNames)+len(predNames))
 	for i, n := range projNames {
-		byName[strings.ToLower(n)] = projIDs[i]
+		if i < len(projIDs) {
+			byName[strings.ToLower(n)] = projIDs[i]
+		}
+	}
+	for i, n := range predNames {
+		key := strings.ToLower(n)
+		if _, ok := byName[key]; ok {
+			continue
+		}
+		if i < len(predIDs) {
+			byName[key] = predIDs[i]
+		}
 	}
 	out := make([]uint64, len(decode))
 	for i, n := range decode {
 		out[i] = byName[strings.ToLower(n)]
 	}
-	_ = projection
 	return out
 }
 

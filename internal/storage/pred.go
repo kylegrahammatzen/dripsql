@@ -58,7 +58,11 @@ func (op PredOp) String() string {
 type Pred struct {
 	Op   PredOp
 	Col  string
-	Kind vector.VecKind
+	// ColID is the stable catalog id for Col. Set when the engine builds the Pred so
+	// that segments carrying the identity sidecar can resolve renamed columns by id
+	// instead of by name. Zero falls back to name match (legacy or no-id callers).
+	ColID uint64
+	Kind  vector.VecKind
 
 	I64   int64
 	F64   float64
@@ -124,8 +128,22 @@ func BindPred(raw Pred, lookup SchemaLookup) (Pred, error) {
 
 // Columns returns the column names referenced by p in first-encountered order.
 func (p Pred) Columns() []string {
+	names, _ := p.columnRefs()
+	return names
+}
+
+// ColumnIDs returns the catalog ids referenced by p, parallel to Columns. Entries are
+// zero for leaves built without an id (legacy callers); scan resolves by name in that
+// case.
+func (p Pred) ColumnIDs() []uint64 {
+	_, ids := p.columnRefs()
+	return ids
+}
+
+func (p Pred) columnRefs() ([]string, []uint64) {
 	seen := map[string]struct{}{}
-	var out []string
+	var names []string
+	var ids []uint64
 	var walk func(p Pred)
 	walk = func(p Pred) {
 		switch p.Op {
@@ -153,10 +171,11 @@ func (p Pred) Columns() []string {
 			return
 		}
 		seen[key] = struct{}{}
-		out = append(out, p.Col)
+		names = append(names, p.Col)
+		ids = append(ids, p.ColID)
 	}
 	walk(p)
-	return out
+	return names, ids
 }
 
 // validatePred asserts the per-op shape invariants for tests and transitional checks.
@@ -293,36 +312,36 @@ func (p Pred) toBound() (BoundPredicate, error) {
 	case OpEq:
 		switch p.Kind {
 		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-			return boundEqInt64{column: p.Col, value: p.I64}, nil
+			return boundEqInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
-			return boundEqBytes{column: p.Col, value: p.Bytes}, nil
+			return boundEqBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
 		}
 	case OpLt:
 		switch p.Kind {
 		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-			return boundLtInt64{column: p.Col, value: p.I64}, nil
+			return boundLtInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
-			return boundLtBytes{column: p.Col, value: p.Bytes}, nil
+			return boundLtBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
 		}
 	case OpLe:
 		switch p.Kind {
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
-			return boundLtBytes{column: p.Col, value: p.Bytes, inclusive: true}, nil
+			return boundLtBytes{column: p.Col, colID: p.ColID, value: p.Bytes, inclusive: true}, nil
 		}
 	case OpGt:
 		switch p.Kind {
 		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-			return boundGtInt64{column: p.Col, value: p.I64}, nil
+			return boundGtInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
-			return boundGtBytes{column: p.Col, value: p.Bytes}, nil
+			return boundGtBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
 		}
 	case OpGe:
 		switch p.Kind {
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
-			return boundGtBytes{column: p.Col, value: p.Bytes, inclusive: true}, nil
+			return boundGtBytes{column: p.Col, colID: p.ColID, value: p.Bytes, inclusive: true}, nil
 		}
 	case OpIsNull:
-		return boundIsNull{column: p.Col}, nil
+		return boundIsNull{column: p.Col, colID: p.ColID}, nil
 	case OpAnd:
 		kids := make([]BoundPredicate, 0, len(p.Children))
 		for _, c := range p.Children {

@@ -92,6 +92,31 @@ func TestEngine_RenameColumn_RejectsNameCollision(t *testing.T) {
 	}
 }
 
+func TestEngine_RenameColumn_WhereStillResolves(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	ctx := context.Background()
+	if _, err := db.Exec(ctx, "CREATE TABLE t (id int64 NOT NULL, name text NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, "INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, "ALTER TABLE t RENAME COLUMN name TO label"); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := mustValues(t, db, "SELECT id FROM t WHERE label = 'b'")
+	wantRows(t, rows, [][]any{{int64(2)}})
+
+	rows = mustValues(t, db, "SELECT label FROM t WHERE id > 1 ORDER BY id")
+	wantRows(t, rows, [][]any{{"b"}, {"c"}})
+}
+
 func TestEngine_RenameColumn_RejectsUnknownColumn(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(dir)

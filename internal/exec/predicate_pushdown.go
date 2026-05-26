@@ -134,9 +134,9 @@ func loweredIn(expr sql.BoundExpr) (storage.Pred, bool) {
 		}
 		switch v := arg.Literal.(type) {
 		case int64:
-			preds = append(preds, storage.Pred{Op: storage.OpEq, Col: col.Column, Kind: vector.VecInt64, I64: v})
+			preds = append(preds, storage.Pred{Op: storage.OpEq, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecInt64, I64: v})
 		case string:
-			preds = append(preds, storage.Pred{Op: storage.OpEq, Col: col.Column, Kind: vector.VecText, Bytes: []byte(v)})
+			preds = append(preds, storage.Pred{Op: storage.OpEq, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecText, Bytes: []byte(v)})
 		default:
 			return storage.Pred{}, false
 		}
@@ -179,37 +179,37 @@ func loweredComparison(expr sql.BoundExpr) (storage.Pred, bool) {
 	case int64:
 		switch op {
 		case sql.ExprEqual:
-			return storage.Pred{Op: storage.OpEq, Col: col.Column, Kind: vector.VecInt64, I64: v}, true
+			return storage.Pred{Op: storage.OpEq, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecInt64, I64: v}, true
 		case sql.ExprNotEqual:
-			eq := storage.Pred{Op: storage.OpEq, Col: col.Column, Kind: vector.VecInt64, I64: v}
+			eq := storage.Pred{Op: storage.OpEq, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecInt64, I64: v}
 			return storage.Pred{Op: storage.OpNot, Children: []storage.Pred{eq}}, true
 		case sql.ExprLess:
-			return storage.Pred{Op: storage.OpLt, Col: col.Column, Kind: vector.VecInt64, I64: v}, true
+			return storage.Pred{Op: storage.OpLt, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecInt64, I64: v}, true
 		case sql.ExprGreater:
-			return storage.Pred{Op: storage.OpGt, Col: col.Column, Kind: vector.VecInt64, I64: v}, true
+			return storage.Pred{Op: storage.OpGt, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecInt64, I64: v}, true
 		case sql.ExprLessEqual:
 			if v == int64(^uint64(0)>>1) {
 				return storage.Pred{}, false
 			}
-			return storage.Pred{Op: storage.OpLt, Col: col.Column, Kind: vector.VecInt64, I64: v + 1}, true
+			return storage.Pred{Op: storage.OpLt, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecInt64, I64: v + 1}, true
 		case sql.ExprGreaterEqual:
 			if v == -int64(^uint64(0)>>1)-1 {
 				return storage.Pred{}, false
 			}
-			return storage.Pred{Op: storage.OpGt, Col: col.Column, Kind: vector.VecInt64, I64: v - 1}, true
+			return storage.Pred{Op: storage.OpGt, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecInt64, I64: v - 1}, true
 		}
 	case string:
 		switch op {
 		case sql.ExprEqual:
-			return storage.Pred{Op: storage.OpEq, Col: col.Column, Kind: vector.VecText, Bytes: []byte(v)}, true
+			return storage.Pred{Op: storage.OpEq, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecText, Bytes: []byte(v)}, true
 		case sql.ExprLess:
-			return storage.Pred{Op: storage.OpLt, Col: col.Column, Kind: vector.VecText, Bytes: []byte(v)}, true
+			return storage.Pred{Op: storage.OpLt, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecText, Bytes: []byte(v)}, true
 		case sql.ExprLessEqual:
-			return storage.Pred{Op: storage.OpLe, Col: col.Column, Kind: vector.VecText, Bytes: []byte(v)}, true
+			return storage.Pred{Op: storage.OpLe, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecText, Bytes: []byte(v)}, true
 		case sql.ExprGreater:
-			return storage.Pred{Op: storage.OpGt, Col: col.Column, Kind: vector.VecText, Bytes: []byte(v)}, true
+			return storage.Pred{Op: storage.OpGt, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecText, Bytes: []byte(v)}, true
 		case sql.ExprGreaterEqual:
-			return storage.Pred{Op: storage.OpGe, Col: col.Column, Kind: vector.VecText, Bytes: []byte(v)}, true
+			return storage.Pred{Op: storage.OpGe, Col: col.Column, ColID: uint64(col.ColumnID), Kind: vector.VecText, Bytes: []byte(v)}, true
 		}
 	}
 	return storage.Pred{}, false
