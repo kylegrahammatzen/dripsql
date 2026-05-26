@@ -260,6 +260,72 @@ func TestRows_All_AndColumnsCopy(t *testing.T) {
 	}
 }
 
+// QueryRow must not mutate dst when it returns ErrTooManyRows so caller state stays consistent on the error path.
+func TestQueryRow_TooManyRowsDoesNotMutateDestination(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
+	mustExec(t, db, "INSERT INTO t (id) VALUES (1), (2)")
+
+	id := int64(99)
+	if err := db.QueryRow(ctx, "SELECT id FROM t").Scan(&id); !errors.Is(err, ErrTooManyRows) {
+		t.Fatalf("got err=%v, want ErrTooManyRows", err)
+	}
+	if id != 99 {
+		t.Fatalf("destination mutated on ErrTooManyRows: got %d want 99", id)
+	}
+}
+
+// Tx operations after Commit or Rollback return ErrTxDone so callers can detect reuse without string matching.
+func TestTx_DoneAfterCommitOrRollback(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
+
+	tx, err := db.BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO t (id) VALUES (1)"); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO t (id) VALUES (2)"); !errors.Is(err, ErrTxDone) {
+		t.Fatalf("Exec after Commit err=%v, want ErrTxDone", err)
+	}
+}
+
+// Update must roll back staged writes when fn panics so an unhandled error path cannot leak partial state.
+func TestUpdate_RollsBackOnPanic(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected panic to propagate out of Update")
+			}
+		}()
+		_ = db.Update(ctx, func(tx *Tx) error {
+			if _, err := tx.Exec(ctx, "INSERT INTO t (id) VALUES (1)"); err != nil {
+				return err
+			}
+			panic("boom")
+		})
+	}()
+
+	var n int64
+	if err := db.QueryRow(ctx, "SELECT count(*) FROM t").Scan(&n); err != nil {
+		t.Fatalf("QueryRow: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("count after panic = %d, want 0 (rollback)", n)
+	}
+}
+
 // Open rejects the empty path so a missing config value cannot silently land on the wrong directory.
 func TestOpen_EmptyPathRejected(t *testing.T) {
 	if _, err := Open(""); err == nil {

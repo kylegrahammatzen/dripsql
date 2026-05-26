@@ -128,7 +128,9 @@ func scanInto(dst, src any) error {
 		case string:
 			*d = []byte(v)
 		case []byte:
-			*d = v
+			out := make([]byte, len(v))
+			copy(out, v)
+			*d = out
 		default:
 			return fmt.Errorf("cannot scan %T into *[]byte", src)
 		}

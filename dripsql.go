@@ -134,7 +134,7 @@ type Row struct {
 	err  error
 }
 
-// Scan copies the single row into dst pointers and returns ErrNoRows or ErrTooManyRows when the result does not have exactly one row.
+// Scan copies the single row into dst pointers and returns ErrNoRows or ErrTooManyRows without mutating dst when the result does not have exactly one row.
 func (r *Row) Scan(dst ...any) error {
 	if r.err != nil {
 		return r.err
@@ -146,16 +146,18 @@ func (r *Row) Scan(dst ...any) error {
 		}
 		return ErrNoRows
 	}
-	if err := r.rows.Scan(dst...); err != nil {
-		return err
-	}
+	first := r.rows.current
 	if r.rows.Next() {
 		return ErrTooManyRows
 	}
-	return r.rows.Err()
+	if err := r.rows.Err(); err != nil {
+		return err
+	}
+	r.rows.current = first
+	return r.rows.Scan(dst...)
 }
 
-// Rows is the single-pass cursor returned by Query and must always be Closed.
+// Rows is a single-pass cursor over a materialized result set and must always be Closed.
 type Rows struct {
 	rs      *engine.Rows
 	cursor  int
@@ -170,12 +172,15 @@ func newRows(rs *engine.Rows) *Rows {
 
 // Columns returns the result-set column names in select order; the returned slice is owned by the caller.
 func (r *Rows) Columns() []string {
+	if r == nil || r.rs == nil {
+		return nil
+	}
 	return append([]string(nil), r.rs.Columns...)
 }
 
 // Next advances to the next row and reports whether one is available.
 func (r *Rows) Next() bool {
-	if r.closed || r.err != nil {
+	if r == nil || r.closed || r.err != nil || r.rs == nil {
 		return false
 	}
 	r.cursor++
@@ -206,9 +211,9 @@ func (r *Rows) Scan(dst ...any) error {
 // Err returns the deferred error from iteration or nil if Next exhausted cleanly.
 func (r *Rows) Err() error { return r.err }
 
-// All drains the unread rows into a fresh slice so iteration after Next picks up at the next row not the current one.
+// All drains the unread rows into a fresh slice with each cell deep-copied so caller-owned bytes cannot alias engine memory.
 func (r *Rows) All() ([][]any, error) {
-	if r.closed {
+	if r.closed || r.rs == nil {
 		return nil, fmt.Errorf("dripsql.Rows.All: cursor already closed")
 	}
 	start := r.cursor + 1
@@ -222,7 +227,9 @@ func (r *Rows) All() ([][]any, error) {
 	out := make([][]any, len(remaining))
 	for i, row := range remaining {
 		copied := make([]any, len(row))
-		copy(copied, row)
+		for j, v := range row {
+			copied[j] = cloneCell(v)
+		}
 		out[i] = copied
 	}
 	r.cursor = len(r.rs.Values)
@@ -230,11 +237,24 @@ func (r *Rows) All() ([][]any, error) {
 	return out, nil
 }
 
-// Close releases the cursor and is safe to call more than once.
+// Close releases the cursor and the backing result set so a large result does not pin memory until the Rows is collected.
 func (r *Rows) Close() error {
+	if r.closed {
+		return nil
+	}
 	r.closed = true
 	r.current = nil
+	r.rs = nil
 	return nil
+}
+
+func cloneCell(v any) any {
+	if b, ok := v.([]byte); ok {
+		out := make([]byte, len(b))
+		copy(out, b)
+		return out
+	}
+	return v
 }
 
 // Tx is a multi-statement transaction that holds the writer lock until Commit or Rollback.
