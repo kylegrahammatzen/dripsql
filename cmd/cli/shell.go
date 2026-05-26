@@ -99,12 +99,18 @@ func runOne(ctx context.Context, db *dripsql.DB, sqlText string, format formatMo
 		start := time.Now()
 		rows, err := db.Query(ctx, trimmed)
 		if err != nil {
+			if timing {
+				fmt.Fprintf(out, "time %s\n", formatDuration(time.Since(start)))
+			}
 			return err
 		}
 		defer rows.Close()
 		cols := rows.Columns()
 		values, err := rows.All()
 		if err != nil {
+			if timing {
+				fmt.Fprintf(out, "time %s\n", formatDuration(time.Since(start)))
+			}
 			return err
 		}
 		elapsed := time.Since(start)
@@ -121,6 +127,9 @@ func runOne(ctx context.Context, db *dripsql.DB, sqlText string, format formatMo
 	result, err := db.Exec(ctx, trimmed)
 	elapsed := time.Since(start)
 	if err != nil {
+		if timing {
+			fmt.Fprintf(out, "time %s\n", formatDuration(elapsed))
+		}
 		return err
 	}
 	fmt.Fprintf(out, "ok (%d statement%s, %d row%s affected)\n",

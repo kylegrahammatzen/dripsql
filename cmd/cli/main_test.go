@@ -221,6 +221,8 @@ func TestCLI_FormatDuration(t *testing.T) {
 		in   time.Duration
 		want string
 	}{
+		{0, "<1 ns"},
+		{750 * time.Nanosecond, "750 ns"},
 		{500 * time.Microsecond, "500 us"},
 		{12340 * time.Microsecond, "12.34 ms"},
 		{1500 * time.Millisecond, "1.500 s"},

@@ -124,13 +124,17 @@ func formatValue(v any) string {
 }
 
 func formatDuration(d time.Duration) string {
-	ms := float64(d.Microseconds()) / 1000.0
+	ns := d.Nanoseconds()
 	switch {
-	case ms < 1:
-		return fmt.Sprintf("%.0f us", ms*1000)
-	case ms < 1000:
-		return fmt.Sprintf("%.2f ms", ms)
+	case ns <= 0:
+		return "<1 ns"
+	case ns < 1_000:
+		return fmt.Sprintf("%d ns", ns)
+	case ns < 1_000_000:
+		return fmt.Sprintf("%d us", ns/1_000)
+	case ns < 1_000_000_000:
+		return fmt.Sprintf("%.2f ms", float64(ns)/1_000_000)
 	default:
-		return fmt.Sprintf("%.3f s", ms/1000)
+		return fmt.Sprintf("%.3f s", float64(ns)/1_000_000_000)
 	}
 }
