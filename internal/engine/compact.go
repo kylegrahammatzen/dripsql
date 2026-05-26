@@ -25,6 +25,15 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		return 0, err
 	}
 	view := m.Snapshot()
+	segs, err := db.openSegmentsForQuery(table)
+	if err != nil {
+		return 0, err
+	}
+	segByPath := make(map[string]*storage.Segment, len(segs))
+	for _, s := range segs {
+		segByPath[s.Path()] = s
+	}
+	codecs := columnCodecs(db.boundTable(db.tables[schema.NormalizeName(table)]))
 	rewritten := 0
 	stmt := storage.NewSpan("COMPACT " + table)
 	defer func() {
@@ -38,17 +47,7 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		if err := ctx.Err(); err != nil {
 			return rewritten, err
 		}
-		segs, err := db.openSegmentsForQuery(table)
-		if err != nil {
-			return rewritten, err
-		}
-		var seg *storage.Segment
-		for _, s := range segs {
-			if s.Path() == entry.Path {
-				seg = s
-				break
-			}
-		}
+		seg := segByPath[entry.Path]
 		if seg == nil || seg.DV == nil {
 			continue
 		}
@@ -63,7 +62,7 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		}
 		newPath := db.nextSegmentPath(table)
 		if liveCount > 0 {
-			span, err := storage.WriteSegment(newPath, []vector.Batch{liveBatch}, columnCodecs(db.boundTable(db.tables[schema.NormalizeName(table)])))
+			span, err := storage.WriteSegment(newPath, []vector.Batch{liveBatch}, codecs)
 			if span != nil {
 				stmt.AppendChild(span)
 			}
