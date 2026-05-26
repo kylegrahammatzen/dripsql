@@ -1,5 +1,3 @@
-# Examples
-
 <div align="center">
   <a href="../README.md">DripSQL</a>
   /
@@ -7,6 +5,8 @@
   /
   <a href="../cmd/cli/README.md">CLI</a>
 </div>
+
+# DripSQL - Examples
 
 Runnable demos of the public API. Each example is its own `package main`.
 

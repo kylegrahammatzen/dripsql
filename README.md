@@ -1,5 +1,3 @@
-# DripSQL
-
 <div align="center">
   <a href="./examples/README.md">Examples</a>
   /
@@ -7,6 +5,8 @@
   /
   <a href="./cmd/cli/README.md">CLI</a>
 </div>
+
+# DripSQL
 
 Embeddable single-node SQL analytics engine for Go with columnar storage and vectorized execution.
 
