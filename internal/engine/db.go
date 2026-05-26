@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,13 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
+)
+
+// Sentinels callers branch on with errors.Is.
+var (
+	ErrClosed   = errors.New("dripsql: database is closed")
+	ErrReadOnly = errors.New("dripsql: database is read-only")
+	ErrTxDone   = errors.New("dripsql: transaction already committed or rolled back")
 )
 
 type DB struct {
@@ -91,7 +99,7 @@ func (db *DB) lockOpen() error {
 	db.mu.Lock()
 	if db.closed {
 		db.mu.Unlock()
-		return fmt.Errorf("engine: database is closed")
+		return ErrClosed
 	}
 	return nil
 }
@@ -335,9 +343,6 @@ func (db *DB) resolveTableTypes(spec *schema.TableSpec) error {
 }
 
 func (db *DB) Exec(ctx context.Context, sqlText string, args ...any) (Result, error) {
-	if db == nil {
-		return Result{}, fmt.Errorf("engine: nil DB")
-	}
 	ctx = ctxOrBackground(ctx)
 	stmts, err := sql.Parse(sqlText)
 	if err != nil {
@@ -348,7 +353,7 @@ func (db *DB) Exec(ctx context.Context, sqlText string, args ...any) (Result, er
 	}
 	defer db.mu.Unlock()
 	if db.readOnly.Load() {
-		return Result{}, fmt.Errorf("engine: database is read-only")
+		return Result{}, ErrReadOnly
 	}
 	var result Result
 	for _, stmt := range stmts {
@@ -406,9 +411,6 @@ func (db *DB) planner() *sql.Planner {
 }
 
 func (db *DB) Query(ctx context.Context, sqlText string, args ...any) (*Rows, error) {
-	if db == nil {
-		return nil, fmt.Errorf("engine: nil DB")
-	}
 	ctx = ctxOrBackground(ctx)
 	if err := db.lockOpen(); err != nil {
 		return nil, err
@@ -426,9 +428,6 @@ func (db *DB) Query(ctx context.Context, sqlText string, args ...any) (*Rows, er
 }
 
 func (db *DB) QueryAt(ctx context.Context, sqlText string, readTs uint64, args ...any) (*Rows, error) {
-	if db == nil {
-		return nil, fmt.Errorf("engine: nil DB")
-	}
 	ctx = ctxOrBackground(ctx)
 	if err := db.lockOpen(); err != nil {
 		return nil, err

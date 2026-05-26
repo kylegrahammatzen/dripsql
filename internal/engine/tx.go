@@ -27,9 +27,6 @@ type tablePending struct {
 }
 
 func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
-	if db == nil {
-		return nil, fmt.Errorf("engine: nil DB")
-	}
 	ctx = ctxOrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -39,7 +36,7 @@ func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
 	}
 	if db.readOnly.Load() {
 		db.mu.Unlock()
-		return nil, fmt.Errorf("engine: database is read-only")
+		return nil, ErrReadOnly
 	}
 	readTs := db.nextCommitTs.Load()
 	db.pinnedReadTs[readTs]++
@@ -70,7 +67,7 @@ func (tx *Tx) commit(table string, adds []storage.ManifestSegmentAdd, dvUpdates 
 
 func (tx *Tx) Exec(ctx context.Context, sqlText string, args ...any) (Result, error) {
 	if tx.done {
-		return Result{}, fmt.Errorf("engine: transaction already finished")
+		return Result{}, ErrTxDone
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -116,7 +113,7 @@ func (tx *Tx) execStmt(ctx context.Context, stmt sql.Stmt, args []any) (int64, e
 
 func (tx *Tx) Query(ctx context.Context, sqlText string, args ...any) (*Rows, error) {
 	if tx.done {
-		return nil, fmt.Errorf("engine: transaction already finished")
+		return nil, ErrTxDone
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -184,7 +181,7 @@ func (tx *Tx) resolveSegments(d sql.BoundTableDef) ([]*storage.Segment, error) {
 
 func (tx *Tx) Commit() error {
 	if tx.done {
-		return fmt.Errorf("engine: transaction already finished")
+		return ErrTxDone
 	}
 	defer tx.finish()
 	if len(tx.pending) == 0 {

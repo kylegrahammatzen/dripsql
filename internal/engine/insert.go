@@ -17,15 +17,10 @@ import (
 // and writes them as one multi-page segment with a single manifest append. All
 // statements must target the same table. Returns the total rows inserted.
 func (db *DB) BulkInsert(ctx context.Context, statements []string) (int64, error) {
-	if db == nil {
-		return 0, fmt.Errorf("engine: nil DB")
-	}
 	if len(statements) == 0 {
 		return 0, nil
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = ctxOrBackground(ctx)
 
 	if err := db.lockOpen(); err != nil {
 		return 0, err

@@ -3,8 +3,8 @@ package dripsql
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 	"testing"
 )
 
@@ -96,11 +96,11 @@ func TestSetReadOnly_BlocksWrites(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
 	mustExec(t, db, "INSERT INTO t (id) VALUES (1)")
 	db.SetReadOnly(true)
-	if _, err := db.Exec(ctx, "INSERT INTO t (id) VALUES (2)"); err == nil || !strings.Contains(err.Error(), "read-only") {
-		t.Fatalf("Exec in read-only mode, got err=%v want read-only", err)
+	if _, err := db.Exec(ctx, "INSERT INTO t (id) VALUES (2)"); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("Exec in read-only mode, got err=%v want ErrReadOnly", err)
 	}
-	if _, err := db.BeginTx(ctx); err == nil || !strings.Contains(err.Error(), "read-only") {
-		t.Fatalf("BeginTx in read-only mode, got err=%v want read-only", err)
+	if _, err := db.BeginTx(ctx); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("BeginTx in read-only mode, got err=%v want ErrReadOnly", err)
 	}
 	rows, err := db.Query(ctx, "SELECT id FROM t")
 	if err != nil {
@@ -203,11 +203,11 @@ func TestQueryRow_OneRowSucceedsZeroAndMultipleError(t *testing.T) {
 	if id != 1 {
 		t.Errorf("Scan = %d, want 1", id)
 	}
-	if err := db.QueryRow(ctx, "SELECT id FROM t WHERE id = ?", int64(999)).Scan(&id); err == nil {
-		t.Fatal("expected no-rows error")
+	if err := db.QueryRow(ctx, "SELECT id FROM t WHERE id = ?", int64(999)).Scan(&id); !errors.Is(err, ErrNoRows) {
+		t.Fatalf("got err=%v, want ErrNoRows", err)
 	}
-	if err := db.QueryRow(ctx, "SELECT id FROM t").Scan(&id); err == nil {
-		t.Fatal("expected too-many-rows error")
+	if err := db.QueryRow(ctx, "SELECT id FROM t").Scan(&id); !errors.Is(err, ErrTooManyRows) {
+		t.Fatalf("got err=%v, want ErrTooManyRows", err)
 	}
 }
 

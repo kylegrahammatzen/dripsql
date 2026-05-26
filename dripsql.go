@@ -4,6 +4,7 @@ package dripsql
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/kylegrahammatzen/dripsql/internal/engine"
@@ -11,6 +12,15 @@ import (
 
 // MemoryPath is reserved for a future in-memory backend and currently returns an error from Open.
 const MemoryPath = ":memory:"
+
+// Sentinels callers branch on with errors.Is.
+var (
+	ErrClosed      = engine.ErrClosed
+	ErrReadOnly    = engine.ErrReadOnly
+	ErrTxDone      = engine.ErrTxDone
+	ErrNoRows      = errors.New("dripsql: query returned no rows")
+	ErrTooManyRows = errors.New("dripsql: query returned more than one row")
+)
 
 // Open opens or creates the database directory at path.
 func Open(path string) (*DB, error) {
@@ -124,7 +134,7 @@ type Row struct {
 	err  error
 }
 
-// Scan copies the single row into dst pointers and reports an error if the query produced zero or more than one row.
+// Scan copies the single row into dst pointers and returns ErrNoRows or ErrTooManyRows when the result does not have exactly one row.
 func (r *Row) Scan(dst ...any) error {
 	if r.err != nil {
 		return r.err
@@ -134,13 +144,13 @@ func (r *Row) Scan(dst ...any) error {
 		if err := r.rows.Err(); err != nil {
 			return err
 		}
-		return fmt.Errorf("dripsql.Row.Scan: query returned no rows")
+		return ErrNoRows
 	}
 	if err := r.rows.Scan(dst...); err != nil {
 		return err
 	}
 	if r.rows.Next() {
-		return fmt.Errorf("dripsql.Row.Scan: query returned more than one row")
+		return ErrTooManyRows
 	}
 	return r.rows.Err()
 }
