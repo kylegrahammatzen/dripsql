@@ -138,6 +138,15 @@ func (db *DB) SetCacheSize(n int) { db.e.SetCacheSize(n) }
 // SetReadOnly when true makes Exec and BeginTx return a read-only error while leaving reads unaffected.
 func (db *DB) SetReadOnly(on bool) { db.e.SetReadOnly(on) }
 
+// Tables returns the catalog table names in sorted order.
+func (db *DB) Tables() []string { return db.e.Tables() }
+
+// TableSchema returns column metadata for name or an error if the table is unknown.
+func (db *DB) TableSchema(name string) ([]ColumnInfo, error) { return db.e.TableSchema(name) }
+
+// ColumnInfo describes one column returned by TableSchema.
+type ColumnInfo = engine.ColumnInfo
+
 // Result reports the statement count and total RowsAffected from one Exec call.
 type Result struct {
 	Statements   int

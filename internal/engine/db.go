@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -230,6 +231,41 @@ func (db *DB) table(name string) (tableEntry, error) {
 		return tableEntry{}, fmt.Errorf("table %q does not exist", name)
 	}
 	return entry, nil
+}
+
+type ColumnInfo struct {
+	Name     string
+	Type     string
+	Nullable bool
+}
+
+func (db *DB) Tables() []string {
+	if err := db.lockOpen(); err != nil {
+		return nil
+	}
+	defer db.mu.Unlock()
+	out := make([]string, 0, len(db.tables))
+	for _, e := range db.tables {
+		out = append(out, e.spec.Name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (db *DB) TableSchema(name string) ([]ColumnInfo, error) {
+	if err := db.lockOpen(); err != nil {
+		return nil, err
+	}
+	defer db.mu.Unlock()
+	entry, ok := db.tables[schema.NormalizeName(name)]
+	if !ok {
+		return nil, fmt.Errorf("table %q does not exist", name)
+	}
+	out := make([]ColumnInfo, len(entry.spec.Columns))
+	for i, c := range entry.spec.Columns {
+		out[i] = ColumnInfo{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}
+	}
+	return out, nil
 }
 
 func columnCodecs(def sql.BoundTableDef) map[string]schema.Encoding {
