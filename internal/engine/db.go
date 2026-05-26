@@ -1,4 +1,4 @@
-// DB wires the parser/binder, plan cache, exec operators, and storage manifests behind Open/Exec/Query.
+﻿// DB wires the parser/binder, plan cache, exec operators, and storage manifests behind Open/Exec/Query.
 // One sync.Mutex serializes catalog and table state. The plan cache carries its own internal lock.
 package engine
 
@@ -214,7 +214,7 @@ func (db *DB) table(name string) (tableEntry, error) {
 func columnCodecs(def sql.BoundTableDef) map[string]schema.Encoding {
 	var out map[string]schema.Encoding
 	for _, c := range def.Columns {
-		if c.Codec == schema.EncodingAuto {
+		if c.Codec == schema.EncInvalid {
 			continue
 		}
 		if out == nil {

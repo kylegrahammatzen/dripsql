@@ -1,4 +1,4 @@
-// Dictionary codec round-trip + boundary tests.
+﻿// Dictionary codec round-trip + boundary tests.
 package codec
 
 import (
@@ -11,7 +11,7 @@ import (
 )
 
 func TestDictionary_EncodingIsDictionary(t *testing.T) {
-	if (dictionaryCodec{}).Encoding() != schema.EncodingDictionary {
+	if (dictionaryCodec{}).Encoding() != schema.EncDict {
 		t.Fatal("dictionaryCodec must claim Dictionary encoding")
 	}
 }

@@ -1,4 +1,4 @@
-// codec.go invariant tests: registry lookup found/unknown and EncodingAuto rejection.
+﻿// codec.go invariant tests: registry lookup found/unknown and EncInvalid rejection.
 // Self-registration is exercised indirectly by plain_test.go via init().
 package codec
 
@@ -10,11 +10,11 @@ import (
 )
 
 func TestLookup_KnownAndUnknown(t *testing.T) {
-	c, err := Lookup(schema.EncodingFlat)
+	c, err := Lookup(schema.EncPlain)
 	if err != nil {
 		t.Fatalf("Lookup(Flat): %v", err)
 	}
-	if c.Encoding() != schema.EncodingFlat {
+	if c.Encoding() != schema.EncPlain {
 		t.Fatalf("Lookup returned codec for %v not Flat", c.Encoding())
 	}
 	if _, err := Lookup(schema.Encoding(250)); err == nil {
@@ -24,14 +24,14 @@ func TestLookup_KnownAndUnknown(t *testing.T) {
 
 type autoCodec struct{}
 
-func (autoCodec) Encoding() schema.Encoding                                  { return schema.EncodingAuto }
+func (autoCodec) Encoding() schema.Encoding                                  { return schema.EncInvalid }
 func (autoCodec) Encode(vector.Vec, *EncodeContext) ([]byte, error)          { return nil, nil }
 func (autoCodec) Decode([]byte, vector.VecKind, int, int, *vector.Vec) error { return nil }
 
-func TestRegister_RejectsEncodingAuto(t *testing.T) {
+func TestRegister_RejectsEncInvalid(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Fatal("Register(EncodingAuto) must panic")
+			t.Fatal("Register(EncInvalid) must panic")
 		}
 	}()
 	Register(autoCodec{})

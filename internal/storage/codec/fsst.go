@@ -1,4 +1,4 @@
-// FSST varbytes codec. Single-round symbol-table training over the input, then
+﻿// FSST varbytes codec. Single-round symbol-table training over the input, then
 // greedy longest-prefix encoding with code 0xFF reserved as the escape byte.
 package codec
 
@@ -24,7 +24,7 @@ func init() { Register(&fsstCodec{}) }
 
 type fsstCodec struct{}
 
-func (fsstCodec) Encoding() schema.Encoding { return schema.EncodingFSST }
+func (fsstCodec) Encoding() schema.Encoding { return schema.EncFSST }
 
 func (fsstCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !v.Kind.IsVarBytes() {
@@ -163,7 +163,7 @@ func (fsstCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount int
 		out.AppendBytes(i, row)
 		pos = end
 	}
-	dst.Enc = schema.EncodingFlat
+	dst.Enc = schema.EncPlain
 	dst.Valid = nil
 	return nil
 }

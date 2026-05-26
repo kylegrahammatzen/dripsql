@@ -1,4 +1,4 @@
-// Constant codec stores one value on disk regardless of row count.
+﻿// Constant codec stores one value on disk regardless of row count.
 // Returns ErrSkip when rows differ so cascade selection naturally skips it.
 package codec
 
@@ -17,7 +17,7 @@ func init() {
 	Register(constantCodec{})
 }
 
-func (constantCodec) Encoding() schema.Encoding { return schema.EncodingConstant }
+func (constantCodec) Encoding() schema.Encoding { return schema.EncConstant }
 
 func (constantCodec) constantSize(v vector.Vec, ctx *EncodeContext) (int, bool) {
 	w := v.Kind.FixedWidth()

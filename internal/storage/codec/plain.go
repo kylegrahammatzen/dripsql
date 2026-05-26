@@ -1,4 +1,4 @@
-// Plain codec: zero-transform byte layout per Vec kind.
+﻿// Plain codec: zero-transform byte layout per Vec kind.
 // Wire is native little-endian for fixed widths. Project targets are amd64/arm64.
 package codec
 
@@ -16,7 +16,7 @@ func init() {
 	Register(plainCodec{})
 }
 
-func (plainCodec) Encoding() schema.Encoding { return schema.EncodingFlat }
+func (plainCodec) Encoding() schema.Encoding { return schema.EncPlain }
 
 func (c plainCodec) plainSize(v vector.Vec) (int, bool) {
 	w := v.Kind.FixedWidth()
@@ -95,7 +95,7 @@ func (plainCodec) Decode(payload []byte, kind vector.VecKind, rows, nullCount in
 		if err := readVarbytesWire(payload, kind, rows, dst); err != nil {
 			return err
 		}
-		dst.Enc = schema.EncodingFlat
+		dst.Enc = schema.EncPlain
 		dst.Valid = nil
 		return nil
 	}

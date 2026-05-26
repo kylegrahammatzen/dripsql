@@ -1,4 +1,4 @@
-// End-to-end storage benches: write, cold-open, scan, predicate scan, and lazy sidecar
+﻿// End-to-end storage benches: write, cold-open, scan, predicate scan, and lazy sidecar
 // load. Page shape mirrors the cmd/bench users dataset (id int64, name text, age int64,
 // category text) so the numbers stack against the workload bench.
 package storage
@@ -88,7 +88,7 @@ func TestFloat64_ALPVsPlain_FileSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	forcedPath := filepath.Join(tmp, "plain.dsv4")
-	overrides := map[string]schema.Encoding{"price": schema.EncodingFlat}
+	overrides := map[string]schema.Encoding{"price": schema.EncPlain}
 	if _, err := WriteSegment(forcedPath, pages, overrides); err != nil {
 		t.Fatal(err)
 	}

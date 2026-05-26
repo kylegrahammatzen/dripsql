@@ -1,4 +1,4 @@
-// FSST codec round-trip + cascade-preference test on repetitive URL-shaped strings.
+﻿// FSST codec round-trip + cascade-preference test on repetitive URL-shaped strings.
 // Asserts decode is bitwise equal to input and that cascade picks FSST when it beats plain.
 package codec
 
@@ -55,7 +55,7 @@ func TestFSST_CascadeBeatsPlainOnRepetition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	if enc != schema.EncodingFSST {
+	if enc != schema.EncFSST {
 		t.Fatalf("expected FSST winner, got %v (%d bytes)", enc, len(payload))
 	}
 }

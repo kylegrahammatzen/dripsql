@@ -1,4 +1,4 @@
-// Sequence codec invariant tests: arithmetic progression detection, kind scope,
+﻿// Sequence codec invariant tests: arithmetic progression detection, kind scope,
 // round-trip across width-8 FOR-packable kinds, decode bounds.
 package codec
 
@@ -10,7 +10,7 @@ import (
 )
 
 func TestSequence_Encoding(t *testing.T) {
-	if (sequenceCodec{}).Encoding() != schema.EncodingSequence {
+	if (sequenceCodec{}).Encoding() != schema.EncSequence {
 		t.Fatal("sequenceCodec must claim Sequence encoding")
 	}
 }

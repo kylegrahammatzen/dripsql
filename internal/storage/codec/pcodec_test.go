@@ -1,4 +1,4 @@
-// Pcodec round-trip and skip-precondition tests across int64 and int32 kinds.
+﻿// Pcodec round-trip and skip-precondition tests across int64 and int32 kinds.
 // Verifies multimodal data round-trips and that small pages bypass the codec.
 package codec
 
@@ -113,7 +113,7 @@ func TestPcodec_SkipsFloat32(t *testing.T) {
 }
 
 func TestPcodec_EncodingIsPcodec(t *testing.T) {
-	if (pcodecCodec{}).Encoding() != schema.EncodingPcodec {
-		t.Fatal("pcodecCodec must claim EncodingPcodec")
+	if (pcodecCodec{}).Encoding() != schema.EncPcodec {
+		t.Fatal("pcodecCodec must claim EncPcodec")
 	}
 }

@@ -1,4 +1,4 @@
-// Cascade tests: kind-driven candidate sets and Pick chooses minimum-size.
+﻿// Cascade tests: kind-driven candidate sets and Pick chooses minimum-size.
 package codec
 
 import (
@@ -19,19 +19,19 @@ func encodingSet(codecs []Codec) map[schema.Encoding]bool {
 func TestCascade_Candidates_VarBytes(t *testing.T) {
 	got := encodingSet(Candidates(vector.VecText))
 	want := []schema.Encoding{
-		schema.EncodingConstant,
-		schema.EncodingDictionary,
-		schema.EncodingFlat,
+		schema.EncConstant,
+		schema.EncDict,
+		schema.EncPlain,
 	}
 	for _, w := range want {
 		if !got[w] {
 			t.Fatalf("VarBytes candidates missing %v", w)
 		}
 	}
-	if got[schema.EncodingFORBitPack] || got[schema.EncodingSequence] {
+	if got[schema.EncFOR] || got[schema.EncSequence] {
 		t.Fatal("VarBytes must not include FOR or Sequence")
 	}
-	if got[schema.EncodingFlate] || got[schema.EncodingZstd] {
+	if got[schema.EncFlate] || got[schema.EncZstd] {
 		t.Fatal("Compression must be opt-in via policy, not auto-picked by Pick")
 	}
 }
@@ -39,37 +39,37 @@ func TestCascade_Candidates_VarBytes(t *testing.T) {
 func TestCascade_Candidates_FORPackableWidth8(t *testing.T) {
 	got := encodingSet(Candidates(vector.VecInt64))
 	for _, w := range []schema.Encoding{
-		schema.EncodingConstant,
-		schema.EncodingSequence,
-		schema.EncodingFORBitPack,
-		schema.EncodingDeltaBitPack,
-		schema.EncodingFlat,
+		schema.EncConstant,
+		schema.EncSequence,
+		schema.EncFOR,
+		schema.EncDelta,
+		schema.EncPlain,
 	} {
 		if !got[w] {
 			t.Fatalf("Int64 candidates missing %v", w)
 		}
 	}
-	if got[schema.EncodingDictionary] {
+	if got[schema.EncDict] {
 		t.Fatal("Int64 must not include Dictionary")
 	}
 }
 
 func TestCascade_Candidates_FORPackableWidth4(t *testing.T) {
 	got := encodingSet(Candidates(vector.VecInt32))
-	if got[schema.EncodingSequence] {
+	if got[schema.EncSequence] {
 		t.Fatal("Int32 (width 4) must not include Sequence (width-8 only)")
 	}
-	if !got[schema.EncodingFORBitPack] {
+	if !got[schema.EncFOR] {
 		t.Fatal("Int32 must include FOR")
 	}
 }
 
 func TestCascade_Candidates_Bool(t *testing.T) {
 	got := encodingSet(Candidates(vector.VecBool))
-	if got[schema.EncodingFORBitPack] || got[schema.EncodingDictionary] {
+	if got[schema.EncFOR] || got[schema.EncDict] {
 		t.Fatal("Bool must only have base candidates (Constant + Flat)")
 	}
-	for _, w := range []schema.Encoding{schema.EncodingConstant, schema.EncodingFlat} {
+	for _, w := range []schema.Encoding{schema.EncConstant, schema.EncPlain} {
 		if !got[w] {
 			t.Fatalf("Bool candidates missing %v", w)
 		}
@@ -85,7 +85,7 @@ func TestCascade_Pick_ConstantBeatsAll(t *testing.T) {
 	if !ok {
 		t.Fatal("Pick must succeed")
 	}
-	if c.Encoding() != schema.EncodingConstant {
+	if c.Encoding() != schema.EncConstant {
 		t.Fatalf("Pick should choose Constant for all-equal data, got %v", c.Encoding())
 	}
 }
@@ -99,7 +99,7 @@ func TestCascade_Pick_SequenceBeatsForArithmetic(t *testing.T) {
 	if !ok {
 		t.Fatal("Pick must succeed")
 	}
-	if c.Encoding() != schema.EncodingSequence {
+	if c.Encoding() != schema.EncSequence {
 		t.Fatalf("Pick should choose Sequence for arithmetic progression, got %v", c.Encoding())
 	}
 }
@@ -115,7 +115,7 @@ func TestCascade_Pick_DictionaryBeatsForLowCardinality(t *testing.T) {
 	if !ok {
 		t.Fatal("Pick must succeed")
 	}
-	if c.Encoding() != schema.EncodingDictionary {
+	if c.Encoding() != schema.EncDict {
 		t.Fatalf("Pick should choose Dictionary for low-cardinality text, got %v", c.Encoding())
 	}
 }
@@ -129,7 +129,7 @@ func TestCascade_Pick_PlainFallback(t *testing.T) {
 	if !ok {
 		t.Fatal("Pick must succeed")
 	}
-	if c.Encoding() != schema.EncodingFlat {
+	if c.Encoding() != schema.EncPlain {
 		t.Fatalf("Pick should fall back to Flat for floats (no FOR), got %v", c.Encoding())
 	}
 	if size != 100*8 {
@@ -143,7 +143,7 @@ func TestCascade_Pick_TieFavorsPlain_ZeroRows(t *testing.T) {
 	if !ok {
 		t.Fatal("Pick must succeed on zero-row column")
 	}
-	if c.Encoding() != schema.EncodingFlat {
+	if c.Encoding() != schema.EncPlain {
 		t.Fatalf("zero-row tie should resolve to Plain (Flat), got %v", c.Encoding())
 	}
 	if size != 0 {

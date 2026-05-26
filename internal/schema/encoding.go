@@ -1,64 +1,64 @@
-// Encoding tags a Vec with its physical buffer layout where the wire byte equals the iota value.
-// EncodingAuto is a binder sentinel rejected at the wire boundary.
+﻿// Encoding tags a Vec with its physical buffer layout where the wire byte equals the iota value.
+// EncInvalid is a binder sentinel rejected at the wire boundary.
 package schema
 
 type Encoding uint8
 
 const (
-	EncodingAuto Encoding = iota
-	EncodingFlat
-	EncodingDictionary
-	EncodingConstant
-	EncodingSequence
-	EncodingFORBitPack
-	EncodingDeltaBitPack
-	EncodingFlate
-	EncodingZstd
-	EncodingALP
-	EncodingALPRD
-	EncodingFSST
-	EncodingPcodec
+	EncInvalid Encoding = iota
+	EncPlain
+	EncDict
+	EncConstant
+	EncSequence
+	EncFOR
+	EncDelta
+	EncFlate
+	EncZstd
+	EncALP
+	EncALPRD
+	EncFSST
+	EncPcodec
 )
 
-const encodingMax = EncodingPcodec
+const encMax = EncPcodec
 
 func (e Encoding) String() string {
 	switch e {
-	case EncodingAuto:
-		return "auto"
-	case EncodingFlat:
-		return "flat"
-	case EncodingDictionary:
-		return "dictionary"
-	case EncodingConstant:
-		return "constant"
-	case EncodingSequence:
-		return "sequence"
-	case EncodingFORBitPack:
-		return "for+bitpack"
-	case EncodingDeltaBitPack:
-		return "delta+bitpack"
-	case EncodingFlate:
+	case EncInvalid:
+		return "invalid"
+	case EncPlain:
+		return "plain"
+	case EncDict:
+		return "dict"
+	case EncConstant:
+		return "const"
+	case EncSequence:
+		return "seq"
+	case EncFOR:
+		return "for"
+	case EncDelta:
+		return "delta"
+	case EncFlate:
 		return "flate"
-	case EncodingZstd:
+	case EncZstd:
 		return "zstd"
-	case EncodingALP:
+	case EncALP:
 		return "alp"
-	case EncodingALPRD:
+	case EncALPRD:
 		return "alp-rd"
-	case EncodingFSST:
+	case EncFSST:
 		return "fsst"
-	case EncodingPcodec:
+	case EncPcodec:
 		return "pcodec"
 	}
 	return "encoding(?)"
 }
 
 func (e Encoding) Wire() uint8 {
-	if e == EncodingAuto {
-		panic("EncodingAuto is a hint sentinel and cannot be encoded to wire")
+	if e == EncInvalid {
+		panic("EncInvalid is a hint sentinel and cannot be encoded to wire")
 	}
-	if e > encodingMax {
+	if e > encMax {
 		panic("unknown encoding cannot be encoded to wire")
 	}
 	return uint8(e)
@@ -66,36 +66,36 @@ func (e Encoding) Wire() uint8 {
 
 // Wire bytes never carry the auto sentinel and must fall within the registered enum range.
 func (e Encoding) Valid() bool {
-	return e != EncodingAuto && e <= encodingMax
+	return e != EncInvalid && e <= encMax
 }
 
-// ParseEncoding rejects "auto" so DDL cannot smuggle the sentinel onto the wire and accepts "plain" as an alias for "flat".
+// ParseEncoding rejects the invalid sentinel and accepts the canonical short name plus DDL aliases for back-compat with existing schemas.
 func ParseEncoding(name string) (Encoding, bool) {
 	switch NormalizeName(name) {
 	case "plain", "flat":
-		return EncodingFlat, true
-	case "dictionary":
-		return EncodingDictionary, true
-	case "constant":
-		return EncodingConstant, true
-	case "sequence":
-		return EncodingSequence, true
-	case "for+bitpack":
-		return EncodingFORBitPack, true
-	case "delta+bitpack":
-		return EncodingDeltaBitPack, true
+		return EncPlain, true
+	case "dict", "dictionary":
+		return EncDict, true
+	case "const", "constant":
+		return EncConstant, true
+	case "seq", "sequence":
+		return EncSequence, true
+	case "for", "for+bitpack":
+		return EncFOR, true
+	case "delta", "delta+bitpack":
+		return EncDelta, true
 	case "flate":
-		return EncodingFlate, true
+		return EncFlate, true
 	case "zstd":
-		return EncodingZstd, true
+		return EncZstd, true
 	case "alp":
-		return EncodingALP, true
+		return EncALP, true
 	case "alp-rd":
-		return EncodingALPRD, true
+		return EncALPRD, true
 	case "fsst":
-		return EncodingFSST, true
+		return EncFSST, true
 	case "pcodec":
-		return EncodingPcodec, true
+		return EncPcodec, true
 	}
-	return EncodingAuto, false
+	return EncInvalid, false
 }

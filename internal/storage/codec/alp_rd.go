@@ -1,4 +1,4 @@
-// ALP-RD codec for float64 that decimal-ALP rejects.
+﻿// ALP-RD codec for float64 that decimal-ALP rejects.
 // Round-trip is bitwise-exact, so NaN, Inf, and -0 are preserved.
 package codec
 
@@ -24,7 +24,7 @@ func init() {
 	Register(alpRDCodec{})
 }
 
-func (alpRDCodec) Encoding() schema.Encoding { return schema.EncodingALPRD }
+func (alpRDCodec) Encoding() schema.Encoding { return schema.EncALPRD }
 
 func (c alpRDCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if v.Kind != vector.VecFloat64 {

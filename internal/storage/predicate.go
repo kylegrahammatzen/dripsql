@@ -1,4 +1,4 @@
-// BoundPredicate plus the bound types are internal eval helpers reached only via Pred.toBound.
+﻿// BoundPredicate plus the bound types are internal eval helpers reached only via Pred.toBound.
 // All shape and binding live in pred.go; helpers below resolve segment columns, stats, and encoded paths.
 package storage
 
@@ -595,9 +595,9 @@ func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.Selecti
 		return false, scratch, nil
 	}
 	switch enc {
-	case schema.EncodingDictionary:
+	case schema.EncDict:
 		return evalEncodedDictEq(seg, colIdx, pageIdx, sel, scratch, b.value)
-	case schema.EncodingFSST:
+	case schema.EncFSST:
 		return evalEncodedFSSTEq(seg, colIdx, pageIdx, sel, scratch, b.value)
 	}
 	return false, scratch, nil
@@ -692,7 +692,7 @@ func evalEncodedDictOrdered(seg *Segment, pageIdx int, sel *vector.SelectionMask
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
 	enc := schema.Encoding(page.Encoding)
-	if !enc.Valid() || enc != schema.EncodingDictionary {
+	if !enc.Valid() || enc != schema.EncDict {
 		return false, scratch, nil
 	}
 	rows := int(page.Rows)
@@ -782,9 +782,9 @@ func (b boundEqInt64) EvalEncoded(seg *Segment, pageIdx int, sel *vector.Selecti
 		return false, scratch, nil
 	}
 	switch enc {
-	case schema.EncodingFORBitPack:
+	case schema.EncFOR:
 		return evalEncodedEqFOR(seg, colIdx, pageIdx, sel, scratch, b.value)
-	case schema.EncodingDeltaBitPack:
+	case schema.EncDelta:
 		return evalEncodedEqDelta(seg, colIdx, pageIdx, sel, scratch, b.value)
 	}
 	return false, scratch, nil
@@ -910,7 +910,7 @@ func evalEncodedFORRange(seg *Segment, pageIdx int, sel *vector.SelectionMask, s
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
 	enc := schema.Encoding(page.Encoding)
-	if !enc.Valid() || enc != schema.EncodingFORBitPack {
+	if !enc.Valid() || enc != schema.EncFOR {
 		return false, scratch, nil
 	}
 	rows := int(page.Rows)

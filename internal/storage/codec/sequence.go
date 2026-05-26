@@ -1,4 +1,4 @@
-// Sequence codec: arithmetic progression start + step*i in 16 bytes regardless of row count.
+﻿// Sequence codec: arithmetic progression start + step*i in 16 bytes regardless of row count.
 // Scope is width-8 FOR-packable kinds (Int64, Timestamp, Time, Decimal64). Int64 wrap semantics on overflow are tolerated.
 package codec
 
@@ -16,7 +16,7 @@ func init() {
 	Register(sequenceCodec{})
 }
 
-func (sequenceCodec) Encoding() schema.Encoding { return schema.EncodingSequence }
+func (sequenceCodec) Encoding() schema.Encoding { return schema.EncSequence }
 
 func (c sequenceCodec) sequenceFits(v vector.Vec, ctx *EncodeContext) bool {
 	if v.Kind.FixedWidth() != 8 || !v.Kind.IsFORPackable() {

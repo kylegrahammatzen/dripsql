@@ -1,4 +1,4 @@
-// Cascade picks the smallest-encoded codec for a Vec via Encode-or-ErrSkip.
+﻿// Cascade picks the smallest-encoded codec for a Vec via Encode-or-ErrSkip.
 // Last candidate wins ties. Plain is always last so ties favor it.
 package codec
 
@@ -12,28 +12,28 @@ import (
 
 // Plain is last so the <= tie-break selects it on ties.
 func Candidates(k vector.VecKind) []Codec {
-	base := []Codec{mustLookup(schema.EncodingConstant)}
+	base := []Codec{mustLookup(schema.EncConstant)}
 	switch {
 	case k.IsVarBytes():
-		base = append(base, mustLookup(schema.EncodingDictionary), mustLookup(schema.EncodingFSST))
+		base = append(base, mustLookup(schema.EncDict), mustLookup(schema.EncFSST))
 	case k.IsFORPackable() && k.FixedWidth() == 8:
 		base = append(base,
-			mustLookup(schema.EncodingSequence),
-			mustLookup(schema.EncodingFORBitPack),
-			mustLookup(schema.EncodingDeltaBitPack),
-			mustLookup(schema.EncodingPcodec))
+			mustLookup(schema.EncSequence),
+			mustLookup(schema.EncFOR),
+			mustLookup(schema.EncDelta),
+			mustLookup(schema.EncPcodec))
 	case k.IsFORPackable():
 		base = append(base,
-			mustLookup(schema.EncodingFORBitPack),
-			mustLookup(schema.EncodingDeltaBitPack),
-			mustLookup(schema.EncodingPcodec))
+			mustLookup(schema.EncFOR),
+			mustLookup(schema.EncDelta),
+			mustLookup(schema.EncPcodec))
 	case k == vector.VecFloat32 || k == vector.VecFloat64:
-		base = append(base, mustLookup(schema.EncodingALP))
+		base = append(base, mustLookup(schema.EncALP))
 		if k == vector.VecFloat64 {
-			base = append(base, mustLookup(schema.EncodingALPRD), mustLookup(schema.EncodingPcodec))
+			base = append(base, mustLookup(schema.EncALPRD), mustLookup(schema.EncPcodec))
 		}
 	}
-	return append(base, mustLookup(schema.EncodingFlat))
+	return append(base, mustLookup(schema.EncPlain))
 }
 
 func mustLookup(e schema.Encoding) Codec {

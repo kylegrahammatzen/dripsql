@@ -1,4 +1,4 @@
-// ALP-RD round-trip + cascade selection for irrational/scientific floats.
+﻿// ALP-RD round-trip + cascade selection for irrational/scientific floats.
 package codec
 
 import (
@@ -10,7 +10,7 @@ import (
 )
 
 func TestALPRD_EncodingIsALPRD(t *testing.T) {
-	if (alpRDCodec{}).Encoding() != schema.EncodingALPRD {
+	if (alpRDCodec{}).Encoding() != schema.EncALPRD {
 		t.Fatal("alpRDCodec must claim ALP-RD encoding")
 	}
 }
@@ -83,7 +83,7 @@ func TestALPRD_CascadePicksRDForIrrationals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cascade Encode: %v", err)
 	}
-	if enc == schema.EncodingFlat {
+	if enc == schema.EncPlain {
 		t.Fatalf("cascade fell to plain for irrational floats: payload %d bytes", len(payload))
 	}
 }

@@ -1,4 +1,4 @@
-// Delta+bitpack round-trip + estimate tests for monotonic and near-monotonic series.
+﻿// Delta+bitpack round-trip + estimate tests for monotonic and near-monotonic series.
 package codec
 
 import (
@@ -11,7 +11,7 @@ import (
 )
 
 func TestDeltaBitpack_EncodingIsDelta(t *testing.T) {
-	if (deltaBitpackCodec{}).Encoding() != schema.EncodingDeltaBitPack {
+	if (deltaBitpackCodec{}).Encoding() != schema.EncDelta {
 		t.Fatal("deltaBitpackCodec must claim DeltaBitPack encoding")
 	}
 }

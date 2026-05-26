@@ -1,4 +1,4 @@
-// Delta + bitpack codec: stores PackFirst (vals[0]), bitpacks (vals[i]-vals[i-1]) - min(deltas).
+﻿// Delta + bitpack codec: stores PackFirst (vals[0]), bitpacks (vals[i]-vals[i-1]) - min(deltas).
 // Wire: [u64 LE PackFirst][u64 LE PackBase][u8 PackWidth][bitpack payload of rows-1 residuals].
 package codec
 
@@ -19,7 +19,7 @@ func init() {
 	Register(deltaBitpackCodec{})
 }
 
-func (deltaBitpackCodec) Encoding() schema.Encoding { return schema.EncodingDeltaBitPack }
+func (deltaBitpackCodec) Encoding() schema.Encoding { return schema.EncDelta }
 
 func (c deltaBitpackCodec) deltaFits(v vector.Vec, ctx *EncodeContext) (first, base int64, width int, ok bool) {
 	if !v.Kind.IsFORPackable() {

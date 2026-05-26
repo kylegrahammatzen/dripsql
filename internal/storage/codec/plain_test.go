@@ -1,4 +1,4 @@
-// Plain codec invariant tests: round-trip per kind class, truncated-payload rejection.
+﻿// Plain codec invariant tests: round-trip per kind class, truncated-payload rejection.
 // These pin the wire layout storage will rely on for v4 Flat-encoded pages.
 package codec
 
@@ -11,7 +11,7 @@ import (
 )
 
 func TestPlain_EncodingIsFlat(t *testing.T) {
-	if (plainCodec{}).Encoding() != schema.EncodingFlat {
+	if (plainCodec{}).Encoding() != schema.EncPlain {
 		t.Fatal("plainCodec must claim Flat encoding")
 	}
 }
@@ -100,7 +100,7 @@ func TestPlain_DecodeSetsEncAndClearsValid(t *testing.T) {
 	if err := (plainCodec{}).Decode(src, vector.VecInt64, 4, 0, &dst); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if dst.Enc != schema.EncodingFlat {
+	if dst.Enc != schema.EncPlain {
 		t.Fatalf("dst.Enc=%v want Flat", dst.Enc)
 	}
 	if dst.Valid != nil {

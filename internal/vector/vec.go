@@ -1,4 +1,4 @@
-// Vec is the slim runtime vector: one unsafe.Pointer replaces nine typed slice headers.
+﻿// Vec is the slim runtime vector: one unsafe.Pointer replaces nine typed slice headers.
 // Per doc "Encoded state lives in `data`, not as a sidecar": when Enc != Flat the
 // data pointer addresses a codec-specific struct (dictState, packState, ...) instead
 // of raw bytes. No separate sidecar slot needed.
@@ -25,7 +25,7 @@ func NewVec(kind VecKind, rows int) Vec {
 	if rows < 0 || rows > math.MaxInt32 {
 		panic(fmt.Sprintf("NewVec: rows %d out of int32 range", rows))
 	}
-	v := Vec{Kind: kind, Enc: schema.EncodingFlat, Cap: int32(rows), Len: int32(rows)}
+	v := Vec{Kind: kind, Enc: schema.EncPlain, Cap: int32(rows), Len: int32(rows)}
 	v.allocBacking(rows)
 	return v
 }
@@ -40,7 +40,7 @@ func NewVarVec(kind VecKind, rows int, dataBytes int) Vec {
 	vb := NewVarBytes(rows, dataBytes)
 	return Vec{
 		Kind: kind,
-		Enc:  schema.EncodingFlat,
+		Enc:  schema.EncPlain,
 		Len:  int32(rows),
 		Cap:  int32(rows),
 		data: unsafe.Pointer(&vb),
@@ -118,7 +118,7 @@ func (v *Vec) ResetForDecode(kind VecKind) {
 		v.Cap = 0
 	}
 	v.Kind = kind
-	v.Enc = schema.EncodingFlat
+	v.Enc = schema.EncPlain
 	v.Len = 0
 	v.Valid = nil
 }

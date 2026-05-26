@@ -1,4 +1,4 @@
-// Dictionary codec for varbytes kinds: stores each distinct value once, indexed by u8 per row.
+﻿// Dictionary codec for varbytes kinds: stores each distinct value once, indexed by u8 per row.
 // Wire: [u16 LE dictCount][u32 LE len + bytes per entry][u8 indices x rows]. Rejects above DictMaxValues.
 package codec
 
@@ -20,7 +20,7 @@ func init() {
 	Register(dictionaryCodec{})
 }
 
-func (dictionaryCodec) Encoding() schema.Encoding { return schema.EncodingDictionary }
+func (dictionaryCodec) Encoding() schema.Encoding { return schema.EncDict }
 
 func (c dictionaryCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !v.Kind.IsVarBytes() || v.Len == 0 {

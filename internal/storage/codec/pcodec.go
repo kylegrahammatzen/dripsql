@@ -1,4 +1,4 @@
-// Pcodec splits the page into 1024-row chunks each with its own FOR base and bit-width, beating single-pass FOR on multimodal data.
+﻿// Pcodec splits the page into 1024-row chunks each with its own FOR base and bit-width, beating single-pass FOR on multimodal data.
 // Accepts IsFORPackable ints plus float64 via bit-pattern reinterpretation so cascade can pick it when ALP and ALP-RD both ErrSkip.
 package codec
 
@@ -24,7 +24,7 @@ func init() {
 	Register(pcodecCodec{})
 }
 
-func (pcodecCodec) Encoding() schema.Encoding { return schema.EncodingPcodec }
+func (pcodecCodec) Encoding() schema.Encoding { return schema.EncPcodec }
 
 func (c pcodecCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if !pcodecAccepts(v.Kind) {

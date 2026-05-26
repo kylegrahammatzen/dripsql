@@ -1,4 +1,4 @@
-// ALP round-trip tests across float32 and float64.
+﻿// ALP round-trip tests across float32 and float64.
 // Skip semantics: NaN, Inf, -0, non-decimal floats fall back to ErrSkip.
 package codec
 
@@ -11,7 +11,7 @@ import (
 )
 
 func TestALP_EncodingIsALP(t *testing.T) {
-	if (alpCodec{}).Encoding() != schema.EncodingALP {
+	if (alpCodec{}).Encoding() != schema.EncALP {
 		t.Fatal("alpCodec must claim ALP encoding")
 	}
 }
@@ -150,7 +150,7 @@ func TestALP_CascadePicksALPOverPlain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cascade Encode: %v", err)
 	}
-	if enc != schema.EncodingALP {
+	if enc != schema.EncALP {
 		t.Fatalf("cascade picked %v, expected ALP", enc)
 	}
 	if len(payload) >= 256*8 {

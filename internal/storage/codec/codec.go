@@ -1,4 +1,4 @@
-// Codec interface plus the EncodeContext / ScratchPool / ErrSkip plumbing the
+﻿// Codec interface plus the EncodeContext / ScratchPool / ErrSkip plumbing the
 // cascade and codec implementations share. Codecs self-register via init().
 package codec
 
@@ -92,8 +92,8 @@ var registry = map[schema.Encoding]Codec{}
 
 func Register(c Codec) {
 	e := c.Encoding()
-	if e == schema.EncodingAuto {
-		panic("codec: cannot register EncodingAuto sentinel")
+	if e == schema.EncInvalid {
+		panic("codec: cannot register EncInvalid sentinel")
 	}
 	if _, dup := registry[e]; dup {
 		panic(fmt.Sprintf("codec: %v already registered", e))

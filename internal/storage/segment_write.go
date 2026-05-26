@@ -1,4 +1,4 @@
-// WriteSegment serializes pages column-major as one Batch per page.
+﻿// WriteSegment serializes pages column-major as one Batch per page.
 // Atomic via tmp file, fsync, rename, and a parent-directory fsync on POSIX.
 package storage
 
@@ -37,7 +37,7 @@ type writerColumn struct {
 }
 
 // codecs may be nil to use the cascade. A non-nil entry per column overrides
-// EncodingAuto and bypasses Pick. The span is always returned, even on error,
+// EncInvalid and bypasses Pick. The span is always returned, even on error,
 // so partial timings remain visible.
 func WriteSegment(path string, pages []vector.Batch, codecs map[string]schema.Encoding) (*Span, error) {
 	root := NewSpan("write")
@@ -417,7 +417,7 @@ func writePayloads(w io.Writer, pages []vector.Batch, cols []writerColumn, codec
 	var facts codec.PageFacts
 	ctx := &codec.EncodeContext{Scratch: codec.NewScratchPool(), Facts: &facts}
 	for ci := range cols {
-		override := schema.EncodingAuto
+		override := schema.EncInvalid
 		if codecs != nil {
 			override = codecs[schema.NormalizeName(cols[ci].Schema.Name)]
 		}
@@ -442,7 +442,7 @@ func writePayloads(w io.Writer, pages []vector.Batch, cols []writerColumn, codec
 			case pageRows > 0 && pageNulls == pageRows:
 				// All-null page. No codec payload; encoding marked Flat.
 				page.PayloadLength = 0
-				page.Encoding = schema.EncodingFlat.Wire()
+				page.Encoding = schema.EncPlain.Wire()
 				page.Flags = PageFlagAllNull
 			case pageNulls == 0:
 				// All-valid: cascade chooser by default, user override when set.
@@ -453,7 +453,7 @@ func writePayloads(w io.Writer, pages []vector.Batch, cols []writerColumn, codec
 					payload []byte
 					err     error
 				)
-				if override != schema.EncodingAuto {
+				if override != schema.EncInvalid {
 					c, lookupErr := codec.Lookup(override)
 					if lookupErr != nil {
 						return fmt.Errorf("WriteSegment: col %q codec override %v: %w", col.Name, override, lookupErr)
@@ -482,7 +482,7 @@ func writePayloads(w io.Writer, pages []vector.Batch, cols []writerColumn, codec
 				// before handing the inner payload to the codec.
 				validityBytes := make([]byte, vector.ValidityWords(int(col.V.Len))*8)
 				col.V.Valid.MarshalLE(validityBytes)
-				plain, err := codec.Lookup(schema.EncodingFlat)
+				plain, err := codec.Lookup(schema.EncPlain)
 				if err != nil {
 					return err
 				}
@@ -497,7 +497,7 @@ func writePayloads(w io.Writer, pages []vector.Batch, cols []writerColumn, codec
 					return err
 				}
 				page.PayloadLength = uint64(len(validityBytes) + len(inner))
-				page.Encoding = schema.EncodingFlat.Wire()
+				page.Encoding = schema.EncPlain.Wire()
 				page.Flags = 0
 				bodyOff += uint64(len(validityBytes) + len(inner))
 				ctx.Scratch.SaveTrial(inner)

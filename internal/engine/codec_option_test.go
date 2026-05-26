@@ -1,4 +1,4 @@
-// User-declared codec end-to-end: CREATE TABLE with WITH (codec=...) per column should
+﻿// User-declared codec end-to-end: CREATE TABLE with WITH (codec=...) per column should
 // force that codec on write. Reading the segment back through the engine round-trips
 // values regardless of the override.
 package engine
@@ -56,8 +56,8 @@ func TestEngine_UserCodec_PlainForcedOnDictionaryFriendlyColumn(t *testing.T) {
 	if !got.Valid() {
 		t.Fatalf("page encoding %d unknown", page.Encoding)
 	}
-	if got != schema.EncodingFlat {
-		t.Fatalf("label codec = %v, want EncodingFlat (plain)", got)
+	if got != schema.EncPlain {
+		t.Fatalf("label codec = %v, want EncPlain (plain)", got)
 	}
 	_ = storage.MagicLen
 }

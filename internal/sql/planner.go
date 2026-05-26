@@ -1,4 +1,4 @@
-// Planner turns a parsed Stmt into a bound *Plan. Single-table and joined SELECTs flow
+﻿// Planner turns a parsed Stmt into a bound *Plan. Single-table and joined SELECTs flow
 // through one planQuery tail; planFrom builds the source *Rel and scope for both shapes.
 // DDL/DML/SELECT/EXPLAIN binders all live in this file alongside the planner dispatcher.
 package sql
@@ -923,11 +923,11 @@ func BindCreateTableSpec(stmt *CreateTableStmt) (schema.TableSpec, error) {
 // before any catalog mutation lands.
 func parseCodecName(name string) (schema.Encoding, error) {
 	if name == "" {
-		return schema.EncodingAuto, nil
+		return schema.EncInvalid, nil
 	}
 	enc, ok := schema.ParseEncoding(name)
 	if !ok {
-		return schema.EncodingAuto, fmt.Errorf("unknown codec %q", name)
+		return schema.EncInvalid, fmt.Errorf("unknown codec %q", name)
 	}
 	return enc, nil
 }

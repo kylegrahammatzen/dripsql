@@ -1,4 +1,4 @@
-// FOR+bitpack round-trip + estimate tests across FOR-packable kinds and width edges.
+﻿// FOR+bitpack round-trip + estimate tests across FOR-packable kinds and width edges.
 package codec
 
 import (
@@ -12,7 +12,7 @@ import (
 )
 
 func TestFORBitpack_EncodingIsFOR(t *testing.T) {
-	if (forBitpackCodec{}).Encoding() != schema.EncodingFORBitPack {
+	if (forBitpackCodec{}).Encoding() != schema.EncFOR {
 		t.Fatal("forBitpackCodec must claim FORBitPack encoding")
 	}
 }

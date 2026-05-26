@@ -1,4 +1,4 @@
-// FOR + bitpack codec for FOR-packable kinds (Int16/32/64, Date, Timestamp, Time, Decimal64, Enum32).
+﻿// FOR + bitpack codec for FOR-packable kinds (Int16/32/64, Date, Timestamp, Time, Decimal64, Enum32).
 // Wire [u64 LE base][u8 width][bitpack payload]. Residuals = (val - base) bit-packed via FastLanes core.
 package codec
 
@@ -20,7 +20,7 @@ func init() {
 	Register(forBitpackCodec{})
 }
 
-func (forBitpackCodec) Encoding() schema.Encoding { return schema.EncodingFORBitPack }
+func (forBitpackCodec) Encoding() schema.Encoding { return schema.EncFOR }
 
 func (c forBitpackCodec) forFits(v vector.Vec, ctx *EncodeContext) (base int64, width int, ok bool) {
 	if !v.Kind.IsFORPackable() {

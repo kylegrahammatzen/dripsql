@@ -1,4 +1,4 @@
-// Codec encode/decode microbenches across the codecs the cascade chooses on real workloads.
+﻿// Codec encode/decode microbenches across the codecs the cascade chooses on real workloads.
 // Fixtures use 2048-row pages to match the StandardBatchRows page storage seals today.
 // Run with: go test ./internal/storage/codec -bench=Codec -benchmem -run=^$
 package codec
@@ -20,14 +20,14 @@ type codecBenchCase struct {
 
 func codecBenchCases() []codecBenchCase {
 	return []codecBenchCase{
-		{"plain_int64", schema.EncodingFlat, vector.VecInt64, fillInt64Random},
-		{"for_int64", schema.EncodingFORBitPack, vector.VecInt64, fillInt64FOR},
-		{"delta_int64", schema.EncodingDeltaBitPack, vector.VecInt64, fillInt64Delta},
-		{"sequence_int64", schema.EncodingSequence, vector.VecInt64, fillInt64Sequence},
-		{"constant_int64", schema.EncodingConstant, vector.VecInt64, fillInt64Constant},
-		{"pcodec_int64", schema.EncodingPcodec, vector.VecInt64, fillInt64Multimodal},
-		{"plain_text", schema.EncodingFlat, vector.VecText, fillTextRandom},
-		{"dict_text_lowcard", schema.EncodingDictionary, vector.VecText, fillTextLowCard},
+		{"plain_int64", schema.EncPlain, vector.VecInt64, fillInt64Random},
+		{"for_int64", schema.EncFOR, vector.VecInt64, fillInt64FOR},
+		{"delta_int64", schema.EncDelta, vector.VecInt64, fillInt64Delta},
+		{"sequence_int64", schema.EncSequence, vector.VecInt64, fillInt64Sequence},
+		{"constant_int64", schema.EncConstant, vector.VecInt64, fillInt64Constant},
+		{"pcodec_int64", schema.EncPcodec, vector.VecInt64, fillInt64Multimodal},
+		{"plain_text", schema.EncPlain, vector.VecText, fillTextRandom},
+		{"dict_text_lowcard", schema.EncDict, vector.VecText, fillTextLowCard},
 	}
 }
 

@@ -1,4 +1,4 @@
-// Constant codec invariant tests: Estimate rejects non-constant, round-trip per kind class.
+﻿// Constant codec invariant tests: Estimate rejects non-constant, round-trip per kind class.
 // Wire payload size is the contract. Rows=0 and varying-row inputs both covered.
 package codec
 
@@ -10,7 +10,7 @@ import (
 )
 
 func TestConstant_EncodingIsConstant(t *testing.T) {
-	if (constantCodec{}).Encoding() != schema.EncodingConstant {
+	if (constantCodec{}).Encoding() != schema.EncConstant {
 		t.Fatal("constantCodec must claim Constant encoding")
 	}
 }

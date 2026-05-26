@@ -1,4 +1,4 @@
-// compressed_text codec invariant tests: round-trip via both Flate and Zstd, kind rejection,
+﻿// compressed_text codec invariant tests: round-trip via both Flate and Zstd, kind rejection,
 // truncated header handling, length-mismatch detection, and compression actually shrinking repetitive input.
 package codec
 
@@ -10,7 +10,7 @@ import (
 )
 
 func TestCompressedText_LookupBoth(t *testing.T) {
-	for _, enc := range []schema.Encoding{schema.EncodingFlate, schema.EncodingZstd} {
+	for _, enc := range []schema.Encoding{schema.EncFlate, schema.EncZstd} {
 		c, err := Lookup(enc)
 		if err != nil {
 			t.Fatalf("Lookup(%v): %v", enc, err)
@@ -22,7 +22,7 @@ func TestCompressedText_LookupBoth(t *testing.T) {
 }
 
 func TestCompressedText_RoundTripBothEncodings(t *testing.T) {
-	for _, enc := range []schema.Encoding{schema.EncodingFlate, schema.EncodingZstd} {
+	for _, enc := range []schema.Encoding{schema.EncFlate, schema.EncZstd} {
 		t.Run(enc.String(), func(t *testing.T) {
 			src := vector.NewVarVec(vector.VecText, 5, 0)
 			vb := src.Var()
@@ -51,7 +51,7 @@ func TestCompressedText_RoundTripBothEncodings(t *testing.T) {
 }
 
 func TestCompressedText_CompressesRepetitiveInput(t *testing.T) {
-	for _, enc := range []schema.Encoding{schema.EncodingFlate, schema.EncodingZstd} {
+	for _, enc := range []schema.Encoding{schema.EncFlate, schema.EncZstd} {
 		t.Run(enc.String(), func(t *testing.T) {
 			src := vector.NewVarVec(vector.VecText, 1000, 0)
 			vb := src.Var()
@@ -72,7 +72,7 @@ func TestCompressedText_CompressesRepetitiveInput(t *testing.T) {
 }
 
 func TestCompressedText_RejectsNonVarbytes(t *testing.T) {
-	c, _ := Lookup(schema.EncodingFlate)
+	c, _ := Lookup(schema.EncFlate)
 	v := vector.NewVec(vector.VecInt64, 4)
 	if _, err := c.Encode(v, nil); err == nil {
 		t.Fatal("Encode must reject non-varbytes")
@@ -84,7 +84,7 @@ func TestCompressedText_RejectsNonVarbytes(t *testing.T) {
 }
 
 func TestCompressedText_DecodeRejectsTruncatedHeader(t *testing.T) {
-	c, _ := Lookup(schema.EncodingFlate)
+	c, _ := Lookup(schema.EncFlate)
 	var dst vector.Vec
 	if err := c.Decode([]byte{0, 0}, vector.VecText, 1, 0, &dst); err == nil {
 		t.Fatal("Decode must reject < 4 byte payload")
@@ -92,7 +92,7 @@ func TestCompressedText_DecodeRejectsTruncatedHeader(t *testing.T) {
 }
 
 func TestCompressedText_DecodeRejectsLengthMismatch(t *testing.T) {
-	c, _ := Lookup(schema.EncodingFlate)
+	c, _ := Lookup(schema.EncFlate)
 	src := vector.NewVarVec(vector.VecText, 3, 0)
 	src.Var().AppendString(0, "a")
 	src.Var().AppendString(1, "bb")
@@ -116,7 +116,7 @@ func TestCompressedText_EstimateMatchesPlainSize(t *testing.T) {
 	src.Var().AppendString(1, "beta")
 	src.Var().AppendString(2, "gamma")
 	src.Var().AppendString(3, "delta")
-	c, _ := Lookup(schema.EncodingZstd)
+	c, _ := Lookup(schema.EncZstd)
 	est, ok := Estimate(c, src)
 	if !ok {
 		t.Fatal("varbytes Estimate must succeed")
@@ -136,7 +136,7 @@ func TestCompressedText_DecodeSetsEncFlat(t *testing.T) {
 	for i := range 4 {
 		vb.AppendString(i, "hello world goes here over twelve bytes")
 	}
-	for _, enc := range []schema.Encoding{schema.EncodingFlate, schema.EncodingZstd} {
+	for _, enc := range []schema.Encoding{schema.EncFlate, schema.EncZstd} {
 		c, _ := Lookup(enc)
 		payload, err := c.Encode(src, nil)
 		if err != nil {
@@ -146,7 +146,7 @@ func TestCompressedText_DecodeSetsEncFlat(t *testing.T) {
 		if err := c.Decode(payload, vector.VecText, 4, 0, &dst); err != nil {
 			t.Fatalf("Decode(%v): %v", enc, err)
 		}
-		if dst.Enc != schema.EncodingFlat {
+		if dst.Enc != schema.EncPlain {
 			t.Fatalf("decoded Enc = %v, want Flat", dst.Enc)
 		}
 	}

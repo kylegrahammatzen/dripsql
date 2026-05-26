@@ -1,4 +1,4 @@
-// ALP float codec encodes float32 and float64 as mantissa = round(x * 10^e) + FOR + bitpack.
+﻿// ALP float codec encodes float32 and float64 as mantissa = round(x * 10^e) + FOR + bitpack.
 // Lossless only when every value round-trips exactly. NaN, Inf, -0, or non-decimal floats trigger ErrSkip.
 package codec
 
@@ -28,7 +28,7 @@ func init() {
 	Register(alpCodec{})
 }
 
-func (alpCodec) Encoding() schema.Encoding { return schema.EncodingALP }
+func (alpCodec) Encoding() schema.Encoding { return schema.EncALP }
 
 func (c alpCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 	if v.Kind != vector.VecFloat32 && v.Kind != vector.VecFloat64 {

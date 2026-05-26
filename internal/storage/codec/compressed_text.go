@@ -1,4 +1,4 @@
-// compressed_text unifies Flate and Zstd: serialize varbytes plain wire, compress, prepend uncompressed-length header.
+﻿// compressed_text unifies Flate and Zstd: serialize varbytes plain wire, compress, prepend uncompressed-length header.
 // One struct parameterized by compress/decompress functions. Two registered instances replace the prior flate.go + zstd.go.
 package codec
 
@@ -28,12 +28,12 @@ func init() {
 	zstdEncoder, _ = zstd.NewWriter(nil)
 	zstdDecoder, _ = zstd.NewReader(nil)
 	Register(&compressedTextCodec{
-		enc:        schema.EncodingFlate,
+		enc:        schema.EncFlate,
 		compress:   flateCompress,
 		decompress: flateDecompress,
 	})
 	Register(&compressedTextCodec{
-		enc:        schema.EncodingZstd,
+		enc:        schema.EncZstd,
 		compress:   zstdCompress,
 		decompress: zstdDecompress,
 	})
@@ -87,7 +87,7 @@ func (c *compressedTextCodec) Decode(payload []byte, kind vector.VecKind, rows, 
 	// Decoded layout is flat (StringView + data buffer); doc invariant says
 	// Enc != Flat means data points at codec-specific encoded state, which
 	// is not the case here. Surface the runtime shape, not the wire choice.
-	dst.Enc = schema.EncodingFlat
+	dst.Enc = schema.EncPlain
 	dst.Valid = nil
 	return nil
 }
