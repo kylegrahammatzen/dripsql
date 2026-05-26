@@ -65,12 +65,13 @@ type sortRow struct {
 	keyOff int
 }
 
-// selectionForBatch returns a mask the caller can store. nil Sel means "all rows visible"
-// per the Operator contract; we materialize that into an all-set mask so downstream
-// IterSet calls are safe.
+const topKInt64InsertCapMax = 256
+
+// selectionForBatch returns a read-only mask view for iteration.
+// nil Sel means all rows visible, so it materializes an all-set mask.
 func selectionForBatch(batch vector.Batch) vector.SelectionMask {
 	if batch.Sel != nil {
-		return batch.Sel.Clone()
+		return *batch.Sel
 	}
 	sel := vector.NewSelectionMask(batch.Len)
 	sel.FillAll()
@@ -402,7 +403,9 @@ func (s *SortOp) heapCapUnknown() int {
 // O(total selected rows). Buffers are still retained for downstream materialization.
 func (s *SortOp) buildTopKInt64Streaming(capN int, desc bool) error {
 	keyCol := s.Keys[0].Expr.Column
-	h := topKInt64Heap{data: make([]topKInt64Item, 0, capN), desc: desc}
+	useInsert := capN <= topKInt64InsertCapMax
+	data := make([]topKInt64Item, 0, capN)
+	h := topKInt64Heap{data: data, desc: desc}
 	var seq uint32
 
 	for {
@@ -429,6 +432,29 @@ func (s *SortOp) buildTopKInt64Streaming(capN int, desc bool) error {
 			} else {
 				item.key = readInt64SortKey(col.V, row)
 			}
+			if useInsert {
+				n := len(data)
+				if n == capN && cmpInt64Sort(item.key, item.isNull, item.seq, data[n-1].key, data[n-1].isNull, data[n-1].seq, desc) >= 0 {
+					return
+				}
+				lo, hi := 0, n
+				for lo < hi {
+					mid := int(uint(lo+hi) >> 1)
+					if cmpInt64Sort(item.key, item.isNull, item.seq, data[mid].key, data[mid].isNull, data[mid].seq, desc) < 0 {
+						hi = mid
+					} else {
+						lo = mid + 1
+					}
+				}
+				if n < capN {
+					data = append(data, topKInt64Item{})
+					copy(data[lo+1:], data[lo:n])
+				} else {
+					copy(data[lo+1:], data[lo:n-1])
+				}
+				data[lo] = item
+				return
+			}
 			if len(h.data) < capN {
 				h.data = append(h.data, item)
 				h.siftUp(len(h.data) - 1)
@@ -441,14 +467,17 @@ func (s *SortOp) buildTopKInt64Streaming(capN int, desc bool) error {
 		})
 	}
 
-	slices.SortFunc(h.data, func(a, b topKInt64Item) int {
-		return cmpInt64Sort(a.key, a.isNull, a.seq, b.key, b.isNull, b.seq, desc)
-	})
-	start := int(s.Offset)
-	if start > len(h.data) {
-		start = len(h.data)
+	if !useInsert {
+		data = h.data
+		slices.SortFunc(data, func(a, b topKInt64Item) int {
+			return cmpInt64Sort(a.key, a.isNull, a.seq, b.key, b.isNull, b.seq, desc)
+		})
 	}
-	out := h.data[start:]
+	start := int(s.Offset)
+	if start > len(data) {
+		start = len(data)
+	}
+	out := data[start:]
 	s.useWide = true
 	s.wideRefs = make([]rowRef32, len(out))
 	for i, item := range out {

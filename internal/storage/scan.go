@@ -310,7 +310,13 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 		pageRows := int(seg.Cols[ci0].Pages[pi].Rows)
 		pageRowStart := seg.Cols[ci0].Pages[pi].RowStart
 		encodedDone := false
-		if pred != nil && hasAny(predOnly) {
+		if pred != nil && pred.MatchesPage(seg, pi) {
+			if sel.Rows() != pageRows {
+				sel.Resize(pageRows)
+			}
+			sel.FillAll()
+			encodedDone = true
+		} else if pred != nil && hasAny(predOnly) {
 			handled, newScratch, err := pred.ApplyEncoded(seg, pi, &sel, scratch)
 			scratch = newScratch
 			if err != nil {

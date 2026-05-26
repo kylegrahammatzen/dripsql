@@ -107,6 +107,29 @@ func TestScan_FiltersWithPredicate(t *testing.T) {
 	}
 }
 
+func TestScan_MetadataMatchesPageForAllRows(t *testing.T) {
+	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{makeIntBatch(t, "id", 0, 10)})
+	defer seg.Close()
+	seg.LoadPageStats()
+
+	compiled, err := CompilePred(Pred{Op: OpLt, Col: "id", Kind: vector.VecInt64, I64: 100})
+	if err != nil {
+		t.Fatalf("CompilePred: %v", err)
+	}
+	if !compiled.MatchesPage(seg, 0) {
+		t.Fatal("id < 100 must be recognized as matching the whole page")
+	}
+
+	nullable := openWrittenSegment(t, t.TempDir(), "nullable.dsv4", []vector.Batch{
+		makeNullableIntValuesBatch(t, "id", []int64{1, 2, 3}, 1),
+	})
+	defer nullable.Close()
+	nullable.LoadPageStats()
+	if compiled.MatchesPage(nullable, 0) {
+		t.Fatal("nullable page must not be marked as a whole-page match")
+	}
+}
+
 func TestScan_TopKPushdownKeepsMixedRangeCandidatePage(t *testing.T) {
 	seg := openWrittenSegment(t, t.TempDir(), "seg.dsv4", []vector.Batch{
 		makeIntValuesBatch(t, "id", 100, 0),

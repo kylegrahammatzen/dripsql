@@ -1,6 +1,5 @@
-﻿// End-to-end storage benches: write, cold-open, scan, predicate scan, and lazy sidecar
-// load. Page shape mirrors the cmd/bench users dataset (id int64, name text, age int64,
-// category text) so the numbers stack against the workload bench.
+// End-to-end storage benches cover write, cold open, scan, predicate scan, and lazy sidecar load.
+// Page shape mirrors the cmd/bench users dataset with id int64, name text, age int64, and category text.
 package storage
 
 import (
@@ -171,6 +170,21 @@ func BenchmarkStorage_ScanEqBytesHit(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		opts := ScanOpts{Segments: []*Segment{seg}, Pred: &pred}
+		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkStorage_ScanLtInt64AllMatchUnprojected(b *testing.B) {
+	seg := openBenchSegment(b, 4)
+	defer seg.Close()
+	pred := Pred{Op: OpLt, Col: "id", Kind: vector.VecInt64, I64: benchPageRows}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		opts := ScanOpts{Segments: []*Segment{seg}, Columns: []string{"name"}, Pred: &pred}
 		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
 		if err != nil {
 			b.Fatal(err)

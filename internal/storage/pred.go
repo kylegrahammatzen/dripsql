@@ -235,6 +235,10 @@ func (c CompiledPred) Apply(batch vector.Batch, sel *vector.SelectionMask) {
 	c.bp.Eval(batch, sel)
 }
 
+func (c CompiledPred) MatchesPage(seg *Segment, pageIdx int) bool {
+	return predicateAlwaysMatchesPage(c.bp, seg, pageIdx)
+}
+
 func (c CompiledPred) ApplyEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	if c.ee == nil {
 		return false, scratch, nil

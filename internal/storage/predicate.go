@@ -1,5 +1,6 @@
-﻿// BoundPredicate plus the bound types are internal eval helpers reached only via Pred.toBound.
-// All shape and binding live in pred.go; helpers below resolve segment columns, stats, and encoded paths.
+// BoundPredicate plus the bound types are internal eval helpers reached only via Pred.toBound.
+// All shape and binding live in pred.go.
+// Helpers below resolve segment columns, stats, and encoded paths.
 package storage
 
 import (
@@ -526,6 +527,31 @@ func childAlwaysMatchesSegment(child BoundPredicate, seg *Segment) bool {
 		return stats.Min > c.value
 	}
 	return false
+}
+
+func predicateAlwaysMatchesPage(pred BoundPredicate, seg *Segment, pageIdx int) bool {
+	switch p := pred.(type) {
+	case *boundAnd:
+		if len(p.children) == 0 {
+			return true
+		}
+		for _, child := range p.children {
+			if !predicateAlwaysMatchesPage(child, seg, pageIdx) {
+				return false
+			}
+		}
+		return true
+	case *boundOr:
+		for _, child := range p.children {
+			if predicateAlwaysMatchesPage(child, seg, pageIdx) {
+				return true
+			}
+		}
+		return false
+	case boundNot:
+		return p.child.PrunePage(seg, pageIdx)
+	}
+	return childAlwaysMatchesPage(pred, seg, pageIdx)
 }
 
 func childAlwaysMatchesPage(child BoundPredicate, seg *Segment, pageIdx int) bool {
