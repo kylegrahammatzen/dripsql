@@ -107,6 +107,44 @@ func TestWAL_CorruptCRCDropped(t *testing.T) {
 	}
 }
 
+// Smashing the second record's slot with garbage must leave the durable first record intact.
+func TestWAL_PriorSlotSurvivesTornWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.wal")
+	w, _, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := w.Append(WALRecord{Type: 1, Payload: []byte("durable")}); err != nil {
+		t.Fatalf("append1: %v", err)
+	}
+	sizeAfterFirst := w.Size()
+	if _, err := w.Append(WALRecord{Type: 1, Payload: []byte("torn")}); err != nil {
+		t.Fatalf("append2: %v", err)
+	}
+	w.Close()
+
+	garbage := make([]byte, walPageSize)
+	for i := range garbage {
+		garbage[i] = 0xAA
+	}
+	f, _ := os.OpenFile(path, os.O_WRONLY, 0)
+	f.WriteAt(garbage, sizeAfterFirst)
+	f.Close()
+
+	w2, recs, err := OpenWAL(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer w2.Close()
+	if len(recs) != 1 || string(recs[0].Payload) != "durable" {
+		t.Fatalf("expected 1 durable record, got %+v", recs)
+	}
+	info, _ := os.Stat(path)
+	if info.Size() != sizeAfterFirst {
+		t.Errorf("size after recovery %d != %d", info.Size(), sizeAfterFirst)
+	}
+}
+
 func TestWAL_AppendAfterReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.wal")
 	w, _, _ := OpenWAL(path)

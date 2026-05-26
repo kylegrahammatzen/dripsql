@@ -1,4 +1,4 @@
-// WAL is a single-writer append-only log of opaque byte records framed with a per-record crc32.
+﻿// WAL is a single-writer append-only log of opaque byte records framed with a per-record crc32.
 // Open replays records up to the first truncated or corrupt frame, truncating the tail.
 package storage
 
@@ -13,13 +13,21 @@ import (
 	"sync"
 )
 
+// Each record and the file header occupy a walPageSize slot so a torn write at boundary N plus 1 cannot corrupt the durable slot N.
 const (
-	walMagic               = "DWAL"
-	walVersion      uint16 = 1
-	walHeaderLen           = len(walMagic) + 2
-	walFrameHdrLen         = 1 + 4
-	walFrameTailLen        = 4
+	walMagic           = "DWAL"
+	walVersion  uint16 = 2
+	walHeaderLen       = len(walMagic) + 2
+	walFrameHdrLen     = 1 + 4
+	walFrameTailLen    = 4
+	walPageSize        = 4096
 )
+
+func walPaddedFrameSize(payloadLen int) int64 {
+	raw := walFrameHdrLen + payloadLen + walFrameTailLen
+	pad := (walPageSize - (raw % walPageSize)) % walPageSize
+	return int64(raw + pad)
+}
 
 type WALRecord struct {
 	Type    uint8
@@ -90,12 +98,13 @@ func (w *WAL) append(rec WALRecord, sync bool) (int64, error) {
 	if len(rec.Payload) > int(^uint32(0)) {
 		return 0, fmt.Errorf("WAL: payload too large (%d bytes)", len(rec.Payload))
 	}
-	buf := make([]byte, walFrameHdrLen+len(rec.Payload)+walFrameTailLen)
+	padded := walPaddedFrameSize(len(rec.Payload))
+	buf := make([]byte, padded)
 	buf[0] = rec.Type
 	binary.LittleEndian.PutUint32(buf[1:5], uint32(len(rec.Payload)))
 	copy(buf[5:5+len(rec.Payload)], rec.Payload)
 	crc := crc32.ChecksumIEEE(buf[:walFrameHdrLen+len(rec.Payload)])
-	binary.LittleEndian.PutUint32(buf[walFrameHdrLen+len(rec.Payload):], crc)
+	binary.LittleEndian.PutUint32(buf[walFrameHdrLen+len(rec.Payload):walFrameHdrLen+len(rec.Payload)+walFrameTailLen], crc)
 	if _, err := w.f.WriteAt(buf, w.size); err != nil {
 		return 0, err
 	}
@@ -104,7 +113,7 @@ func (w *WAL) append(rec WALRecord, sync bool) (int64, error) {
 			return 0, err
 		}
 	}
-	w.size += int64(len(buf))
+	w.size += padded
 	return w.size, nil
 }
 
@@ -115,7 +124,7 @@ func (w *WAL) replay() ([]WALRecord, error) {
 	}
 	w.size = info.Size()
 	if w.size == 0 {
-		hdr := make([]byte, walHeaderLen)
+		hdr := make([]byte, walPageSize)
 		copy(hdr[:4], walMagic)
 		binary.LittleEndian.PutUint16(hdr[4:6], walVersion)
 		if _, err := w.f.WriteAt(hdr, 0); err != nil {
@@ -124,10 +133,10 @@ func (w *WAL) replay() ([]WALRecord, error) {
 		if err := w.f.Sync(); err != nil {
 			return nil, err
 		}
-		w.size = int64(walHeaderLen)
+		w.size = int64(walPageSize)
 		return nil, nil
 	}
-	if w.size < int64(walHeaderLen) {
+	if w.size < int64(walPageSize) {
 		return nil, w.truncate(0, "WAL: header truncated")
 	}
 	hdr := make([]byte, walHeaderLen)
@@ -142,10 +151,10 @@ func (w *WAL) replay() ([]WALRecord, error) {
 	}
 	var (
 		records []WALRecord
-		pos     = int64(walHeaderLen)
+		pos     = int64(walPageSize)
 	)
 	for pos < w.size {
-		rec, next, ok, err := w.readFrame(pos)
+		rec, _, ok, err := w.readFrame(pos)
 		if err != nil {
 			return nil, err
 		}
@@ -156,7 +165,7 @@ func (w *WAL) replay() ([]WALRecord, error) {
 			break
 		}
 		records = append(records, rec)
-		pos = next
+		pos += walPaddedFrameSize(len(rec.Payload))
 	}
 	return records, nil
 }
@@ -228,12 +237,12 @@ func (w *WAL) TruncateToHeader() error {
 	if w.f == nil {
 		return errors.New("WAL: closed")
 	}
-	if w.size == int64(walHeaderLen) {
+	if w.size == int64(walPageSize) {
 		return nil
 	}
-	if err := w.f.Truncate(int64(walHeaderLen)); err != nil {
+	if err := w.f.Truncate(int64(walPageSize)); err != nil {
 		return err
 	}
-	w.size = int64(walHeaderLen)
+	w.size = int64(walPageSize)
 	return nil
 }
