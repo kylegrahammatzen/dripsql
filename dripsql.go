@@ -33,24 +33,24 @@ type DB struct{ e *engine.DB }
 // Close releases the WAL, segment cache, and catalog handles.
 func (db *DB) Close() error { return db.e.Close() }
 
-// Exec runs one or more non-query statements separated by semicolons under a single engine lock.
-func (db *DB) Exec(ctx context.Context, sql string) (Result, error) {
-	r, err := db.e.Exec(ctx, sql)
+// Exec runs one or more non-query statements separated by semicolons and binds ? placeholders from args in order.
+func (db *DB) Exec(ctx context.Context, sql string, args ...any) (Result, error) {
+	r, err := db.e.Exec(ctx, sql, args...)
 	return Result{Statements: r.Statements, RowsAffected: r.RowsAffected}, err
 }
 
-// Query runs a SELECT or EXPLAIN and returns a single-pass cursor that the caller must Close.
-func (db *DB) Query(ctx context.Context, sql string) (*Rows, error) {
-	rs, err := db.e.Query(ctx, sql)
+// Query runs a SELECT or EXPLAIN and binds ? placeholders from args in order before returning a single-pass cursor that the caller must Close.
+func (db *DB) Query(ctx context.Context, sql string, args ...any) (*Rows, error) {
+	rs, err := db.e.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
 	return newRows(rs), nil
 }
 
-// QueryAt runs Query against the snapshot pinned at the given commit timestamp.
-func (db *DB) QueryAt(ctx context.Context, sql string, readTs uint64) (*Rows, error) {
-	rs, err := db.e.QueryAt(ctx, sql, readTs)
+// QueryAt runs Query against the snapshot pinned at the given commit timestamp and binds args the same way.
+func (db *DB) QueryAt(ctx context.Context, sql string, readTs uint64, args ...any) (*Rows, error) {
+	rs, err := db.e.QueryAt(ctx, sql, readTs, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -171,15 +171,15 @@ func (r *Rows) Close() error {
 // Tx is a multi-statement transaction that holds the writer lock until Commit or Rollback.
 type Tx struct{ t *engine.Tx }
 
-// Exec runs DDL or DML inside the transaction.
-func (tx *Tx) Exec(ctx context.Context, sql string) (Result, error) {
-	r, err := tx.t.Exec(ctx, sql)
+// Exec runs DDL or DML inside the transaction and binds ? placeholders from args in order.
+func (tx *Tx) Exec(ctx context.Context, sql string, args ...any) (Result, error) {
+	r, err := tx.t.Exec(ctx, sql, args...)
 	return Result{Statements: r.Statements, RowsAffected: r.RowsAffected}, err
 }
 
-// Query runs a SELECT or EXPLAIN inside the transaction and returns a cursor that must be Closed.
-func (tx *Tx) Query(ctx context.Context, sql string) (*Rows, error) {
-	rs, err := tx.t.Query(ctx, sql)
+// Query runs a SELECT or EXPLAIN inside the transaction and binds args the same way as DB.Query.
+func (tx *Tx) Query(ctx context.Context, sql string, args ...any) (*Rows, error) {
+	rs, err := tx.t.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -11,9 +11,10 @@ import (
 )
 
 type parser struct {
-	lex lexer
-	buf [2]token
-	has [2]bool
+	lex       lexer
+	buf       [2]token
+	has       [2]bool
+	paramSeen int
 }
 
 type parserState struct {
@@ -1243,6 +1244,11 @@ func (p *parser) parseScalarPrimary() (Expr, string, error) {
 			return nil, "", err
 		}
 		return &Literal{Value: value}, "", nil
+	}
+	if tok.typ == tokPlaceholder {
+		_, _ = p.next()
+		p.paramSeen++
+		return &Placeholder{Index: p.paramSeen}, "", nil
 	}
 	if tok.typ == tokIdent && !tok.quoted && tok.lit == "case" {
 		_, _ = p.next()

@@ -36,6 +36,7 @@ const (
 	tokJSONGet
 	tokJSONGetText
 	tokDot
+	tokPlaceholder
 )
 
 type token struct {
@@ -112,6 +113,9 @@ func (l *lexer) scanASCIIOperator(b byte, start int) (token, bool, error) {
 	case '.':
 		l.pos++
 		return token{typ: tokDot, lit: ".", pos: start}, true, nil
+	case '?':
+		l.pos++
+		return token{typ: tokPlaceholder, lit: "?", pos: start}, true, nil
 	case '+':
 		l.pos++
 		return token{typ: tokPlus, lit: "+", pos: start}, true, nil

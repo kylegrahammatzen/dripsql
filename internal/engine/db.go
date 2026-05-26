@@ -334,7 +334,7 @@ func (db *DB) resolveTableTypes(spec *schema.TableSpec) error {
 	return nil
 }
 
-func (db *DB) Exec(ctx context.Context, sqlText string) (Result, error) {
+func (db *DB) Exec(ctx context.Context, sqlText string, args ...any) (Result, error) {
 	if db == nil {
 		return Result{}, fmt.Errorf("engine: nil DB")
 	}
@@ -358,7 +358,7 @@ func (db *DB) Exec(ctx context.Context, sqlText string) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		affected, err := db.execStmt(ctx, stmt)
+		affected, err := db.execStmt(ctx, stmt, args)
 		if err != nil {
 			return result, err
 		}
@@ -368,8 +368,12 @@ func (db *DB) Exec(ctx context.Context, sqlText string) (Result, error) {
 	return result, nil
 }
 
-func (db *DB) execStmt(ctx context.Context, stmt sql.Stmt) (int64, error) {
+func (db *DB) execStmt(ctx context.Context, stmt sql.Stmt, args []any) (int64, error) {
 	plan, err := db.planner().Plan(stmt)
+	if err != nil {
+		return 0, err
+	}
+	plan, err = sql.BindParameters(plan, args)
 	if err != nil {
 		return 0, err
 	}
@@ -404,7 +408,7 @@ func (db *DB) planner() *sql.Planner {
 	return sql.NewPlanner(db.boundTableByName)
 }
 
-func (db *DB) Query(ctx context.Context, sqlText string) (*Rows, error) {
+func (db *DB) Query(ctx context.Context, sqlText string, args ...any) (*Rows, error) {
 	if db == nil {
 		return nil, fmt.Errorf("engine: nil DB")
 	}
@@ -420,10 +424,14 @@ func (db *DB) Query(ctx context.Context, sqlText string) (*Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	return db.runQuery(ctx, plan)
+	bound, err := sql.BindParameters(plan, args)
+	if err != nil {
+		return nil, err
+	}
+	return db.runQuery(ctx, bound)
 }
 
-func (db *DB) QueryAt(ctx context.Context, sqlText string, readTs uint64) (*Rows, error) {
+func (db *DB) QueryAt(ctx context.Context, sqlText string, readTs uint64, args ...any) (*Rows, error) {
 	if db == nil {
 		return nil, fmt.Errorf("engine: nil DB")
 	}
@@ -439,7 +447,11 @@ func (db *DB) QueryAt(ctx context.Context, sqlText string, readTs uint64) (*Rows
 	if err != nil {
 		return nil, err
 	}
-	return db.runQueryWith(ctx, plan, func(d sql.BoundTableDef) ([]*storage.Segment, error) {
+	bound, err := sql.BindParameters(plan, args)
+	if err != nil {
+		return nil, err
+	}
+	return db.runQueryWith(ctx, bound, func(d sql.BoundTableDef) ([]*storage.Segment, error) {
 		ts := readTs
 		if d.AsOf != 0 {
 			ts = d.AsOf

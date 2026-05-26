@@ -355,17 +355,20 @@ const (
 	ExprSubquery
 	ExprInSubquery
 	ExprExists
+	// ExprParameter is a positional ? placeholder bound to args[Parameter-1] at execution time.
+	ExprParameter
 )
 
 type BoundExpr struct {
-	Op       ExprOp
-	Type     schema.Type
-	Args     []BoundExpr
-	Column   string
-	ColumnID ColumnID
-	Literal  any
-	Not      bool
-	SubPlan  *Plan
+	Op        ExprOp
+	Type      schema.Type
+	Args      []BoundExpr
+	Column    string
+	ColumnID  ColumnID
+	Literal   any
+	Parameter int
+	Not       bool
+	SubPlan   *Plan
 	// Outer marks an ExprColumn that resolves to a parent scope rather than the
 	// current batch. The evaluator reads its value from a runtime outer-row table
 	// keyed by Column name. Only meaningful for Op == ExprColumn.

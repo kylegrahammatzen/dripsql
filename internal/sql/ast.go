@@ -197,6 +197,11 @@ type Literal struct {
 	Value Value
 }
 
+// Placeholder is a positional ? parameter whose value is bound at execution time.
+type Placeholder struct {
+	Index int
+}
+
 type BinaryExpr struct {
 	Left  Expr
 	Op    BinaryOp
@@ -252,6 +257,7 @@ func (*ColumnRef) isExpr()    {}
 func (*StarRef) isExpr()      {}
 func (*FuncCall) isExpr()     {}
 func (*Literal) isExpr()      {}
+func (*Placeholder) isExpr()  {}
 func (*BinaryExpr) isExpr()   {}
 func (*BetweenExpr) isExpr()  {}
 func (*InExpr) isExpr()       {}

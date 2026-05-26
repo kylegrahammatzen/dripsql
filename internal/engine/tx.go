@@ -72,7 +72,7 @@ func (tx *Tx) commit(table string, adds []storage.ManifestSegmentAdd, dvUpdates 
 	return nil
 }
 
-func (tx *Tx) Exec(ctx context.Context, sqlText string) (Result, error) {
+func (tx *Tx) Exec(ctx context.Context, sqlText string, args ...any) (Result, error) {
 	if tx.done {
 		return Result{}, fmt.Errorf("engine: transaction already finished")
 	}
@@ -88,7 +88,7 @@ func (tx *Tx) Exec(ctx context.Context, sqlText string) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		affected, err := tx.execStmt(ctx, stmt)
+		affected, err := tx.execStmt(ctx, stmt, args)
 		if err != nil {
 			return result, err
 		}
@@ -98,8 +98,12 @@ func (tx *Tx) Exec(ctx context.Context, sqlText string) (Result, error) {
 	return result, nil
 }
 
-func (tx *Tx) execStmt(ctx context.Context, stmt sql.Stmt) (int64, error) {
+func (tx *Tx) execStmt(ctx context.Context, stmt sql.Stmt, args []any) (int64, error) {
 	plan, err := tx.db.planner().Plan(stmt)
+	if err != nil {
+		return 0, err
+	}
+	plan, err = sql.BindParameters(plan, args)
 	if err != nil {
 		return 0, err
 	}
@@ -114,7 +118,7 @@ func (tx *Tx) execStmt(ctx context.Context, stmt sql.Stmt) (int64, error) {
 	return 0, fmt.Errorf("engine: %v not supported inside a transaction", plan.Kind)
 }
 
-func (tx *Tx) Query(ctx context.Context, sqlText string) (*Rows, error) {
+func (tx *Tx) Query(ctx context.Context, sqlText string, args ...any) (*Rows, error) {
 	if tx.done {
 		return nil, fmt.Errorf("engine: transaction already finished")
 	}
@@ -125,7 +129,11 @@ func (tx *Tx) Query(ctx context.Context, sqlText string) (*Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	return tx.db.runQueryWith(ctx, plan, tx.resolveSegments)
+	bound, err := sql.BindParameters(plan, args)
+	if err != nil {
+		return nil, err
+	}
+	return tx.db.runQueryWith(ctx, bound, tx.resolveSegments)
 }
 
 // resolveSegments returns base SnapshotAt(readTs) with pending overlays applied:

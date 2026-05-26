@@ -34,6 +34,8 @@ func bindExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
 		return BoundExpr{Op: ExprColumn, Type: col.Type, Column: col.Name, ColumnID: col.ID}, nil
 	case *Literal:
 		return literalExpr(e.Value), nil
+	case *Placeholder:
+		return BoundExpr{Op: ExprParameter, Parameter: e.Index}, nil
 	case *FuncCall:
 		if _, ok := aggregateFuncByName(e.Name); ok {
 			return BoundExpr{}, fmt.Errorf("aggregate %s is only allowed in SELECT or HAVING", e.Name)
@@ -551,6 +553,10 @@ func validateWhereComparison(left BoundExpr, op ExprOp, right BoundExpr) error {
 }
 
 func validateComparison(left BoundExpr, op ExprOp, right BoundExpr, r cmpRules) error {
+	// Defer the cross-type check until BindParameters substitutes the placeholder with a typed literal.
+	if left.Op == ExprParameter || right.Op == ExprParameter {
+		return nil
+	}
 	if isIntegerExpr(left) && isIntegerExpr(right) {
 		if err := r.intRangeCheck(left, right); err != nil {
 			return err
