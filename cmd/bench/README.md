@@ -31,7 +31,7 @@ go run ./cmd/bench -query top_age -rows 1000000 -runs 50 -mode hot -json > head.
 go run ./cmd/bench compare base.json head.json -threshold 10
 ```
 
-`compare` reads JSON or JSONL outputs from the workload driver and reports median deltas with a simple threshold verdict. Keep comparison artifacts fresh because workload variance and implementation details move quickly.
+Use fresh JSON or JSONL artifacts because `compare` reports median deltas against a threshold.
 
 ## Snapshot (hot mode, median wall time across timed runs)
 
@@ -49,7 +49,7 @@ go run ./cmd/bench compare base.json head.json -threshold 10
 - `count(*)` stays on the metadata-only path even after `DELETE` by popcounting the segment's deletion vector instead of scanning pages.
 - `category_groupby` reads from the dict-histogram sidecar when no `WHERE` is present.
 - TPC-H Q1 and Q6 run against a synthetic `lineitem` with dates as int64 days since 1992-01-01.
-- `<1 us` means the workload driver reported a zero microsecond median, which is below the harness measurement floor rather than literal zero work.
+- `<1 us` means the workload driver rounded the median below the microsecond measurement floor.
 
 ## Exec microbenchmarks
 
@@ -63,13 +63,13 @@ go test ./internal/exec '-bench=.' '-benchmem' '-run=^$' '-count=10'
 | `Filter_Int64Between` | 3.10 us | 256 | 1 |
 | `Filter_Int64AndCompound` | 4.34 us | 256 | 1 |
 | `Filter_Int64Equal` | 2.44 us | 256 | 1 |
-| `Sort_FullAsc_Int64_10k` | 1.45 ms | 251 K | 33 |
-| `Sort_FullDesc_Int64_10k` | 1.42 ms | 251 K | 33 |
+| `Sort_FullAsc_Int64_10k` | 1.35 ms | 250 K | 32 |
+| `Sort_FullDesc_Int64_10k` | 1.26 ms | 250 K | 32 |
 | `Sort_TopK_Int64_10k_K100` | 97.8 us | 6.4 K | 12 |
 | `Sort_TopK_Int64_100k_K100` | 733 us | 17.1 K | 15 |
 | `Sort_TopK_Int64_100k_K100_Off50` | 762 us | 18.5 K | 15 |
 | `Sort_TopK_Int64_100k_K100_NullsEvery10` | 775 us | 17.1 K | 15 |
-| `Sort_FullAsc_Text_10k` | 3.44 ms | 251 K | 38 |
+| `Sort_FullAsc_Text_10k` | 1.38 ms | 291 K | 38 |
 
 ## Storage microbenchmarks
 
@@ -78,48 +78,54 @@ go test ./internal/storage '-bench=.' '-benchmem' '-run=^$' '-count=10'
 go test ./internal/storage/codec '-bench=.' '-benchmem' '-run=^$' '-count=10'
 ```
 
+Rows are ordered from codec decode to page read to scan to write so low level costs explain the higher level paths.
+
 | Bench | Time | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `Storage_ScanFull` | 288 us | 467 K | 70 |
-| `Storage_ScanEqInt64Hit` | 359 us | 467 K | 72 |
-| `Storage_ScanEqInt64Miss` | 698 ns | 232 | 6 |
-| `Storage_ScanEqBytesHit` | 471 us | 465 K | 71 |
-| `Storage_ScanLtInt64AllMatchMetadata` | 105 us | 132 K | 27 |
-| `Storage_WriteSegment_Int64Random` | 1.99 ms | 290 K | 91 |
-| `Storage_WriteSegment_Int64Constant` | 1.91 ms | 116 K | 68 |
-| `Storage_WriteSegment_Int64Monotonic` | 1.77 ms | 240 K | 82 |
-| `Storage_WriteSegment_Int64SparseNulls` | 1.62 ms | 132 K | 53 |
-| `Storage_WriteSegment_Float64Plain` | 2.30 ms | 115 K | 80 |
-| `Storage_WriteSegment_Float64Decimal` | 2.11 ms | 97 K | 60 |
-| `Storage_WriteSegment_TextLowCardinality` | 2.52 ms | 426 K | 206 |
-| `Codec_Decode/for_int64` | 26 us | 16 K | 1 |
-| `Codec_Decode/delta_int64` | 22 us | 33 K | 2 |
-| `Codec_Decode/pcodec_int64` | 22 us | 16 K | 1 |
-| `Codec_Decode/constant_int64` | 5.3 us | 0 | 0 |
-| `Codec_Decode/sequence_int64` | 1.6 us | 0 | 0 |
-| `Codec_Decode/plain_int64` | 160 ns | 0 | 0 |
-| `Codec_Decode/dict_text_lowcard` | 9.7 us | 33 K | 5 |
-| `Codec_Decode/plain_text` | 48 us | 55 K | 3 |
+| `Codec_Decode/FOR/Int64` | 26 us | 16 K | 1 |
+| `Codec_Decode/Delta/Int64` | 22 us | 33 K | 2 |
+| `Codec_Decode/Pcodec/Int64` | 22 us | 16 K | 1 |
+| `Codec_Decode/Constant/Int64` | 5.3 us | 0 | 0 |
+| `Codec_Decode/Sequence/Int64` | 1.6 us | 0 | 0 |
+| `Codec_Decode/Plain/Int64` | 160 ns | 0 | 0 |
+| `Codec_Decode/Dict/Text` | 9.7 us | 33 K | 5 |
+| `Codec_Decode/Plain/Text` | 48 us | 55 K | 3 |
+| `Storage_ReadPage/Int64` | 6.23 us | 16 K | 2 |
+| `Storage_ReadPage/Text` | 8.64 us | 33 K | 6 |
+| `Storage_Scan/One/Int64` | 30.3 us | 66 K | 15 |
+| `Storage_Scan/One/Text` | 40.6 us | 135 K | 31 |
+| `Storage_Scan/All` | 207 us | 467 K | 70 |
+| `Storage_Scan/Eq/Int64/Hit` | 256 us | 467 K | 72 |
+| `Storage_Scan/Eq/Int64/Miss` | 698 ns | 232 | 6 |
+| `Storage_Scan/Eq/Text/Hit` | 400 us | 465 K | 71 |
+| `Storage_Scan/Lt/Int64/AllByMeta` | 40.8 us | 132 K | 27 |
+| `Storage_Write/Int64/Random` | 1.99 ms | 290 K | 91 |
+| `Storage_Write/Int64/Constant` | 1.91 ms | 116 K | 68 |
+| `Storage_Write/Int64/Sequence` | 1.77 ms | 240 K | 82 |
+| `Storage_Write/Int64/SparseNulls` | 1.62 ms | 132 K | 53 |
+| `Storage_Write/Float64/Plain` | 2.30 ms | 115 K | 80 |
+| `Storage_Write/Float64/Decimal` | 2.11 ms | 97 K | 60 |
+| `Storage_Write/Text/Dict` | 2.52 ms | 426 K | 206 |
 
-`Storage_ScanEqInt64Miss` is the page-prune fast path resolving in sub-microsecond via the Binary Fuse 8 `.bf` sidecar. Sidecar loaders all sit below 25us and run once per segment open.
+`Storage_Scan/Eq/Int64/Miss` is the Binary Fuse 8 page-prune path and sidecar loaders run once per segment open.
 
 ## Iterating on a single bench
 
-The full sweep above takes 8-12 minutes because `go test -bench` adapts iterations so every function runs ~`benchtime` seconds, then `-count=10` multiplies that. Wall time is `N_functions × benchtime × count + compile`. For perf iteration on the same bench, two patterns cut that.
+Full sweeps are slow because every benchmark runs for about `benchtime` per count.
 
-**Precompile and reuse the test binary** when running the same bench repeatedly against unchanged code. The build cache already shortcuts most re-compiles after edits, so this pattern shines on repeat runs, not on the first invocation after an edit:
+**Precompile And Reuse**
 
 ```
 go test -c -o exec.test.exe ./internal/exec
 .\exec.test.exe '-test.run=^$' '-test.bench=Filter_Int64Less' '-test.benchtime=1s' '-test.count=10' '-test.benchmem'
 ```
 
-`-test.run=^$` skips normal tests so only the bench runs. PowerShell needs the dotted flags single-quoted. Drop the binary when done.
+`-test.run=^$` runs only benchmarks, and PowerShell needs dotted flags single quoted.
 
 **Targeted filter for smoke checks** during perf iteration:
 
 ```
-go test '-run=^$' '-bench=Benchmark(Filter_|Storage_ScanFull)|Codec_Decode/plain_int64' '-benchtime=500ms' '-count=3' ./internal/...
+go test '-run=^$' '-bench=Benchmark(Filter_|Storage_Scan|Codec_Decode)' '-benchtime=500ms' '-count=3' ./internal/...
 ```
 
 - Runs in ~10s instead of 10 min.

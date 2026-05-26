@@ -25,53 +25,28 @@ func fileSize(t *testing.T, path string) int64 {
 
 const benchPageRows = 2048
 
-func BenchmarkStorage_WriteSegment(b *testing.B) {
-	page := makeBenchSegmentBatch(benchPageRows)
-	pages := []vector.Batch{page, page, page, page}
-	b.ReportAllocs()
-	for b.Loop() {
-		tmp := b.TempDir()
-		path := filepath.Join(tmp, "seg.dsv4")
-		if _, err := WriteSegment(path, pages, nil); err != nil {
-			b.Fatal(err)
-		}
+var benchVecSink vector.Vec
+
+func BenchmarkStorage_Write(b *testing.B) {
+	for _, tc := range []struct {
+		name string
+		page vector.Batch
+	}{
+		{name: "All", page: makeBenchSegmentBatch(benchPageRows)},
+		{name: "Int64/Random", page: makeInt64RandomBatch(benchPageRows)},
+		{name: "Int64/Sequence", page: makeInt64MonotonicBatch(benchPageRows)},
+		{name: "Int64/Constant", page: makeInt64ConstantBatch(benchPageRows)},
+		{name: "Int64/SparseNulls", page: makeInt64SparseNullsBatch(benchPageRows)},
+		{name: "Float64/Plain", page: makeFloat64PlainBatch(benchPageRows)},
+		{name: "Float64/Decimal", page: makeFloat64DecimalBatch(benchPageRows)},
+		{name: "Text/Dict", page: makeTextLowCardBatch(benchPageRows)},
+		{name: "Text/Plain", page: makeTextHighCardBatch(benchPageRows)},
+		{name: "Text/Long", page: makeTextLongBatch(benchPageRows)},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			runWriteShapeBench(b, tc.page)
+		})
 	}
-}
-
-func BenchmarkStorage_WriteSegment_Int64Random(b *testing.B) {
-	runWriteShapeBench(b, makeInt64RandomBatch(benchPageRows))
-}
-
-func BenchmarkStorage_WriteSegment_Int64Monotonic(b *testing.B) {
-	runWriteShapeBench(b, makeInt64MonotonicBatch(benchPageRows))
-}
-
-func BenchmarkStorage_WriteSegment_Int64Constant(b *testing.B) {
-	runWriteShapeBench(b, makeInt64ConstantBatch(benchPageRows))
-}
-
-func BenchmarkStorage_WriteSegment_Int64SparseNulls(b *testing.B) {
-	runWriteShapeBench(b, makeInt64SparseNullsBatch(benchPageRows))
-}
-
-func BenchmarkStorage_WriteSegment_TextLowCardinality(b *testing.B) {
-	runWriteShapeBench(b, makeTextLowCardBatch(benchPageRows))
-}
-
-func BenchmarkStorage_WriteSegment_TextHighCardinality(b *testing.B) {
-	runWriteShapeBench(b, makeTextHighCardBatch(benchPageRows))
-}
-
-func BenchmarkStorage_WriteSegment_TextLongValues(b *testing.B) {
-	runWriteShapeBench(b, makeTextLongBatch(benchPageRows))
-}
-
-func BenchmarkStorage_WriteSegment_Float64Decimal(b *testing.B) {
-	runWriteShapeBench(b, makeFloat64DecimalBatch(benchPageRows))
-}
-
-func BenchmarkStorage_WriteSegment_Float64Plain(b *testing.B) {
-	runWriteShapeBench(b, makeFloat64PlainBatch(benchPageRows))
 }
 
 // TestFloat64_ALPVsPlain_FileSize is a one-shot check that ALP actually shrinks
@@ -117,74 +92,68 @@ func BenchmarkStorage_OpenCold(b *testing.B) {
 	}
 }
 
-func BenchmarkStorage_ScanFull(b *testing.B) {
-	seg := openBenchSegment(b, 4)
-	defer seg.Close()
-	b.ReportAllocs()
-	b.ResetTimer()
-	for b.Loop() {
-		opts := ScanOpts{Segments: []*Segment{seg}}
-		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
-		if err != nil {
-			b.Fatal(err)
-		}
+func BenchmarkStorage_ReadPage(b *testing.B) {
+	for _, tc := range []struct {
+		name   string
+		colIdx int
+	}{
+		{name: "Int64", colIdx: 0},
+		{name: "Text", colIdx: 3},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			runReadPageBench(b, tc.colIdx)
+		})
 	}
 }
 
-func BenchmarkStorage_ScanEqInt64Hit(b *testing.B) {
+func runReadPageBench(b *testing.B, colIdx int) {
+	b.Helper()
 	seg := openBenchSegment(b, 4)
 	defer seg.Close()
-	pred := Pred{Op: OpEq, Col: "age", Kind: vector.VecInt64, I64: 42}
+	if err := seg.ValidateColumns(); err != nil {
+		b.Fatal(err)
+	}
+	var scratch []byte
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		opts := ScanOpts{Segments: []*Segment{seg}, Pred: &pred}
-		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
+		v, nextScratch, err := seg.ReadPageInto(colIdx, 0, scratch)
 		if err != nil {
 			b.Fatal(err)
 		}
+		scratch = nextScratch
+		benchVecSink = v
 	}
 }
 
-func BenchmarkStorage_ScanEqInt64Miss(b *testing.B) {
-	seg := openBenchSegment(b, 4)
-	defer seg.Close()
-	// age is i % 100 so 999 falls inside [0, 99] only as a Bloom-rescuable miss.
-	pred := Pred{Op: OpEq, Col: "age", Kind: vector.VecInt64, I64: 999}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for b.Loop() {
-		opts := ScanOpts{Segments: []*Segment{seg}, Pred: &pred}
-		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
-		if err != nil {
-			b.Fatal(err)
-		}
+func BenchmarkStorage_Scan(b *testing.B) {
+	for _, tc := range []struct {
+		name    string
+		columns []string
+		pred    *Pred
+	}{
+		{name: "One/Int64", columns: []string{"id"}},
+		{name: "One/Text", columns: []string{"category"}},
+		{name: "All"},
+		{name: "Eq/Int64/Hit", pred: &Pred{Op: OpEq, Col: "age", Kind: vector.VecInt64, I64: 42}},
+		{name: "Eq/Int64/Miss", pred: &Pred{Op: OpEq, Col: "age", Kind: vector.VecInt64, I64: 999}},
+		{name: "Eq/Text/Hit", pred: &Pred{Op: OpEq, Col: "category", Kind: vector.VecText, Bytes: []byte("alpha")}},
+		{name: "Lt/Int64/AllByMeta", columns: []string{"name"}, pred: &Pred{Op: OpLt, Col: "id", Kind: vector.VecInt64, I64: benchPageRows}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			runScanBench(b, tc.columns, tc.pred)
+		})
 	}
 }
 
-func BenchmarkStorage_ScanEqBytesHit(b *testing.B) {
+func runScanBench(b *testing.B, columns []string, pred *Pred) {
+	b.Helper()
 	seg := openBenchSegment(b, 4)
 	defer seg.Close()
-	pred := Pred{Op: OpEq, Col: "category", Kind: vector.VecText, Bytes: []byte("alpha")}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		opts := ScanOpts{Segments: []*Segment{seg}, Pred: &pred}
-		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkStorage_ScanLtInt64AllMatchMetadata(b *testing.B) {
-	seg := openBenchSegment(b, 4)
-	defer seg.Close()
-	pred := Pred{Op: OpLt, Col: "id", Kind: vector.VecInt64, I64: benchPageRows}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for b.Loop() {
-		opts := ScanOpts{Segments: []*Segment{seg}, Columns: []string{"name"}, Pred: &pred}
+		opts := ScanOpts{Segments: []*Segment{seg}, Columns: columns, Pred: pred}
 		err := Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error { return nil })
 		if err != nil {
 			b.Fatal(err)
