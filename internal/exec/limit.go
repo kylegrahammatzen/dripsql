@@ -4,6 +4,7 @@ package exec
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
@@ -66,7 +67,9 @@ func (l *LimitOp) Next() (vector.Batch, bool, error) {
 			}
 			continue
 		}
-		batch.Sel = &out
+		if err := batch.SetSel(&out); err != nil {
+			return vector.Batch{}, false, fmt.Errorf("limit: %w", err)
+		}
 		return batch, true, nil
 	}
 }
@@ -88,7 +91,11 @@ func (l *LimitOp) limitAllRows(batch vector.Batch) (vector.Batch, bool) {
 	}
 	end := start + take
 	out := vector.NewSelectionRange(batch.Len, int(start), int(end))
-	batch.Sel = &out
+	if err := batch.SetSel(&out); err != nil {
+		l.seen += end
+		l.sent += take
+		return vector.Batch{}, false
+	}
 	l.seen += end
 	l.sent += take
 	return batch, true

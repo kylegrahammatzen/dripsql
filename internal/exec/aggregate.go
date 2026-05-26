@@ -88,7 +88,9 @@ func (a *AggregateOp) Next() (vector.Batch, bool, error) {
 		if sel.PopCount() == 0 {
 			continue
 		}
-		batch.Sel = sel
+		if err := batch.SetSel(sel); err != nil {
+			return vector.Batch{}, false, fmt.Errorf("aggregate: %w", err)
+		}
 		return batch, true, nil
 	}
 	return vector.Batch{}, false, nil
@@ -532,7 +534,9 @@ func (a *AggregateOp) materializeChunk(start, end int) (vector.Batch, *vector.Se
 }
 
 func (a *AggregateOp) applyHaving(batch vector.Batch, sel *vector.SelectionMask) (*vector.SelectionMask, error) {
-	batch.Sel = sel
+	if err := batch.SetSel(sel); err != nil {
+		return nil, fmt.Errorf("aggregate having: %w", err)
+	}
 	res, err := filterPredicate(batch, *sel, *a.Having, nil, nil, nil)
 	if err != nil {
 		return nil, err

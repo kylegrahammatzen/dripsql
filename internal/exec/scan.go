@@ -6,6 +6,7 @@ package exec
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
@@ -80,7 +81,9 @@ func (s *ScanOp) runScan(segs []*storage.Segment) {
 	err := storage.Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error {
 		cloned := cloneBatch(batch, s.ColumnAlias)
 		clonedSel := sel.Clone()
-		cloned.Sel = &clonedSel
+		if err := cloned.SetSel(&clonedSel); err != nil {
+			return fmt.Errorf("scan: %w", err)
+		}
 		select {
 		case <-s.ctx.Done():
 			return s.ctx.Err()

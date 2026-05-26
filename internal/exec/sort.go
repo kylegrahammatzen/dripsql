@@ -121,7 +121,9 @@ func (s *SortOp) Next() (vector.Batch, bool, error) {
 		return vector.Batch{}, false, err
 	}
 	s.cursor = end
-	batch.Sel = sel
+	if err := batch.SetSel(sel); err != nil {
+		return vector.Batch{}, false, fmt.Errorf("sort: %w", err)
+	}
 	return batch, true, nil
 }
 

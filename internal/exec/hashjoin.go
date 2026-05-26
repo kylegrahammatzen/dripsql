@@ -477,7 +477,9 @@ func (h *HashJoinOp) emitRows(left *vector.Batch, rows []joinRow) (vector.Batch,
 	}
 	sel := vector.NewSelectionMask(n)
 	sel.FillAll()
-	out.Sel = &sel
+	if err := out.SetSel(&sel); err != nil {
+		return vector.Batch{}, false, fmt.Errorf("hashjoin: %w", err)
+	}
 	return out, true, nil
 }
 

@@ -54,7 +54,9 @@ func (f *FilterOp) Next() (vector.Batch, bool, error) {
 		if res.count == 0 {
 			continue
 		}
-		batch.Sel = &res.sel
+		if err := batch.SetSel(&res.sel); err != nil {
+			return vector.Batch{}, false, fmt.Errorf("filter: %w", err)
+		}
 		return batch, true, nil
 	}
 }

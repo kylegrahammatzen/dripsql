@@ -70,6 +70,7 @@ func (b Batch) VisibleLen() int {
 	return b.Len
 }
 
+// Production sites must route through SetSel because direct b.Sel writes bypass the mask-rows-equals-Len invariant.
 func (b *Batch) SetSel(sel *SelectionMask) error {
 	if sel == nil {
 		b.Sel = nil
