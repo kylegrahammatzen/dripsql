@@ -232,13 +232,7 @@ func (r *Rows) All() ([][]any, error) {
 	if r.closed || r.rs == nil {
 		return nil, fmt.Errorf("dripsql.Rows.All: cursor already closed")
 	}
-	start := r.cursor + 1
-	if start < 0 {
-		start = 0
-	}
-	if start > len(r.rs.Values) {
-		start = len(r.rs.Values)
-	}
+	start := min(max(0, r.cursor+1), len(r.rs.Values))
 	remaining := r.rs.Values[start:]
 	out := make([][]any, len(remaining))
 	for i, row := range remaining {
