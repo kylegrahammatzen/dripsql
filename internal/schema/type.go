@@ -2,7 +2,10 @@
 // Logical-kind name, parse, and physical-kind mapping all run as single switches.
 package schema
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 type Kind uint8
 
@@ -139,3 +142,91 @@ func (t Type) String() string {
 	}
 	return t.Kind.String()
 }
+
+// ParseKindStrict accepts only the canonical short name and rejects unknown values. The
+// catalog loader uses it to fail fast on hand-edited or future-format files instead of
+// silently downgrading to KindInvalid.
+func ParseKindStrict(name string) (Kind, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "bool":
+		return KindBool, true
+	case "int16":
+		return KindInt16, true
+	case "int32":
+		return KindInt32, true
+	case "int64":
+		return KindInt64, true
+	case "float32":
+		return KindFloat32, true
+	case "float64":
+		return KindFloat64, true
+	case "decimal":
+		return KindDecimal, true
+	case "text":
+		return KindText, true
+	case "bytes":
+		return KindBytes, true
+	case "uuid":
+		return KindUUID, true
+	case "timestamp":
+		return KindTimestamp, true
+	case "time":
+		return KindTime, true
+	case "date":
+		return KindDate, true
+	case "json":
+		return KindJSON, true
+	case "named":
+		return KindNamed, true
+	}
+	return KindInvalid, false
+}
+
+// TypeString renders a Type into its canonical persisted form. Primitives serialize as
+// the short kind name. Named (user-defined) types serialize as "named:<name>" so the
+// "named:" prefix can never collide with a future primitive name.
+func TypeString(t Type) (string, error) {
+	if t.Kind == KindNamed {
+		if t.Name == "" {
+			return "", fmt.Errorf("schema: named type missing name")
+		}
+		return "named:" + t.Name, nil
+	}
+	if t.Kind == KindInvalid {
+		return "", fmt.Errorf("schema: cannot serialize invalid type")
+	}
+	s := t.Kind.String()
+	if s == "invalid" {
+		return "", fmt.Errorf("schema: unknown kind %d", uint8(t.Kind))
+	}
+	if t.Name != "" {
+		return "", fmt.Errorf("schema: non-named type %q must not carry a name", s)
+	}
+	return s, nil
+}
+
+// ParseType parses the canonical persisted form back into a Type. Caller is responsible
+// for resolving named:<x> against the catalog's registered types; this function only
+// validates the grammar.
+func ParseType(s string) (Type, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(s))
+	if trimmed == "" {
+		return Type{}, fmt.Errorf("schema: empty type")
+	}
+	if strings.HasPrefix(trimmed, "named:") {
+		name := strings.TrimSpace(trimmed[len("named:"):])
+		if name == "" {
+			return Type{}, fmt.Errorf("schema: named: requires a name")
+		}
+		return Named(name), nil
+	}
+	k, ok := ParseKindStrict(trimmed)
+	if !ok {
+		return Type{}, fmt.Errorf("schema: unknown type %q", s)
+	}
+	if k == KindNamed {
+		return Type{}, fmt.Errorf("schema: named type must use the named:<name> form")
+	}
+	return Type{Kind: k}, nil
+}
+

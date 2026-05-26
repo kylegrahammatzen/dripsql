@@ -8,16 +8,14 @@ import (
 )
 
 type TypeSpec struct {
-	Name        string
-	IfNotExists bool
-	EnumLabels  []string
+	Name       string
+	EnumLabels []string
 }
 
 type TableSpec struct {
-	Name        string
-	IfNotExists bool
-	Columns     []ColumnSpec
-	Options     TableOptions
+	Name    string
+	Columns []ColumnSpec
+	Options TableOptions
 }
 
 type ColumnSpec struct {
@@ -210,6 +208,52 @@ func (p CompressionPolicy) String() string {
 		return "best"
 	}
 	return fmt.Sprintf("compression(%d)", p)
+}
+
+func ParseStorageKindStrict(name string) (StorageKind, bool) {
+	switch NormalizeName(name) {
+	case "default":
+		return StorageDefault, true
+	case "columnar":
+		return StorageColumnar, true
+	case "row":
+		return StorageRow, true
+	case "hybrid":
+		return StorageHybrid, true
+	}
+	return StorageDefault, false
+}
+
+func ParseProfileStrict(name string) (TableProfile, bool) {
+	switch NormalizeName(name) {
+	case "default":
+		return ProfileDefault, true
+	case "event_analytics":
+		return ProfileEventAnalytics, true
+	case "time_series":
+		return ProfileTimeSeries, true
+	case "dimension_table":
+		return ProfileDimensionTable, true
+	case "log_analytics":
+		return ProfileLogAnalytics, true
+	}
+	return ProfileDefault, false
+}
+
+func ParseCompressionStrict(name string) (CompressionPolicy, bool) {
+	switch NormalizeName(name) {
+	case "default":
+		return CompressionDefault, true
+	case "auto":
+		return CompressionAuto, true
+	case "none":
+		return CompressionNone, true
+	case "fast":
+		return CompressionFast, true
+	case "best":
+		return CompressionBest, true
+	}
+	return CompressionDefault, false
 }
 
 func (p CompressionPolicy) AllowsFlate() bool {

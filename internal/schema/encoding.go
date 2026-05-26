@@ -69,6 +69,38 @@ func (e Encoding) Valid() bool {
 	return e != EncInvalid && e <= encMax
 }
 
+// ParseEncodingStrict accepts only the canonical short name and rejects aliases and unknowns.
+// Catalog persistence uses this so the on-disk vocabulary stays small and stable.
+func ParseEncodingStrict(name string) (Encoding, bool) {
+	switch NormalizeName(name) {
+	case "plain":
+		return EncPlain, true
+	case "dict":
+		return EncDict, true
+	case "const":
+		return EncConstant, true
+	case "seq":
+		return EncSequence, true
+	case "for":
+		return EncFOR, true
+	case "delta":
+		return EncDelta, true
+	case "flate":
+		return EncFlate, true
+	case "zstd":
+		return EncZstd, true
+	case "alp":
+		return EncALP, true
+	case "alp-rd":
+		return EncALPRD, true
+	case "fsst":
+		return EncFSST, true
+	case "pcodec":
+		return EncPcodec, true
+	}
+	return EncInvalid, false
+}
+
 // ParseEncoding rejects the invalid sentinel and accepts the canonical short name plus DDL aliases for back-compat with existing schemas.
 func ParseEncoding(name string) (Encoding, bool) {
 	switch NormalizeName(name) {

@@ -221,7 +221,7 @@ func unionOutputColumns(outputs []BoundOutput) map[string]BoundColumnDef {
 		if name == "" {
 			name = fmt.Sprintf("col%d", i+1)
 		}
-		cols[schema.NormalizeName(name)] = BoundColumnDef{Name: name, Type: out.Expr.Type, ID: ColumnID(i + 1)}
+		cols[schema.NormalizeName(name)] = BoundColumnDef{Name: name, Type: out.Expr.Type, ID: ColumnID(i + 1), Ordinal: i}
 	}
 	return cols
 }
@@ -301,9 +301,10 @@ func cteDefFromRel(name string, rel *Rel) BoundTableDef {
 		}
 		seen[key] = struct{}{}
 		cols = append(cols, BoundColumnDef{
-			ID:   ColumnID(i + 1),
-			Name: colName,
-			Type: out.Expr.Type,
+			ID:      ColumnID(i + 1),
+			Ordinal: i,
+			Name:    colName,
+			Type:    out.Expr.Type,
 		})
 	}
 	return BoundTableDef{
@@ -858,7 +859,7 @@ func BindCreateType(stmt *CreateTypeStmt) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Plan{Kind: PlanCreateType, TypeSpec: spec}, nil
+	return &Plan{Kind: PlanCreateType, TypeSpec: spec, IfNotExists: stmt.IfNotExists}, nil
 }
 
 func BindCreateTypeSpec(stmt *CreateTypeStmt) (schema.TypeSpec, error) {
@@ -866,9 +867,8 @@ func BindCreateTypeSpec(stmt *CreateTypeStmt) (schema.TypeSpec, error) {
 		return schema.TypeSpec{}, fmt.Errorf("CREATE TYPE statement is nil")
 	}
 	spec := schema.TypeSpec{
-		Name:        schema.NormalizeName(stmt.Name),
-		IfNotExists: stmt.IfNotExists,
-		EnumLabels:  slices.Clone(stmt.EnumLabels),
+		Name:       schema.NormalizeName(stmt.Name),
+		EnumLabels: slices.Clone(stmt.EnumLabels),
 	}
 	if err := spec.Validate(); err != nil {
 		return schema.TypeSpec{}, err
@@ -881,7 +881,7 @@ func BindCreateTable(stmt *CreateTableStmt) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Plan{Kind: PlanCreateTable, TableSpec: spec}, nil
+	return &Plan{Kind: PlanCreateTable, TableSpec: spec, IfNotExists: stmt.IfNotExists}, nil
 }
 
 func BindCreateTableSpec(stmt *CreateTableStmt) (schema.TableSpec, error) {
@@ -908,10 +908,9 @@ func BindCreateTableSpec(stmt *CreateTableStmt) (schema.TableSpec, error) {
 		return schema.TableSpec{}, err
 	}
 	spec := schema.TableSpec{
-		Name:        schema.NormalizeName(stmt.Name),
-		IfNotExists: stmt.IfNotExists,
-		Columns:     columns,
-		Options:     options,
+		Name:    schema.NormalizeName(stmt.Name),
+		Columns: columns,
+		Options: options,
 	}
 	if err := spec.Validate(); err != nil {
 		return schema.TableSpec{}, err
@@ -1749,7 +1748,7 @@ func bindHaving(aggregates []AggSpec, outputs []BoundOutput, baseColumns map[str
 		if name == "" {
 			continue
 		}
-		columns = append(columns, BoundColumnDef{ID: ColumnID(i + 1), Name: name, Type: output.Expr.Type})
+		columns = append(columns, BoundColumnDef{ID: ColumnID(i + 1), Ordinal: i, Name: name, Type: output.Expr.Type})
 	}
 	acc := &hiddenAggs{selected: aggregates}
 	expr, err := bindHavingLogicalExpr(acc, buildColumnIndex(columns), baseColumns, having)

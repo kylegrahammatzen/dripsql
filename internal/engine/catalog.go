@@ -1,114 +1,156 @@
-// Catalog persistence: catalog.json at the DB root carries types + tables + the schema version.
-// Atomic temp+rename on every save so a crashed write never leaves a half-written file.
+// Engine-side shim over internal/catalog. Converts between the persisted catalog.Table
+// shape and the schema.TableSpec shape the binder produces and the runtime consumes.
 package engine
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 
+	"github.com/kylegrahammatzen/dripsql/internal/catalog"
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
-	"github.com/kylegrahammatzen/dripsql/internal/sql"
 )
 
-const catalogFile = "catalog.json"
-
-type catalogFileShape struct {
-	Version uint64        `json:"version"`
-	Types   []typeRecord  `json:"types"`
-	Tables  []tableRecord `json:"tables"`
+// indexTypes/indexTables build by-name maps over the catalog file's slices. Maps share
+// pointers with the file so mutations under db.mu are visible through both.
+func indexTypes(f *catalog.File) map[string]*catalog.Type {
+	out := make(map[string]*catalog.Type, len(f.Types))
+	for i := range f.Types {
+		out[schema.NormalizeName(f.Types[i].Name)] = &f.Types[i]
+	}
+	return out
 }
 
-type typeRecord struct {
-	ID   sql.TypeID      `json:"id"`
-	Spec schema.TypeSpec `json:"spec"`
+func indexTables(f *catalog.File) map[string]*catalog.Table {
+	out := make(map[string]*catalog.Table, len(f.Tables))
+	for i := range f.Tables {
+		out[schema.NormalizeName(f.Tables[i].Name)] = &f.Tables[i]
+	}
+	return out
 }
 
-type tableRecord struct {
-	ID   sql.TableID      `json:"id"`
-	Spec schema.TableSpec `json:"spec"`
+// optionsFromPolicy maps a catalog StoragePolicy back to the in-memory TableOptions
+// shape that BoundTableDef carries. Returns zero-valued TableOptions on any unknown
+// enum so callers always receive a well-formed value.
+func optionsFromPolicy(p catalog.StoragePolicy, cols []catalog.Column) schema.TableOptions {
+	out := schema.TableOptions{}
+	if v, ok := schema.ParseStorageKindStrict(p.Storage); ok {
+		out.Storage = v
+	}
+	if v, ok := schema.ParseProfileStrict(p.Profile); ok {
+		out.Profile = v
+	}
+	if v, ok := schema.ParseCompressionStrict(p.Compression); ok {
+		out.Compression = v
+	}
+	switch p.SegmentRows.Mode {
+	case "auto":
+		out.SegmentRows = schema.AutoSegmentRows
+	case "fixed":
+		out.SegmentRows = schema.SegmentRows(p.SegmentRows.Rows)
+	}
+	if len(p.SortBy) > 0 {
+		names := make([]string, 0, len(p.SortBy))
+		for _, id := range p.SortBy {
+			if name := columnName(cols, id); name != "" {
+				names = append(names, name)
+			}
+		}
+		out.SortBy = names
+	}
+	if p.TimeColumnID != nil {
+		out.TimeColumn = columnName(cols, *p.TimeColumnID)
+	}
+	return out
 }
 
-type typeEntry struct {
-	id   sql.TypeID
-	spec schema.TypeSpec
+func columnName(cols []catalog.Column, id catalog.ColumnID) string {
+	for i := range cols {
+		if cols[i].ColumnID == id {
+			return cols[i].Name
+		}
+	}
+	return ""
 }
 
-type tableEntry struct {
-	id   sql.TableID
-	spec schema.TableSpec
+// codecForColumn returns the configured Encoding for a column, or EncInvalid if none.
+func codecForColumn(p catalog.StoragePolicy, id catalog.ColumnID) schema.Encoding {
+	for _, cc := range p.ColumnCodecs {
+		if cc.ColumnID != id {
+			continue
+		}
+		if v, ok := schema.ParseEncodingStrict(cc.Codec); ok {
+			return v
+		}
+	}
+	return schema.EncInvalid
 }
 
-func loadCatalog(root string) (typesByName map[string]typeEntry, tablesByName map[string]tableEntry, version sql.SchemaVersion, err error) {
-	typesByName = make(map[string]typeEntry)
-	tablesByName = make(map[string]tableEntry)
-	path := filepath.Join(root, catalogFile)
-	data, readErr := os.ReadFile(path)
-	if os.IsNotExist(readErr) {
-		return typesByName, tablesByName, 0, nil
+// buildTable converts a binder-side schema.TableSpec into a persisted catalog.Table,
+// allocating stable column IDs from the per-table next_column_id. The catalog file is
+// not yet aware of the new table; the caller commits it under registerTable.
+func buildTable(file *catalog.File, spec schema.TableSpec, gen catalog.Generation) (catalog.Table, error) {
+	tab := catalog.Table{
+		TableID:             file.NextTableID,
+		Name:                spec.Name,
+		SchemaVersion:       1,
+		NextColumnID:        1,
+		CreatedAtGeneration: gen,
+		UpdatedAtGeneration: gen,
+		Columns:             make([]catalog.Column, 0, len(spec.Columns)),
+		PrimaryKey:          []catalog.ColumnID{},
+		Constraints:         []catalog.Constraint{},
+		Indexes:             []catalog.Index{},
 	}
-	if readErr != nil {
-		return nil, nil, 0, readErr
+	codecs := []catalog.ColumnCodec{}
+	colByName := make(map[string]catalog.ColumnID, len(spec.Columns))
+	for i, col := range spec.Columns {
+		typeStr, err := schema.TypeString(col.Type)
+		if err != nil {
+			return catalog.Table{}, fmt.Errorf("column %q: %w", col.Name, err)
+		}
+		id := tab.NextColumnID
+		tab.NextColumnID++
+		tab.Columns = append(tab.Columns, catalog.Column{
+			ColumnID:          id,
+			Name:              col.Name,
+			Type:              typeStr,
+			Nullable:          col.Nullable,
+			Ordinal:           i,
+			AddedAtGeneration: gen,
+		})
+		colByName[col.Name] = id
+		if col.Codec != schema.EncInvalid {
+			codecs = append(codecs, catalog.ColumnCodec{ColumnID: id, Codec: col.Codec.String()})
+		}
 	}
-	var shape catalogFileShape
-	if err := json.Unmarshal(data, &shape); err != nil {
-		return nil, nil, 0, fmt.Errorf("catalog: parse %s: %w", path, err)
-	}
-	for _, rec := range shape.Types {
-		typesByName[schema.NormalizeName(rec.Spec.Name)] = typeEntry{id: rec.ID, spec: rec.Spec}
-	}
-	for _, rec := range shape.Tables {
-		tablesByName[schema.NormalizeName(rec.Spec.Name)] = tableEntry{id: rec.ID, spec: rec.Spec}
-	}
-	return typesByName, tablesByName, sql.SchemaVersion(shape.Version), nil
-}
 
-func saveCatalog(root string, typesByName map[string]typeEntry, tablesByName map[string]tableEntry, version sql.SchemaVersion) error {
-	shape := catalogFileShape{Version: uint64(version)}
-	for _, e := range typesByName {
-		shape.Types = append(shape.Types, typeRecord{ID: e.id, Spec: e.spec})
+	policy := catalog.StoragePolicy{
+		Storage:      spec.Options.Storage.String(),
+		Profile:      spec.Options.Profile.String(),
+		Compression:  spec.Options.Compression.String(),
+		SortBy:       []catalog.ColumnID{},
+		ColumnCodecs: codecs,
 	}
-	for _, e := range tablesByName {
-		shape.Tables = append(shape.Tables, tableRecord{ID: e.id, Spec: e.spec})
+	if spec.Options.SegmentRows.Auto {
+		policy.SegmentRows = catalog.SegmentRows{Mode: "auto"}
+	} else if spec.Options.SegmentRows.Rows > 0 {
+		policy.SegmentRows = catalog.SegmentRows{Mode: "fixed", Rows: spec.Options.SegmentRows.Rows}
+	} else {
+		policy.SegmentRows = catalog.SegmentRows{Mode: "auto"}
 	}
-	data, err := json.MarshalIndent(shape, "", "  ")
-	if err != nil {
-		return err
+	for _, name := range spec.Options.SortBy {
+		id, ok := colByName[schema.NormalizeName(name)]
+		if !ok {
+			return catalog.Table{}, fmt.Errorf("sort_by references unknown column %q", name)
+		}
+		policy.SortBy = append(policy.SortBy, id)
 	}
-	target := filepath.Join(root, catalogFile)
-	tmp := target + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
+	if spec.Options.TimeColumn != "" {
+		id, ok := colByName[schema.NormalizeName(spec.Options.TimeColumn)]
+		if !ok {
+			return catalog.Table{}, fmt.Errorf("time_column references unknown column %q", spec.Options.TimeColumn)
+		}
+		policy.TimeColumnID = &id
 	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, target); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	// Without a parent dir fsync the rename can be lost on POSIX after a crash.
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	d, err := os.Open(root)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	tab.StoragePolicy = policy
+	return tab, nil
 }

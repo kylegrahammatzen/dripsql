@@ -1,0 +1,73 @@
+{
+  "format_version": 2,
+  "generation": 1,
+  "next_table_id": 2,
+  "next_type_id": 1,
+  "types": [],
+  "tables": [
+    {
+      "table_id": 1,
+      "name": "users",
+      "schema_version": 1,
+      "next_column_id": 6,
+      "created_at_generation": 1,
+      "updated_at_generation": 1,
+      "columns": [
+        {
+          "column_id": 1,
+          "name": "id",
+          "type": "int64",
+          "nullable": false,
+          "ordinal": 0,
+          "added_at_generation": 1
+        },
+        {
+          "column_id": 2,
+          "name": "name",
+          "type": "text",
+          "nullable": false,
+          "ordinal": 1,
+          "added_at_generation": 1
+        },
+        {
+          "column_id": 3,
+          "name": "age",
+          "type": "int64",
+          "nullable": false,
+          "ordinal": 2,
+          "added_at_generation": 1
+        },
+        {
+          "column_id": 4,
+          "name": "category",
+          "type": "text",
+          "nullable": false,
+          "ordinal": 3,
+          "added_at_generation": 1
+        },
+        {
+          "column_id": 5,
+          "name": "price",
+          "type": "float64",
+          "nullable": false,
+          "ordinal": 4,
+          "added_at_generation": 1
+        }
+      ],
+      "primary_key": [],
+      "constraints": [],
+      "indexes": [],
+      "storage_policy": {
+        "storage": "default",
+        "profile": "default",
+        "segment_rows": {
+          "mode": "auto"
+        },
+        "sort_by": [],
+        "compression": "default",
+        "time_column_id": null,
+        "column_codecs": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "types": null,
+  "tables": [
+    {
+      "id": 1,
+      "spec": {
+        "Name": "users",
+        "IfNotExists": false,
+        "Columns": [
+          {
+            "Name": "id",
+            "Type": {
+              "Kind": 4,
+              "Name": ""
+            },
+            "Nullable": false,
+            "Codec": 0
+          },
+          {
+            "Name": "name",
+            "Type": {
+              "Kind": 8,
+              "Name": ""
+            },
+            "Nullable": false,
+            "Codec": 0
+          },
+          {
+            "Name": "age",
+            "Type": {
+              "Kind": 4,
+              "Name": ""
+            },
+            "Nullable": false,
+            "Codec": 0
+          },
+          {
+            "Name": "category",
+            "Type": {
+              "Kind": 8,
+              "Name": ""
+            },
+            "Nullable": false,
+            "Codec": 0
+          },
+          {
+            "Name": "price",
+            "Type": {
+              "Kind": 6,
+              "Name": ""
+            },
+            "Nullable": false,
+            "Codec": 0
+          }
+        ],
+        "Options": {
+          "Storage": 0,
+          "Profile": 0,
+          "SegmentRows": {
+            "Auto": false,
+            "Rows": 0
+          },
+          "SortBy": null,
+          "Compression": 0,
+          "TimeColumn": ""
+        }
+      }
+    }
+  ]
+}

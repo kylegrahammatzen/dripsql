@@ -21,6 +21,7 @@ type TypeDef struct {
 
 type BoundColumnDef struct {
 	ID       ColumnID
+	Ordinal  int
 	Name     string
 	Type     schema.Type
 	Labels   []string
@@ -210,8 +211,9 @@ type Plan struct {
 	Inner   *Plan
 	Analyze bool
 
-	TypeSpec  schema.TypeSpec
-	TableSpec schema.TableSpec
+	TypeSpec    schema.TypeSpec
+	TableSpec   schema.TableSpec
+	IfNotExists bool
 
 	Table       BoundTableDef
 	Values      InsertValues

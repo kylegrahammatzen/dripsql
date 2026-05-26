@@ -1,0 +1,81 @@
+{
+  "format_version": 2,
+  "generation": 2,
+  "next_table_id": 3,
+  "next_type_id": 1,
+  "types": [],
+  "tables": [
+    {
+      "table_id": 1,
+      "name": "events",
+      "schema_version": 1,
+      "next_column_id": 2,
+      "created_at_generation": 2,
+      "updated_at_generation": 2,
+      "columns": [
+        {
+          "column_id": 1,
+          "name": "id",
+          "type": "int64",
+          "nullable": false,
+          "ordinal": 0,
+          "added_at_generation": 2
+        }
+      ],
+      "primary_key": [],
+      "constraints": [],
+      "indexes": [],
+      "storage_policy": {
+        "storage": "default",
+        "profile": "default",
+        "segment_rows": {
+          "mode": "auto"
+        },
+        "sort_by": [],
+        "compression": "default",
+        "time_column_id": null,
+        "column_codecs": []
+      }
+    },
+    {
+      "table_id": 2,
+      "name": "events1",
+      "schema_version": 1,
+      "next_column_id": 3,
+      "created_at_generation": 2,
+      "updated_at_generation": 2,
+      "columns": [
+        {
+          "column_id": 1,
+          "name": "id",
+          "type": "int64",
+          "nullable": false,
+          "ordinal": 0,
+          "added_at_generation": 2
+        },
+        {
+          "column_id": 2,
+          "name": "kind",
+          "type": "text",
+          "nullable": false,
+          "ordinal": 1,
+          "added_at_generation": 2
+        }
+      ],
+      "primary_key": [],
+      "constraints": [],
+      "indexes": [],
+      "storage_policy": {
+        "storage": "default",
+        "profile": "default",
+        "segment_rows": {
+          "mode": "auto"
+        },
+        "sort_by": [],
+        "compression": "default",
+        "time_column_id": null,
+        "column_codecs": []
+      }
+    }
+  ]
+}

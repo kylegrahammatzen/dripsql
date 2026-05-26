@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/kylegrahammatzen/dripsql/internal/catalog"
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
@@ -29,8 +30,9 @@ var (
 type DB struct {
 	root          string
 	mu            sync.Mutex
-	types         map[string]typeEntry
-	tables        map[string]tableEntry
+	catalog       *catalog.File
+	types         map[string]*catalog.Type
+	tables        map[string]*catalog.Table
 	version       sql.SchemaVersion
 	plans         *sql.PlanCache
 	manifests     map[string]*storage.Manifest
@@ -124,15 +126,16 @@ func Open(path string) (*DB, error) {
 	if err := os.MkdirAll(filepath.Join(path, "segments"), 0o755); err != nil {
 		return nil, err
 	}
-	typesByName, tablesByName, version, err := loadCatalog(path)
+	file, err := catalog.Load(path)
 	if err != nil {
 		return nil, err
 	}
 	db := &DB{
 		root:         path,
-		types:        typesByName,
-		tables:       tablesByName,
-		version:      version,
+		catalog:      file,
+		types:        indexTypes(file),
+		tables:       indexTables(file),
+		version:      sql.SchemaVersion(file.Generation),
 		plans:        sql.NewPlanCache(256),
 		manifests:    make(map[string]*storage.Manifest),
 		segCount:     make(map[string]uint64),
@@ -140,7 +143,7 @@ func Open(path string) (*DB, error) {
 	}
 	db.segments = newSegmentCache(db.segCacheLimit)
 	var maxCommitTs uint64
-	for name := range tablesByName {
+	for name := range db.tables {
 		m, err := db.manifestFor(name)
 		if err != nil {
 			db.Close()
@@ -225,10 +228,10 @@ func (db *DB) nextSegmentPath(name string) string {
 	return filepath.Join(db.tableDir(key), fmt.Sprintf("%06d.dsv4", id))
 }
 
-func (db *DB) table(name string) (tableEntry, error) {
+func (db *DB) table(name string) (*catalog.Table, error) {
 	entry, ok := db.tables[schema.NormalizeName(name)]
 	if !ok {
-		return tableEntry{}, fmt.Errorf("table %q does not exist", name)
+		return nil, fmt.Errorf("table %q does not exist", name)
 	}
 	return entry, nil
 }
@@ -246,7 +249,7 @@ func (db *DB) Tables() []string {
 	defer db.mu.Unlock()
 	out := make([]string, 0, len(db.tables))
 	for _, e := range db.tables {
-		out = append(out, e.spec.Name)
+		out = append(out, e.Name)
 	}
 	sort.Strings(out)
 	return out
@@ -261,9 +264,12 @@ func (db *DB) TableSchema(name string) ([]ColumnInfo, error) {
 	if !ok {
 		return nil, fmt.Errorf("table %q does not exist", name)
 	}
-	out := make([]ColumnInfo, len(entry.spec.Columns))
-	for i, c := range entry.spec.Columns {
-		out[i] = ColumnInfo{Name: c.Name, Type: c.Type.String(), Nullable: c.Nullable}
+	out := make([]ColumnInfo, 0, len(entry.Columns))
+	for _, c := range entry.Columns {
+		if c.DroppedAtGeneration != nil {
+			continue
+		}
+		out = append(out, ColumnInfo{Name: c.Name, Type: c.Type, Nullable: c.Nullable})
 	}
 	return out, nil
 }
@@ -282,30 +288,38 @@ func columnCodecs(def sql.BoundTableDef) map[string]schema.Encoding {
 	return out
 }
 
-func (db *DB) boundTable(entry tableEntry) sql.BoundTableDef {
-	cols := make([]sql.BoundColumnDef, len(entry.spec.Columns))
-	for i, col := range entry.spec.Columns {
+func (db *DB) boundTable(entry *catalog.Table) sql.BoundTableDef {
+	cols := make([]sql.BoundColumnDef, 0, len(entry.Columns))
+	for _, col := range entry.Columns {
+		if col.DroppedAtGeneration != nil {
+			continue
+		}
+		t, err := schema.ParseType(col.Type)
+		if err != nil {
+			continue
+		}
 		var labels []string
-		if col.Type.Kind == schema.KindNamed {
-			if t, ok := db.types[schema.NormalizeName(col.Type.Name)]; ok {
-				labels = append([]string(nil), t.spec.EnumLabels...)
+		if t.Kind == schema.KindNamed {
+			if tt, ok := db.types[schema.NormalizeName(t.Name)]; ok {
+				labels = append([]string(nil), tt.Labels...)
 			}
 		}
-		cols[i] = sql.BoundColumnDef{
-			ID:       sql.ColumnID(i + 1),
+		cols = append(cols, sql.BoundColumnDef{
+			ID:       sql.ColumnID(col.ColumnID),
+			Ordinal:  col.Ordinal,
 			Name:     col.Name,
-			Type:     col.Type,
+			Type:     t,
 			Nullable: col.Nullable,
 			Labels:   labels,
-			Codec:    col.Codec,
-		}
+			Codec:    codecForColumn(entry.StoragePolicy, col.ColumnID),
+		})
 	}
 	return sql.BoundTableDef{
-		ID:      entry.id,
-		Name:    entry.spec.Name,
+		ID:      sql.TableID(entry.TableID),
+		Name:    entry.Name,
 		Columns: cols,
-		Options: entry.spec.Options,
-		Path:    db.tableDir(entry.spec.Name),
+		Options: optionsFromPolicy(entry.StoragePolicy, entry.Columns),
+		Path:    db.tableDir(entry.Name),
 		Version: db.version,
 	}
 }
@@ -318,45 +332,75 @@ func (db *DB) boundTableByName(name string) (sql.BoundTableDef, error) {
 	return db.boundTable(entry), nil
 }
 
-func (db *DB) registerType(spec schema.TypeSpec) error {
+func (db *DB) registerType(spec schema.TypeSpec, ifNotExists bool) error {
 	key := schema.NormalizeName(spec.Name)
 	if _, ok := db.types[key]; ok {
-		if spec.IfNotExists {
+		if ifNotExists {
 			return nil
 		}
 		return fmt.Errorf("type %q already exists", spec.Name)
 	}
-	id := sql.TypeID(len(db.types) + 1)
-	db.types[key] = typeEntry{id: id, spec: spec}
-	db.version++
-	if err := saveCatalog(db.root, db.types, db.tables, db.version); err != nil {
+	newGen := db.catalog.Generation + 1
+	newType := catalog.Type{
+		TypeID:              db.catalog.NextTypeID,
+		Name:                spec.Name,
+		Kind:                "enum",
+		Labels:              append([]string{}, spec.EnumLabels...),
+		CreatedAtGeneration: newGen,
+		UpdatedAtGeneration: newGen,
+	}
+	db.catalog.Types = append(db.catalog.Types, newType)
+	db.catalog.NextTypeID++
+	db.catalog.Generation = newGen
+	db.types[key] = &db.catalog.Types[len(db.catalog.Types)-1]
+	db.version = sql.SchemaVersion(newGen)
+	if err := catalog.Save(db.root, db.catalog); err != nil {
+		db.catalog.Types = db.catalog.Types[:len(db.catalog.Types)-1]
+		db.catalog.NextTypeID--
+		db.catalog.Generation--
 		delete(db.types, key)
-		db.version--
+		db.types = indexTypes(db.catalog)
+		db.version = sql.SchemaVersion(db.catalog.Generation)
 		return err
 	}
 	return nil
 }
 
-func (db *DB) registerTable(spec schema.TableSpec) error {
+func (db *DB) registerTable(spec schema.TableSpec, ifNotExists bool) error {
 	key := schema.NormalizeName(spec.Name)
 	if _, ok := db.tables[key]; ok {
-		if spec.IfNotExists {
+		if ifNotExists {
 			return nil
 		}
 		return fmt.Errorf("table %q already exists", spec.Name)
 	}
-	id := sql.TableID(len(db.tables) + 1)
-	db.tables[key] = tableEntry{id: id, spec: spec}
-	db.version++
-	if err := saveCatalog(db.root, db.types, db.tables, db.version); err != nil {
+	newGen := db.catalog.Generation + 1
+	tab, err := buildTable(db.catalog, spec, newGen)
+	if err != nil {
+		return err
+	}
+	db.catalog.Tables = append(db.catalog.Tables, tab)
+	db.catalog.NextTableID++
+	db.catalog.Generation = newGen
+	db.tables[key] = &db.catalog.Tables[len(db.catalog.Tables)-1]
+	db.version = sql.SchemaVersion(newGen)
+	if err := catalog.Save(db.root, db.catalog); err != nil {
+		db.catalog.Tables = db.catalog.Tables[:len(db.catalog.Tables)-1]
+		db.catalog.NextTableID--
+		db.catalog.Generation--
 		delete(db.tables, key)
-		db.version--
+		db.tables = indexTables(db.catalog)
+		db.version = sql.SchemaVersion(db.catalog.Generation)
 		return err
 	}
 	if _, err := db.manifestFor(spec.Name); err != nil {
+		db.catalog.Tables = db.catalog.Tables[:len(db.catalog.Tables)-1]
+		db.catalog.NextTableID--
+		db.catalog.Generation--
 		delete(db.tables, key)
-		db.version--
-		_ = saveCatalog(db.root, db.types, db.tables, db.version)
+		db.tables = indexTables(db.catalog)
+		db.version = sql.SchemaVersion(db.catalog.Generation)
+		_ = catalog.Save(db.root, db.catalog)
 		return err
 	}
 	return nil
@@ -422,7 +466,7 @@ func (db *DB) execStmt(ctx context.Context, stmt sql.Stmt, args []any) (int64, e
 		if err := spec.Validate(); err != nil {
 			return 0, err
 		}
-		return 0, db.registerType(spec)
+		return 0, db.registerType(spec, plan.IfNotExists)
 	case sql.PlanCreateTable:
 		spec := plan.TableSpec
 		if err := db.resolveTableTypes(&spec); err != nil {
@@ -431,7 +475,7 @@ func (db *DB) execStmt(ctx context.Context, stmt sql.Stmt, args []any) (int64, e
 		if err := spec.Validate(); err != nil {
 			return 0, err
 		}
-		return 0, db.registerTable(spec)
+		return 0, db.registerTable(spec, plan.IfNotExists)
 	case sql.PlanInsert:
 		return db.insert(ctx, plan, db.commitManifestTxn)
 	case sql.PlanDelete:
