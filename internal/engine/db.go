@@ -435,8 +435,14 @@ func (db *DB) alterTable(p *sql.AlterPayload) error {
 
 // Any cast not in this set requires a segment rewrite and is rejected up front.
 var wideningCasts = map[[2]schema.Kind]struct{}{
+	{schema.KindInt16, schema.KindInt32}:     {},
+	{schema.KindInt16, schema.KindInt64}:     {},
 	{schema.KindInt32, schema.KindInt64}:     {},
 	{schema.KindFloat32, schema.KindFloat64}: {},
+	{schema.KindInt16, schema.KindFloat32}:   {},
+	{schema.KindInt16, schema.KindFloat64}:   {},
+	{schema.KindInt32, schema.KindFloat64}:   {},
+	{schema.KindInt64, schema.KindFloat64}:   {},
 }
 
 func (db *DB) renameColumn(tab *catalog.Table, p *sql.AlterPayload) error {

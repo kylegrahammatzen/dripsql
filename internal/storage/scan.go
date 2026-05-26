@@ -335,27 +335,61 @@ func widenVec(src vector.Vec, dst vector.VecKind) (vector.Vec, error) {
 	if src.Kind == dst {
 		return src, nil
 	}
+	out := vector.NewVec(dst, int(src.Len))
+	out.Valid = src.Valid
 	switch {
+	case src.Kind == vector.VecInt16 && dst == vector.VecInt32:
+		sb := src.I16()
+		db := out.I32()
+		for i := range sb {
+			db[i] = int32(sb[i])
+		}
+	case src.Kind == vector.VecInt16 && dst == vector.VecInt64:
+		sb := src.I16()
+		db := out.I64()
+		for i := range sb {
+			db[i] = int64(sb[i])
+		}
 	case src.Kind == vector.VecInt32 && dst == vector.VecInt64:
-		out := vector.NewVec(vector.VecInt64, int(src.Len))
-		out.Valid = src.Valid
 		sb := src.I32()
 		db := out.I64()
 		for i := range sb {
 			db[i] = int64(sb[i])
 		}
-		return out, nil
+	case src.Kind == vector.VecInt16 && dst == vector.VecFloat32:
+		sb := src.I16()
+		db := out.F32()
+		for i := range sb {
+			db[i] = float32(sb[i])
+		}
+	case src.Kind == vector.VecInt16 && dst == vector.VecFloat64:
+		sb := src.I16()
+		db := out.F64()
+		for i := range sb {
+			db[i] = float64(sb[i])
+		}
+	case src.Kind == vector.VecInt32 && dst == vector.VecFloat64:
+		sb := src.I32()
+		db := out.F64()
+		for i := range sb {
+			db[i] = float64(sb[i])
+		}
+	case src.Kind == vector.VecInt64 && dst == vector.VecFloat64:
+		sb := src.I64()
+		db := out.F64()
+		for i := range sb {
+			db[i] = float64(sb[i])
+		}
 	case src.Kind == vector.VecFloat32 && dst == vector.VecFloat64:
-		out := vector.NewVec(vector.VecFloat64, int(src.Len))
-		out.Valid = src.Valid
 		sb := src.F32()
 		db := out.F64()
 		for i := range sb {
 			db[i] = float64(sb[i])
 		}
-		return out, nil
+	default:
+		return vector.Vec{}, fmt.Errorf("widenVec: unsupported %v -> %v", src.Kind, dst)
 	}
-	return vector.Vec{}, fmt.Errorf("widenVec: unsupported %v -> %v", src.Kind, dst)
+	return out, nil
 }
 
 func decodeSynthDefaults(decode []string, projNames []string, projDefaults []ScanDefault) []ScanDefault {
