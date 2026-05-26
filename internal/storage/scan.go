@@ -97,14 +97,14 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 		if opts.Pred != nil {
 			predIDs = opts.Pred.ColumnIDs()
 		}
-		decodeIdx, projIdx, err := resolveSegmentColumns(seg, decode, projection, decodeIDs(decode, opts.Columns, opts.ColumnIDs, predCols, predIDs))
 		synthKinds := decodeSynthKinds(decode, opts.Columns, opts.ColumnKinds)
 		synthDefaults := decodeSynthDefaults(decode, opts.Columns, opts.ColumnDefaults)
+		decodeIdx, projIdx, err := resolveSegmentColumns(seg, decode, projection, decodeIDs(decode, opts.Columns, opts.ColumnIDs, predCols, predIDs), synthKinds)
 		if err != nil {
 			return fmt.Errorf("Scan: %w", err)
 		}
 		if compiled != nil {
-			if predSkipsOnSyntheticNulls(opts.Pred, seg, opts.Columns, opts.ColumnIDs, opts.ColumnDefaults) {
+			if predTruthOnSyntheticNulls(*opts.Pred, seg, opts.Columns, opts.ColumnIDs, opts.ColumnDefaults) == predAlwaysFalse {
 				continue
 			}
 			seg.LoadPageStats()
@@ -114,7 +114,17 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 		}
 		var pageMask []bool
 		if topKPages != nil {
-			pageCount := len(seg.Cols[decodeIdx[0]].Pages)
+			anchor := -1
+			for _, ci := range decodeIdx {
+				if ci >= 0 {
+					anchor = ci
+					break
+				}
+			}
+			if anchor < 0 {
+				anchor = 0
+			}
+			pageCount := len(seg.Cols[anchor].Pages)
 			pageMask = make([]bool, pageCount)
 			for pi := range pageCount {
 				pageMask[pi] = topKPages[[2]int{si, pi}]
@@ -281,36 +291,85 @@ func decodeIDs(decode []string, projNames []string, projIDs []uint64, predNames 
 	return out
 }
 
-// A comparison leaf on a missing column with no non-null default cannot match because the synthesised vector is all-null and comparisons against NULL are never true.
-func predSkipsOnSyntheticNulls(p *Pred, seg *Segment, projNames []string, projIDs []uint64, projDefaults []ScanDefault) bool {
-	if p == nil || seg.TableID == 0 {
-		return false
-	}
+type predTruth uint8
+
+const (
+	predUnknown predTruth = iota
+	predAlwaysFalse
+	predAlwaysTrue
+)
+
+// Three-valued evaluation of a predicate against the synthetic vectors that absent
+// columns would produce in this segment. AND/OR/NOT compose, and any leaf touching a
+// column the segment actually has stays Unknown so the normal stats path still runs.
+func predTruthOnSyntheticNulls(p Pred, seg *Segment, projNames []string, projIDs []uint64, projDefaults []ScanDefault) predTruth {
 	switch p.Op {
-	case OpEq, OpNe, OpLt, OpLe, OpGt, OpGe:
-	default:
-		return false
+	case OpAnd:
+		result := predAlwaysTrue
+		for _, c := range p.Children {
+			switch predTruthOnSyntheticNulls(c, seg, projNames, projIDs, projDefaults) {
+			case predAlwaysFalse:
+				return predAlwaysFalse
+			case predUnknown:
+				result = predUnknown
+			}
+		}
+		return result
+	case OpOr:
+		result := predAlwaysFalse
+		for _, c := range p.Children {
+			switch predTruthOnSyntheticNulls(c, seg, projNames, projIDs, projDefaults) {
+			case predAlwaysTrue:
+				return predAlwaysTrue
+			case predUnknown:
+				result = predUnknown
+			}
+		}
+		return result
+	case OpNot:
+		if len(p.Children) != 1 {
+			return predUnknown
+		}
+		switch predTruthOnSyntheticNulls(p.Children[0], seg, projNames, projIDs, projDefaults) {
+		case predAlwaysFalse:
+			return predAlwaysTrue
+		case predAlwaysTrue:
+			return predAlwaysFalse
+		}
+		return predUnknown
 	}
-	if p.ColID == 0 {
-		return false
+	if seg.TableID == 0 || p.ColID == 0 {
+		return predUnknown
 	}
 	for _, c := range seg.Cols {
 		if c.ColumnID == p.ColID {
-			return false
+			return predUnknown
 		}
 	}
+	nullDefault := true
 	if len(projIDs) == len(projNames) && len(projDefaults) == len(projNames) {
 		for i, id := range projIDs {
 			if id != p.ColID {
 				continue
 			}
 			if projDefaults[i].Set && !projDefaults[i].Null {
-				return false
+				nullDefault = false
 			}
 			break
 		}
 	}
-	return true
+	switch p.Op {
+	case OpIsNull:
+		if nullDefault {
+			return predAlwaysTrue
+		}
+		return predAlwaysFalse
+	case OpEq, OpNe, OpLt, OpLe, OpGt, OpGe:
+		if nullDefault {
+			return predAlwaysFalse
+		}
+	}
+	return predUnknown
 }
 
 func fillSyntheticVec(kind vector.VecKind, rows int, def ScanDefault) vector.Vec {
@@ -457,8 +516,9 @@ func decodeSynthKinds(decode []string, projNames []string, projKinds []vector.Ve
 	return out
 }
 
-func resolveSegmentColumns(seg *Segment, decode, projection []string, decodeIDs []uint64) (decodeIdx, projIdx []int, err error) {
+func resolveSegmentColumns(seg *Segment, decode, projection []string, decodeIDs []uint64, synthKinds []vector.VecKind) (decodeIdx, projIdx []int, err error) {
 	useID := seg.TableID != 0 && len(decodeIDs) == len(decode)
+	canSynth := len(synthKinds) == len(decode)
 	decodeIdx = make([]int, len(decode))
 	for i, name := range decode {
 		found := -1
@@ -477,6 +537,10 @@ func resolveSegmentColumns(seg *Segment, decode, projection []string, decodeIDs 
 				}
 			}
 			if found < 0 {
+				if canSynth && synthKinds[i] != 0 {
+					decodeIdx[i] = -1
+					continue
+				}
 				return nil, nil, fmt.Errorf("column %q missing in segment", name)
 			}
 		}

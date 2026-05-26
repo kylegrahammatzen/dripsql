@@ -63,7 +63,8 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		}
 		halfDeleted := seg.DV != nil && liveCount*2 <= rows
 		hasDroppedColumn := segmentHasInactiveColumn(seg, activeIDs)
-		if !halfDeleted && !hasDroppedColumn {
+		isLegacy := seg.TableID == 0
+		if !halfDeleted && !hasDroppedColumn && !isLegacy {
 			continue
 		}
 		liveBatch, err := readSegmentLiveRows(seg, def)
