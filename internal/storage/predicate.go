@@ -591,9 +591,20 @@ func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.Selecti
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
 	enc, ok := schema.EncodingFromWire(page.Encoding)
-	if !ok || enc != schema.EncodingDictionary {
+	if !ok {
 		return false, scratch, nil
 	}
+	switch enc {
+	case schema.EncodingDictionary:
+		return evalEncodedDictEq(seg, colIdx, pageIdx, sel, scratch, b.value)
+	case schema.EncodingFSST:
+		return evalEncodedFSSTEq(seg, colIdx, pageIdx, sel, scratch, b.value)
+	}
+	return false, scratch, nil
+}
+
+func evalEncodedDictEq(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target []byte) (bool, []byte, error) {
+	page := seg.Cols[colIdx].Pages[pageIdx]
 	rows := int(page.Rows)
 	ensureMaskSize(sel, rows)
 	if page.Flags&PageFlagAllNull != 0 {
@@ -606,7 +617,7 @@ func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.Selecti
 	if allNull {
 		return true, newScratch, nil
 	}
-	code, indices, found, err := resolveDictCode(payload, rows, b.value)
+	code, indices, found, err := resolveDictCode(payload, rows, target)
 	if err != nil {
 		return false, newScratch, err
 	}
@@ -614,6 +625,52 @@ func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.Selecti
 		return true, newScratch, nil
 	}
 	narrowDictEq(indices, code, valid, sel)
+	return true, newScratch, nil
+}
+
+// evalEncodedFSSTEq encodes target against the page symbol table once and byte-compares each row.
+// FSST encoding is deterministic against a fixed symbol table so equality requires no decode.
+func evalEncodedFSSTEq(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target []byte) (bool, []byte, error) {
+	page := seg.Cols[colIdx].Pages[pageIdx]
+	rows := int(page.Rows)
+	ensureMaskSize(sel, rows)
+	if page.Flags&PageFlagAllNull != 0 {
+		return true, scratch, nil
+	}
+	payload, valid, allNull, newScratch, err := seg.ReadPagePayload(colIdx, pageIdx, scratch)
+	if err != nil {
+		return false, newScratch, err
+	}
+	if allNull {
+		return true, newScratch, nil
+	}
+	symbols, rowsOff, encRows, err := codec.ParseFSSTHeader(payload)
+	if err != nil {
+		return false, newScratch, err
+	}
+	if encRows != rows {
+		return false, newScratch, fmt.Errorf("EvalEncoded FSST: row mismatch wire=%d want=%d", encRows, rows)
+	}
+	encodedLit := codec.EncodeFSSTLiteral(symbols, target)
+	sel.Clear()
+	pos := rowsOff
+	for i := range rows {
+		if pos+4 > len(payload) {
+			return false, newScratch, fmt.Errorf("EvalEncoded FSST: row %d length truncated", i)
+		}
+		encLen := int(binary.LittleEndian.Uint32(payload[pos : pos+4]))
+		pos += 4
+		if pos+encLen > len(payload) {
+			return false, newScratch, fmt.Errorf("EvalEncoded FSST: row %d payload truncated", i)
+		}
+		if encLen == len(encodedLit) && bytes.Equal(payload[pos:pos+encLen], encodedLit) {
+			sel.Set(i)
+		}
+		pos += encLen
+	}
+	if valid != nil {
+		applyValidity(valid, sel, rows)
+	}
 	return true, newScratch, nil
 }
 

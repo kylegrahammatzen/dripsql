@@ -261,6 +261,43 @@ func (c *fsstCoder) encode(in []byte) []byte {
 	return out
 }
 
+// ParseFSSTHeader extracts the symbol table and the offset of the encoded-rows section.
+// Callers use this to encode a comparison literal once before scanning row payloads.
+func ParseFSSTHeader(payload []byte) (symbols [][]byte, rowsOff int, rowCount int, err error) {
+	if len(payload) < fsstMagicLen+1 {
+		return nil, 0, 0, fmt.Errorf("fsst: header truncated")
+	}
+	if string(payload[:fsstMagicLen]) != string(fsstMagic) {
+		return nil, 0, 0, fmt.Errorf("fsst: bad magic")
+	}
+	pos := fsstMagicLen
+	nsyms := int(payload[pos])
+	pos++
+	symbols = make([][]byte, nsyms)
+	for i := range nsyms {
+		if pos+1 > len(payload) {
+			return nil, 0, 0, fmt.Errorf("fsst: symbol header truncated at %d", i)
+		}
+		sl := int(payload[pos])
+		pos++
+		if pos+sl > len(payload) {
+			return nil, 0, 0, fmt.Errorf("fsst: symbol %d body truncated", i)
+		}
+		symbols[i] = payload[pos : pos+sl]
+		pos += sl
+	}
+	if pos+4 > len(payload) {
+		return nil, 0, 0, fmt.Errorf("fsst: rows header truncated")
+	}
+	rowCount = int(binary.LittleEndian.Uint32(payload[pos : pos+4]))
+	return symbols, pos + 4, rowCount, nil
+}
+
+// EncodeFSSTLiteral encodes literal against the page symbol table; result aliases the coder buffer.
+func EncodeFSSTLiteral(symbols [][]byte, literal []byte) []byte {
+	return newFSSTCoder(symbols).encode(literal)
+}
+
 func bytesEqual(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false
