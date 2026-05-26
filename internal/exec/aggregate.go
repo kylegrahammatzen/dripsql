@@ -261,6 +261,13 @@ func (a *AggregateOp) updateRow(g *aggGroup, batch vector.Batch, specCols []aggC
 
 func (a *AggregateOp) aggregateBatchNoGroup(batch vector.Batch, specCols []aggCol) error {
 	g := &a.groups[0]
+	if a.allCountStar() {
+		n := int64(batch.Sel.PopCount())
+		for i := range a.specs {
+			g.aggs[i].count += n
+		}
+		return nil
+	}
 	var loopErr error
 	batch.Sel.IterSet(func(row int) {
 		if loopErr != nil {
@@ -271,6 +278,16 @@ func (a *AggregateOp) aggregateBatchNoGroup(batch vector.Batch, specCols []aggCo
 		}
 	})
 	return loopErr
+}
+
+// allCountStar reports whether every spec is count(*) so the batch loop can sum PopCount directly.
+func (a *AggregateOp) allCountStar() bool {
+	for _, s := range a.specs {
+		if s.Func != sql.AggregateCount || !s.Star {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *AggregateOp) aggregateBatchIntKey(batch vector.Batch, col *vector.Column, vk vector.VecKind, specCols []aggCol, idx map[int64]int) error {
