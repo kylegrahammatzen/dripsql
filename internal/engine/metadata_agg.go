@@ -26,8 +26,11 @@ func (db *DB) tryMetadataAggregate(plan *sql.Plan) (*Rows, bool, error) {
 		return nil, false, nil
 	}
 	scan := agg.Inputs[0]
-	if scan.Op != sql.RelScan || scan.Where != nil {
+	if scan.Op != sql.RelScan {
 		return nil, false, nil
+	}
+	if scan.Where != nil {
+		return db.tryCountWithFilter(plan, rel, agg, scan)
 	}
 	segs, err := db.openSegmentsForQuery(scan.Table.Name)
 	if err != nil {
@@ -72,6 +75,93 @@ func (db *DB) tryMetadataAggregate(plan *sql.Plan) (*Rows, bool, error) {
 	}
 	rows := &Rows{Columns: planOutputNames(plan), Values: [][]any{row}}
 	return rows, true, nil
+}
+
+// tryCountWithFilter answers count(*) WHERE varbytes_col = literal by summing dict-hist entries.
+// Falls through to the operator path when the WHERE is not a single varbytes equality leaf or any segment lacks the dict-hist sidecar.
+func (db *DB) tryCountWithFilter(plan *sql.Plan, rel, agg, scan *sql.Rel) (*Rows, bool, error) {
+	if len(agg.GroupBy) != 0 || len(agg.Aggregates) != 1 {
+		return nil, false, nil
+	}
+	a := agg.Aggregates[0]
+	if a.Func != sql.AggregateCount || !a.Star {
+		return nil, false, nil
+	}
+	where := *scan.Where
+	col, lit, ok := singleEqLeaf(where)
+	if !ok {
+		return nil, false, nil
+	}
+	colDef, ok := scanColumnDefByName(scan, col)
+	if !ok {
+		return nil, false, nil
+	}
+	switch colDef.Type.Kind {
+	case schema.KindText, schema.KindBytes, schema.KindJSON:
+	default:
+		return nil, false, nil
+	}
+	segs, err := db.openSegmentsForQuery(scan.Table.Name)
+	if err != nil {
+		return nil, false, err
+	}
+	keyNorm := schema.NormalizeName(colDef.Name)
+	var total int64
+	for _, seg := range segs {
+		if seg.DV != nil {
+			return nil, false, nil
+		}
+		hists, err := seg.DictHistograms()
+		if err != nil || hists == nil {
+			return nil, false, nil
+		}
+		hist, ok := hists[keyNorm]
+		if !ok {
+			return nil, false, nil
+		}
+		total += int64(hist[lit])
+	}
+	key := a.Alias
+	if key == "" {
+		key = defaultAggOutputName(a.Func)
+	}
+	row := make([]any, len(rel.Outputs))
+	for i, o := range rel.Outputs {
+		if o.Expr.Op != sql.ExprColumn || o.Expr.Column != key {
+			return nil, false, nil
+		}
+		row[i] = total
+	}
+	rows := &Rows{Columns: planOutputNames(plan), Values: [][]any{row}}
+	return rows, true, nil
+}
+
+func singleEqLeaf(e sql.BoundExpr) (col string, lit string, ok bool) {
+	if e.Op != sql.ExprEqual || len(e.Args) != 2 {
+		return "", "", false
+	}
+	c, l := e.Args[0], e.Args[1]
+	if c.Op == sql.ExprLiteral && l.Op == sql.ExprColumn {
+		c, l = l, c
+	}
+	if c.Op != sql.ExprColumn || l.Op != sql.ExprLiteral {
+		return "", "", false
+	}
+	s, ok := l.Literal.(string)
+	if !ok {
+		return "", "", false
+	}
+	return c.Column, s, true
+}
+
+func scanColumnDefByName(scan *sql.Rel, name string) (sql.BoundColumnDef, bool) {
+	want := schema.NormalizeName(name)
+	for _, c := range scan.Table.Columns {
+		if schema.NormalizeName(c.Name) == want {
+			return c, true
+		}
+	}
+	return sql.BoundColumnDef{}, false
 }
 
 // All aggregates must be count() (Star or over a non-nullable column). Every segment
