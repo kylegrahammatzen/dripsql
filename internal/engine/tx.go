@@ -27,6 +27,15 @@ type tablePending struct {
 }
 
 func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
+	return db.beginTx(ctx, false)
+}
+
+// BeginReadTx pins a snapshot for read-only use and is permitted in read-only mode since it cannot stage writes.
+func (db *DB) BeginReadTx(ctx context.Context) (*Tx, error) {
+	return db.beginTx(ctx, true)
+}
+
+func (db *DB) beginTx(ctx context.Context, readOnly bool) (*Tx, error) {
 	ctx = ctxOrBackground(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -34,7 +43,7 @@ func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
 	if err := db.lockOpen(); err != nil {
 		return nil, err
 	}
-	if db.readOnly.Load() {
+	if !readOnly && db.readOnly.Load() {
 		db.mu.Unlock()
 		return nil, ErrReadOnly
 	}

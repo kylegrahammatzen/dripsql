@@ -96,6 +96,22 @@ func (db *DB) Update(ctx context.Context, fn func(*Tx) error) (err error) {
 	return fn(tx)
 }
 
+// View runs fn inside a read-only transaction whose snapshot is pinned for the call's lifetime and is permitted even when SetReadOnly is on.
+func (db *DB) View(ctx context.Context, fn func(*ReadTx) error) (err error) {
+	tx, err := db.e.BeginReadTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+		_ = tx.Rollback()
+	}()
+	return fn(&ReadTx{t: tx})
+}
+
 // QueryRow runs sql expecting exactly one result row and returns a single-shot scanner that errors on zero or multiple rows.
 func (db *DB) QueryRow(ctx context.Context, sql string, args ...any) *Row {
 	rows, err := db.Query(ctx, sql, args...)
@@ -286,3 +302,21 @@ func (tx *Tx) Commit() error { return tx.t.Commit() }
 
 // Rollback discards the transaction's writes and releases the writer lock and is safe to call after Commit as a no-op.
 func (tx *Tx) Rollback() error { return tx.t.Rollback() }
+
+// ReadTx is the read-only handle View passes to its callback so the type system rejects writes at compile time.
+type ReadTx struct{ t *engine.Tx }
+
+// Query runs a SELECT or EXPLAIN inside the read transaction and binds args the same way as DB.Query.
+func (rtx *ReadTx) Query(ctx context.Context, sql string, args ...any) (*Rows, error) {
+	rs, err := rtx.t.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	return newRows(rs), nil
+}
+
+// QueryRow runs sql inside the read transaction expecting exactly one result row.
+func (rtx *ReadTx) QueryRow(ctx context.Context, sql string, args ...any) *Row {
+	rows, err := rtx.Query(ctx, sql, args...)
+	return &Row{rows: rows, err: err}
+}

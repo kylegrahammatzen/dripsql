@@ -297,6 +297,36 @@ func TestTx_DoneAfterCommitOrRollback(t *testing.T) {
 	}
 }
 
+// View pins a snapshot, surfaces fn's error to the caller, and stays permitted when SetReadOnly is on since it cannot stage writes.
+func TestView_ReadsErrorAndReadOnly(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
+	mustExec(t, db, "INSERT INTO t (id) VALUES (1), (2), (3)")
+
+	var got int64
+	if err := db.View(ctx, func(rtx *ReadTx) error {
+		return rtx.QueryRow(ctx, "SELECT count(*) FROM t").Scan(&got)
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+	if got != 3 {
+		t.Errorf("count = %d, want 3", got)
+	}
+
+	wantErr := fmt.Errorf("read failure")
+	if err := db.View(ctx, func(rtx *ReadTx) error { return wantErr }); err != wantErr {
+		t.Fatalf("View error propagation: %v, want %v", err, wantErr)
+	}
+
+	db.SetReadOnly(true)
+	if err := db.View(ctx, func(rtx *ReadTx) error {
+		return rtx.QueryRow(ctx, "SELECT count(*) FROM t").Scan(&got)
+	}); err != nil {
+		t.Fatalf("View while read-only: %v", err)
+	}
+}
+
 // Update must roll back staged writes when fn panics so an unhandled error path cannot leak partial state.
 func TestUpdate_RollsBackOnPanic(t *testing.T) {
 	db := openTestDB(t)
