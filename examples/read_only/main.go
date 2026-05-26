@@ -3,23 +3,32 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"log"
 
 	"github.com/kylegrahammatzen/dripsql"
 )
 
-func runReadOnly(ctx context.Context, dbPath string) error {
-	db, err := dripsql.Open(dbPath)
+func main() {
+	dbPath := flag.String("db", "", "directory to open as the database (required)")
+	flag.Parse()
+	if *dbPath == "" {
+		log.Fatal("missing -db <path>")
+	}
+
+	ctx := context.Background()
+	db, err := dripsql.Open(*dbPath)
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
 	defer db.Close()
 
 	if _, err := db.Exec(ctx, "CREATE TABLE IF NOT EXISTS readonly_nums (id int64 NOT NULL)"); err != nil {
-		return err
+		log.Fatal(err)
 	}
 	if _, err := db.Exec(ctx, "INSERT INTO readonly_nums (id) VALUES (1), (2), (3)"); err != nil {
-		return err
+		log.Fatal(err)
 	}
 
 	db.SetReadOnly(true)
@@ -29,8 +38,7 @@ func runReadOnly(ctx context.Context, dbPath string) error {
 
 	var n int64
 	if err := db.QueryRow(ctx, "SELECT count(*) FROM readonly_nums").Scan(&n); err != nil {
-		return err
+		log.Fatal(err)
 	}
 	fmt.Printf("rows: %d\n", n)
-	return nil
 }
