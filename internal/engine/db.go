@@ -434,7 +434,11 @@ func (db *DB) Query(ctx context.Context, sqlText string, args ...any) (*Rows, er
 		return nil, err
 	}
 	defer db.mu.Unlock()
-	bound, err := db.prepareLocked(sqlText, args)
+	plan, err := db.planForQuery(sqlText)
+	if err != nil {
+		return nil, err
+	}
+	bound, err := sql.BindParameters(plan, args)
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +454,11 @@ func (db *DB) QueryAt(ctx context.Context, sqlText string, readTs uint64, args .
 		return nil, err
 	}
 	defer db.mu.Unlock()
-	bound, err := db.prepareLocked(sqlText, args)
+	plan, err := db.planForQuery(sqlText)
+	if err != nil {
+		return nil, err
+	}
+	bound, err := sql.BindParameters(plan, args)
 	if err != nil {
 		return nil, err
 	}
@@ -461,14 +469,6 @@ func (db *DB) QueryAt(ctx context.Context, sqlText string, readTs uint64, args .
 		}
 		return db.openSegmentsAt(d.Name, ts)
 	})
-}
-
-func (db *DB) prepareLocked(sqlText string, args []any) (*sql.Plan, error) {
-	plan, err := db.planForQuery(sqlText)
-	if err != nil {
-		return nil, err
-	}
-	return sql.BindParameters(plan, args)
 }
 
 // planForQuery resolves a SELECT into a bound *Plan. Hits the plan cache before parsing so
