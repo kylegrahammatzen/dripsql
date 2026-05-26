@@ -36,12 +36,15 @@ go run ./cmd/bench -query <name> -rows <N> -runs <R> -mode hot -json
 | `top_age` | 1M | 50 | 26.46 | 5.69 | 16.12 | 4.64 |
 | `top_age` | 10M | 10 | 249.17 | 52.91 | 155.24 | 41.02 |
 
-`count` and `id_lookup` short-circuit via the `.sm` numsum and Binary Fuse 8 sidecars; `category_groupby` reads from the dict-histogram sidecar when no `WHERE` is present. TPC-H Q1/Q6 run against a synthetic `lineitem` with dates as int64 days since 1992-01-01.
+- `count` and `id_lookup` short-circuit via the `.sm` numsum and Binary Fuse 8 sidecars.
+- `count(*)` stays on the metadata-only path even after `DELETE` by popcounting the segment's deletion vector instead of scanning pages.
+- `category_groupby` reads from the dict-histogram sidecar when no `WHERE` is present.
+- TPC-H Q1 and Q6 run against a synthetic `lineitem` with dates as int64 days since 1992-01-01.
 
 ## Exec microbenchmarks
 
 ```
-go test ./internal/exec -bench=. -benchmem -run=^$ -count=10
+go test ./internal/exec '-bench=.' '-benchmem' '-run=^$' '-count=10'
 ```
 
 | Bench | ns/op | B/op | allocs/op |
@@ -61,8 +64,8 @@ go test ./internal/exec -bench=. -benchmem -run=^$ -count=10
 ## Storage microbenchmarks
 
 ```
-go test ./internal/storage -bench=. -benchmem -run=^$ -count=10
-go test ./internal/storage/codec -bench=. -benchmem -run=^$ -count=10
+go test ./internal/storage '-bench=.' '-benchmem' '-run=^$' '-count=10'
+go test ./internal/storage/codec '-bench=.' '-benchmem' '-run=^$' '-count=10'
 ```
 
 | Bench | ns/op | B/op | allocs/op |
@@ -105,7 +108,9 @@ go test -c -o exec.test.exe ./internal/exec
 **Targeted filter for smoke checks** during perf iteration:
 
 ```
-go test -run=^$ -bench='Benchmark(Filter_|Storage_ScanFull)|Codec_Decode/plain_int64' -benchtime=500ms -count=3 ./internal/...
+go test '-run=^$' '-bench=Benchmark(Filter_|Storage_ScanFull)|Codec_Decode/plain_int64' '-benchtime=500ms' '-count=3' ./internal/...
 ```
 
-~10s instead of 10 min. Anchor the regex with `Benchmark(...)`, a bare `Filter` also matches things like `Storage_LoadIntFilter`. Use this for "did I regress" during iteration, not for capturing a `.bench/final.txt` baseline. The full-sweep form in the sections above is what regression captures should use.
+- Runs in ~10s instead of 10 min.
+- Anchor the regex with `Benchmark(...)` because a bare `Filter` also matches things like `Storage_LoadIntFilter`.
+- Reserve this form for "did I regress" iteration and use the full-sweep form above when capturing a `.bench/final.txt` baseline.
