@@ -1,8 +1,9 @@
-﻿// Dictionary codec for varbytes kinds: stores each distinct value once, indexed by u8 per row.
-// Wire: [u16 LE dictCount][u32 LE len + bytes per entry][u8 indices x rows]. Rejects above DictMaxValues.
+﻿// Dictionary codec for varbytes kinds that stores each distinct value once indexed by u8 per row.
+// Wire is u16 LE dictCount then u32 LE len plus bytes per entry then u8 indices times rows and the codec rejects above DictMaxValues.
 package codec
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 
@@ -153,19 +154,23 @@ func buildDict(v vector.Vec) (indices []byte, entries [][]byte, dictBytes int, o
 	vb := v.Var()
 	indices = make([]byte, rows)
 	entries = make([][]byte, 0, 16)
-	seen := make(map[string]uint8, DictMaxValues)
 	for i := range rows {
 		val := vb.Bytes(i)
-		key := string(val)
-		if idx, exists := seen[key]; exists {
-			indices[i] = idx
+		found := -1
+		for j, e := range entries {
+			if bytes.Equal(e, val) {
+				found = j
+				break
+			}
+		}
+		if found >= 0 {
+			indices[i] = uint8(found)
 			continue
 		}
 		if len(entries) >= DictMaxValues {
 			return nil, nil, 0, false
 		}
 		idx := uint8(len(entries))
-		seen[key] = idx
 		indices[i] = idx
 		entries = append(entries, val)
 		dictBytes += 4 + len(val)
