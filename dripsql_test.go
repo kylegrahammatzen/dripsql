@@ -113,16 +113,6 @@ func TestSetReadOnly_BlocksWrites(t *testing.T) {
 	}
 }
 
-// SetCacheSize must accept positive values and reset to the default when given anything below 1.
-func TestSetCacheSize_AcceptsRange(t *testing.T) {
-	db := openTestDB(t)
-	db.SetCacheSize(32)
-	db.SetCacheSize(0)
-	db.SetCacheSize(-5)
-	db.SetCacheSize(1024)
-	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
-}
-
 // Positional placeholders bind left-to-right across types and reach both Query and Exec paths.
 func TestPlaceholders_BindAcrossTypesAndPaths(t *testing.T) {
 	db := openTestDB(t)

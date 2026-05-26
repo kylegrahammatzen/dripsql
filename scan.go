@@ -14,89 +14,29 @@ func scanInto(dst, src any) error {
 		*d = src
 		return nil
 	case *int:
-		v, err := toInt64(src)
-		if err != nil {
-			return err
-		}
-		*d = int(v)
-		return nil
+		return intoInt(d, src)
 	case *int8:
-		v, err := toInt64(src)
-		if err != nil {
-			return err
-		}
-		*d = int8(v)
-		return nil
+		return intoInt(d, src)
 	case *int16:
-		v, err := toInt64(src)
-		if err != nil {
-			return err
-		}
-		*d = int16(v)
-		return nil
+		return intoInt(d, src)
 	case *int32:
-		v, err := toInt64(src)
-		if err != nil {
-			return err
-		}
-		*d = int32(v)
-		return nil
+		return intoInt(d, src)
 	case *int64:
-		v, err := toInt64(src)
-		if err != nil {
-			return err
-		}
-		*d = v
-		return nil
+		return intoInt(d, src)
 	case *uint:
-		v, err := toInt64(src)
-		if err != nil {
-			return err
-		}
-		*d = uint(v)
-		return nil
+		return intoInt(d, src)
 	case *uint8:
-		v, err := toInt64(src)
-		if err != nil {
-			return err
-		}
-		*d = uint8(v)
-		return nil
+		return intoInt(d, src)
 	case *uint16:
-		v, err := toInt64(src)
-		if err != nil {
-			return err
-		}
-		*d = uint16(v)
-		return nil
+		return intoInt(d, src)
 	case *uint32:
-		v, err := toInt64(src)
-		if err != nil {
-			return err
-		}
-		*d = uint32(v)
-		return nil
+		return intoInt(d, src)
 	case *uint64:
-		v, err := toInt64(src)
-		if err != nil {
-			return err
-		}
-		*d = uint64(v)
-		return nil
+		return intoInt(d, src)
 	case *float32:
-		v, err := toFloat64(src)
-		if err != nil {
-			return err
-		}
-		*d = float32(v)
-		return nil
+		return intoFloat(d, src)
 	case *float64:
-		v, err := toFloat64(src)
-		if err != nil {
-			return err
-		}
-		*d = v
-		return nil
+		return intoFloat(d, src)
 	case *bool:
 		if src == nil {
 			*d = false
@@ -137,6 +77,25 @@ func scanInto(dst, src any) error {
 		return nil
 	}
 	return fmt.Errorf("unsupported destination type %T", dst)
+}
+
+func intoInt[T ~int | ~int8 | ~int16 | ~int32 | ~int64 |
+	~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64](d *T, src any) error {
+	v, err := toInt64(src)
+	if err != nil {
+		return err
+	}
+	*d = T(v)
+	return nil
+}
+
+func intoFloat[T ~float32 | ~float64](d *T, src any) error {
+	v, err := toFloat64(src)
+	if err != nil {
+		return err
+	}
+	*d = T(v)
+	return nil
 }
 
 func toInt64(src any) (int64, error) {
