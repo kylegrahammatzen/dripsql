@@ -25,10 +25,11 @@ type CreateTableStmt struct {
 }
 
 type AlterTableStmt struct {
-	Table  string
-	Rename *AlterRenameColumn
-	Add    *AlterAddColumn
-	Drop   *AlterDropColumn
+	Table    string
+	Rename   *AlterRenameColumn
+	Add      *AlterAddColumn
+	Drop     *AlterDropColumn
+	SetType  *AlterColumnType
 }
 
 type AlterRenameColumn struct {
@@ -48,6 +49,13 @@ type AlterAddColumn struct {
 // stops exposing it to binders and scans.
 type AlterDropColumn struct {
 	Name string
+}
+
+// AlterColumnType widens the logical type of an existing column. Only widenings the
+// scan layer knows how to cast are accepted today (int32 -&gt; int64, float32 -&gt; float64).
+type AlterColumnType struct {
+	Name string
+	Type string
 }
 
 type InsertStmt struct {

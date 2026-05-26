@@ -13,10 +13,11 @@ type TypeID uint64
 type SchemaVersion uint64
 
 type AlterPayload struct {
-	Table  string
-	Rename *AlterRenameColumn
-	Add    *AlterAddColumn
-	Drop   *AlterDropColumn
+	Table   string
+	Rename  *AlterRenameColumn
+	Add     *AlterAddColumn
+	Drop    *AlterDropColumn
+	SetType *AlterColumnType
 }
 
 type TypeDef struct {

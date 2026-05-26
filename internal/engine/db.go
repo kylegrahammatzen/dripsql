@@ -425,8 +425,17 @@ func (db *DB) alterTable(p *sql.AlterPayload) error {
 		return db.addColumn(tab, p.Add)
 	case p.Drop != nil:
 		return db.dropColumn(tab, p.Drop)
+	case p.SetType != nil:
+		return db.alterColumnType(tab, p.SetType)
 	}
 	return fmt.Errorf("ALTER TABLE: unsupported operation")
+}
+
+// wideningCasts enumerates the type widenings the scan path can perform on read. Any
+// other change requires a segment rewrite and is rejected here.
+var wideningCasts = map[[2]schema.Kind]struct{}{
+	{schema.KindInt32, schema.KindInt64}:     {},
+	{schema.KindFloat32, schema.KindFloat64}: {},
 }
 
 func (db *DB) renameColumn(tab *catalog.Table, p *sql.AlterPayload) error {
@@ -575,6 +584,66 @@ func (db *DB) dropColumn(tab *catalog.Table, p *sql.AlterDropColumn) error {
 	db.version = sql.SchemaVersion(newGen)
 	if err := catalog.Save(db.root, db.catalog); err != nil {
 		target.DroppedAtGeneration = prevDropped
+		tab.SchemaVersion = prevSchemaVersion
+		tab.UpdatedAtGeneration = prevUpdated
+		db.catalog.Generation = prevGen
+		db.version = sql.SchemaVersion(prevGen)
+		return err
+	}
+	return nil
+}
+
+func (db *DB) alterColumnType(tab *catalog.Table, p *sql.AlterColumnType) error {
+	name := schema.NormalizeName(p.Name)
+	var target *catalog.Column
+	for i := range tab.Columns {
+		c := &tab.Columns[i]
+		if c.DroppedAtGeneration != nil {
+			continue
+		}
+		if schema.NormalizeName(c.Name) == name {
+			target = c
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("column %q does not exist in table %q", p.Name, tab.Name)
+	}
+	newType, err := schema.ParseType(p.Type)
+	if err != nil {
+		return fmt.Errorf("ALTER COLUMN: %w", err)
+	}
+	if newType.Kind == schema.KindNamed {
+		if _, ok := db.types[schema.NormalizeName(newType.Name)]; !ok {
+			return fmt.Errorf("ALTER COLUMN: unknown named type %q", newType.Name)
+		}
+	}
+	oldType, err := schema.ParseType(target.Type)
+	if err != nil {
+		return fmt.Errorf("ALTER COLUMN: existing type %q: %w", target.Type, err)
+	}
+	if newType == oldType {
+		return nil
+	}
+	if _, ok := wideningCasts[[2]schema.Kind{oldType.Kind, newType.Kind}]; !ok {
+		return fmt.Errorf("ALTER COLUMN: cast from %s to %s is not a supported widening", oldType, newType)
+	}
+	newTypeStr, err := schema.TypeString(newType)
+	if err != nil {
+		return err
+	}
+	prevType := target.Type
+	prevGen := db.catalog.Generation
+	prevSchemaVersion := tab.SchemaVersion
+	prevUpdated := tab.UpdatedAtGeneration
+	newGen := prevGen + 1
+	target.Type = newTypeStr
+	tab.SchemaVersion++
+	tab.UpdatedAtGeneration = newGen
+	db.catalog.Generation = newGen
+	db.version = sql.SchemaVersion(newGen)
+	if err := catalog.Save(db.root, db.catalog); err != nil {
+		target.Type = prevType
 		tab.SchemaVersion = prevSchemaVersion
 		tab.UpdatedAtGeneration = prevUpdated
 		db.catalog.Generation = prevGen

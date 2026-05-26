@@ -281,6 +281,36 @@ func decodeIDs(decode []string, projNames []string, projIDs []uint64, predNames 
 // but absent from the segment. The caller (scanSegment) treats those as synthetic and
 // fills them with NULL vectors. Falling back to name match (legacy segments without an
 // identity sidecar) still errors on miss because we have no synthesis contract there.
+// widenVec promotes a vector to a wider numeric kind on read. Only the casts the
+// engine validates at ALTER COLUMN time live here -- anything else is a bug in the
+// engine layer that should have refused the ALTER.
+func widenVec(src vector.Vec, dst vector.VecKind) (vector.Vec, error) {
+	if src.Kind == dst {
+		return src, nil
+	}
+	switch {
+	case src.Kind == vector.VecInt32 && dst == vector.VecInt64:
+		out := vector.NewVec(vector.VecInt64, int(src.Len))
+		out.Valid = src.Valid
+		sb := src.I32()
+		db := out.I64()
+		for i := range sb {
+			db[i] = int64(sb[i])
+		}
+		return out, nil
+	case src.Kind == vector.VecFloat32 && dst == vector.VecFloat64:
+		out := vector.NewVec(vector.VecFloat64, int(src.Len))
+		out.Valid = src.Valid
+		sb := src.F32()
+		db := out.F64()
+		for i := range sb {
+			db[i] = float64(sb[i])
+		}
+		return out, nil
+	}
+	return vector.Vec{}, fmt.Errorf("widenVec: unsupported %v -> %v", src.Kind, dst)
+}
+
 // decodeSynthKinds returns a slice parallel to decode giving the vector kind to use
 // when a column is synthesised because it is absent from a segment. Slots for columns
 // the caller did not provide a kind for stay invalid; the caller only synthesises when
@@ -395,7 +425,11 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 		}
 		decoded[i].EnumLabels = seg.Cols[ci].EnumLabels
 		if seg.Cols[ci].Kind != vector.VecEnum32 {
-			t, err := vector.TypeFromVecKind(seg.Cols[ci].Kind, "")
+			kind := seg.Cols[ci].Kind
+			if i < len(synthKinds) && synthKinds[i] != 0 && synthKinds[i] != kind {
+				kind = synthKinds[i]
+			}
+			t, err := vector.TypeFromVecKind(kind, "")
 			if err != nil {
 				return fmt.Errorf("scan: col %q: %w", seg.Cols[ci].Name, err)
 			}
@@ -407,7 +441,28 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 			v   vector.Vec
 			err error
 		)
-		if seg.Cols[ci].Kind.FixedWidth() > 0 {
+		segKind := seg.Cols[ci].Kind
+		targetKind := segKind
+		if i < len(synthKinds) && synthKinds[i] != 0 {
+			targetKind = synthKinds[i]
+		}
+		if targetKind != segKind {
+			var tmp vector.Vec
+			scratch, err = seg.readPageIntoValidated(ci, pi, scratch, &tmp)
+			if err != nil {
+				return fmt.Errorf("scan: col %q page %d: %w", decode[i], pi, err)
+			}
+			if int(tmp.Len) != pageRows {
+				return fmt.Errorf("scan: col %q page %d rows %d != %d", decode[i], pi, tmp.Len, pageRows)
+			}
+			cast, err := widenVec(tmp, targetKind)
+			if err != nil {
+				return fmt.Errorf("scan: col %q page %d: %w", decode[i], pi, err)
+			}
+			decoded[i].V = cast
+			return nil
+		}
+		if segKind.FixedWidth() > 0 {
 			scratch, err = seg.readPageIntoValidated(ci, pi, scratch, &decoded[i].V)
 			v = decoded[i].V
 		} else {

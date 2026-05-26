@@ -934,6 +934,25 @@ func BindAlterTable(stmt *AlterTableStmt) (*Plan, error) {
 				Drop:  &AlterDropColumn{Name: name},
 			},
 		}, nil
+	case stmt.SetType != nil:
+		name := schema.NormalizeName(stmt.SetType.Name)
+		if name == "" {
+			return nil, fmt.Errorf("ALTER COLUMN requires a column name")
+		}
+		typ, err := schema.ParseType(stmt.SetType.Type)
+		if err != nil {
+			return nil, fmt.Errorf("ALTER COLUMN: %w", err)
+		}
+		if !typ.Valid() {
+			return nil, fmt.Errorf("ALTER COLUMN: invalid type %q", stmt.SetType.Type)
+		}
+		return &Plan{
+			Kind: PlanAlterTable,
+			Alter: &AlterPayload{
+				Table:   table,
+				SetType: &AlterColumnType{Name: name, Type: stmt.SetType.Type},
+			},
+		}, nil
 	}
 	return nil, fmt.Errorf("ALTER TABLE: unsupported operation")
 }
