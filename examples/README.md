@@ -23,3 +23,4 @@ go run ./examples/<name> -db ./demo-db
 | `durability` | Reopen a database directory and read back rows written by a prior session |
 | `group_by` | Streaming `Rows.Next` loop over a multi-row aggregate result |
 | `explain` | `EXPLAIN` output for a filter plus group-by plan |
+| `rename_column` | `ALTER TABLE RENAME COLUMN` as a metadata-only operation that scans existing segments by stable column id |
