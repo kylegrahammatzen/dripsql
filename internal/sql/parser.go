@@ -128,6 +128,15 @@ func (p *parser) parseAlter() (Stmt, error) {
 			return nil, err
 		}
 		return &AlterTableStmt{Table: tableName, Add: &AlterAddColumn{Name: name, Type: typeName}}, nil
+	case "drop":
+		if err := p.expectWord("column"); err != nil {
+			return nil, err
+		}
+		name, err := p.parseName()
+		if err != nil {
+			return nil, err
+		}
+		return &AlterTableStmt{Table: tableName, Drop: &AlterDropColumn{Name: name}}, nil
 	}
 	return nil, p.errorAt(op, "unsupported ALTER TABLE op %q", op.lit)
 }

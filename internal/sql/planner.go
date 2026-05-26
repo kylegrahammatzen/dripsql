@@ -922,6 +922,18 @@ func BindAlterTable(stmt *AlterTableStmt) (*Plan, error) {
 				Add:   &AlterAddColumn{Name: name, Type: stmt.Add.Type},
 			},
 		}, nil
+	case stmt.Drop != nil:
+		name := schema.NormalizeName(stmt.Drop.Name)
+		if name == "" {
+			return nil, fmt.Errorf("ALTER TABLE DROP COLUMN requires a name")
+		}
+		return &Plan{
+			Kind: PlanAlterTable,
+			Alter: &AlterPayload{
+				Table: table,
+				Drop:  &AlterDropColumn{Name: name},
+			},
+		}, nil
 	}
 	return nil, fmt.Errorf("ALTER TABLE: unsupported operation")
 }

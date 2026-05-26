@@ -423,6 +423,8 @@ func (db *DB) alterTable(p *sql.AlterPayload) error {
 		return db.renameColumn(tab, p)
 	case p.Add != nil:
 		return db.addColumn(tab, p.Add)
+	case p.Drop != nil:
+		return db.dropColumn(tab, p.Drop)
 	}
 	return fmt.Errorf("ALTER TABLE: unsupported operation")
 }
@@ -520,6 +522,59 @@ func (db *DB) addColumn(tab *catalog.Table, p *sql.AlterAddColumn) error {
 	if err := catalog.Save(db.root, db.catalog); err != nil {
 		tab.Columns = prevCols
 		tab.NextColumnID = prevNextColumnID
+		tab.SchemaVersion = prevSchemaVersion
+		tab.UpdatedAtGeneration = prevUpdated
+		db.catalog.Generation = prevGen
+		db.version = sql.SchemaVersion(prevGen)
+		return err
+	}
+	return nil
+}
+
+func (db *DB) dropColumn(tab *catalog.Table, p *sql.AlterDropColumn) error {
+	name := schema.NormalizeName(p.Name)
+	var target *catalog.Column
+	activeCount := 0
+	for i := range tab.Columns {
+		c := &tab.Columns[i]
+		if c.DroppedAtGeneration != nil {
+			continue
+		}
+		activeCount++
+		if schema.NormalizeName(c.Name) == name {
+			target = c
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("column %q does not exist in table %q", p.Name, tab.Name)
+	}
+	if activeCount <= 1 {
+		return fmt.Errorf("cannot drop the last active column %q in table %q", p.Name, tab.Name)
+	}
+	for _, id := range tab.PrimaryKey {
+		if id == target.ColumnID {
+			return fmt.Errorf("cannot drop column %q referenced by primary key", p.Name)
+		}
+	}
+	for _, idx := range tab.Indexes {
+		for _, id := range idx.Columns {
+			if id == target.ColumnID {
+				return fmt.Errorf("cannot drop column %q referenced by index %q", p.Name, idx.Name)
+			}
+		}
+	}
+	prevGen := db.catalog.Generation
+	prevSchemaVersion := tab.SchemaVersion
+	prevUpdated := tab.UpdatedAtGeneration
+	prevDropped := target.DroppedAtGeneration
+	newGen := prevGen + 1
+	target.DroppedAtGeneration = &newGen
+	tab.SchemaVersion++
+	tab.UpdatedAtGeneration = newGen
+	db.catalog.Generation = newGen
+	db.version = sql.SchemaVersion(newGen)
+	if err := catalog.Save(db.root, db.catalog); err != nil {
+		target.DroppedAtGeneration = prevDropped
 		tab.SchemaVersion = prevSchemaVersion
 		tab.UpdatedAtGeneration = prevUpdated
 		db.catalog.Generation = prevGen

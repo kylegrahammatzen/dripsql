@@ -28,6 +28,7 @@ type AlterTableStmt struct {
 	Table  string
 	Rename *AlterRenameColumn
 	Add    *AlterAddColumn
+	Drop   *AlterDropColumn
 }
 
 type AlterRenameColumn struct {
@@ -41,6 +42,12 @@ type AlterRenameColumn struct {
 type AlterAddColumn struct {
 	Name string
 	Type string
+}
+
+// AlterDropColumn tombstones an active column. The bytes stay on disk; the catalog
+// stops exposing it to binders and scans.
+type AlterDropColumn struct {
+	Name string
 }
 
 type InsertStmt struct {

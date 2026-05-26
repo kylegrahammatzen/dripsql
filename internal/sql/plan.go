@@ -16,6 +16,7 @@ type AlterPayload struct {
 	Table  string
 	Rename *AlterRenameColumn
 	Add    *AlterAddColumn
+	Drop   *AlterDropColumn
 }
 
 type TypeDef struct {
