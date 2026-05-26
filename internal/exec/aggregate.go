@@ -327,6 +327,10 @@ func (a *AggregateOp) aggregateBatchIntKey(batch vector.Batch, col *vector.Colum
 // `idx[string(b)]` is the well-known compiler trick that avoids the per-lookup string
 // allocation. The miss branch materializes the key only when we record a new group.
 func (a *AggregateOp) aggregateBatchTextKey(batch vector.Batch, col *vector.Column, specCols []aggCol, idx map[string]int) error {
+	if a.canAggregateTextKeyCountSumInt64(specCols) {
+		a.aggregateBatchTextKeyCountSumInt64(batch, col, specCols, idx)
+		return nil
+	}
 	valid := col.V.Valid
 	vb := col.V.Var()
 	var loopErr error
@@ -350,6 +354,51 @@ func (a *AggregateOp) aggregateBatchTextKey(batch vector.Batch, col *vector.Colu
 		}
 	})
 	return loopErr
+}
+
+func (a *AggregateOp) canAggregateTextKeyCountSumInt64(specCols []aggCol) bool {
+	return len(a.specs) == 2 &&
+		len(specCols) == 2 &&
+		a.specs[0].Func == sql.AggregateCount &&
+		a.specs[1].Func == sql.AggregateSum &&
+		specCols[1].idx >= 0 &&
+		specCols[1].vk == vector.VecInt64
+}
+
+func (a *AggregateOp) aggregateBatchTextKeyCountSumInt64(batch vector.Batch, col *vector.Column, specCols []aggCol, idx map[string]int) {
+	valid := col.V.Valid
+	vb := col.V.Var()
+	countStar := specCols[0].idx == -1
+	var countValid vector.Validity
+	if !countStar {
+		countValid = batch.Columns[specCols[0].idx].V.Valid
+	}
+	sumCol := &batch.Columns[specCols[1].idx]
+	sumValid := sumCol.V.Valid
+	sumVals := sumCol.V.I64()
+	batch.Sel.IterSet(func(row int) {
+		if valid != nil && !valid.IsValid(row) {
+			return
+		}
+		b := vb.Bytes(row)
+		gIdx, ok := idx[string(b)]
+		if !ok {
+			key := string(b)
+			gIdx = len(a.groups)
+			idx[key] = gIdx
+			a.groups = append(a.groups, aggGroup{key: key, aggs: make([]aggAccum, len(a.specs))})
+		}
+		g := &a.groups[gIdx]
+		if countStar || countValid == nil || countValid.IsValid(row) {
+			g.aggs[0].count++
+		}
+		if sumValid == nil || sumValid.IsValid(row) {
+			acc := &g.aggs[1]
+			acc.count++
+			acc.sum += sumVals[row]
+			acc.init = true
+		}
+	})
 }
 
 func (a *AggregateOp) aggregateBatchAnyKey(batch vector.Batch, col *vector.Column, vk vector.VecKind, specCols []aggCol, idx map[any]int) error {

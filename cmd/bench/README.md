@@ -39,11 +39,11 @@ Use fresh JSON or JSONL artifacts because `compare` reports median deltas agains
 | --- | --- | --- | --- | --- | --- | --- |
 | `count` | 100k | 200 | <1 us | <1 us | <1 us | <1 us |
 | `id_lookup` | 100k | 200 | <1 us | 25.3 us | 50.3 us | <1 us |
-| `category_groupby` | 100k | 100 | 6.69 ms | 2.26 ms | 2.69 ms | 1.74 ms |
-| `category_groupby` | 10M | 10 | 602.72 ms | 119.44 ms | 257.71 ms | 225.56 ms |
-| `top_age` | 100k | 200 | 2.00 ms | 445 us | 1.03 ms | 521 us |
-| `top_age` | 1M | 50 | 24.72 ms | 5.69 ms | 13.65 ms | 5.38 ms |
-| `top_age` | 10M | 10 | 171.73 ms | 33.43 ms | 104.06 ms | 34.24 ms |
+| `category_groupby` | 100k | 100 | 4.30 ms | 1.56 ms | 1.50 ms | 1.24 ms |
+| `category_groupby` | 10M | 10 | 310.53 ms | 73.30 ms | 74.72 ms | 162.51 ms |
+| `top_age` | 100k | 200 | 1.58 ms | 487 us | 395 us | 695 us |
+| `top_age` | 1M | 50 | 10.51 ms | 3.47 ms | 3.94 ms | 3.09 ms |
+| `top_age` | 10M | 10 | 98.49 ms | 32.76 ms | 37.46 ms | 28.27 ms |
 
 - `count` and `id_lookup` short-circuit via the `.sm` numsum and Binary Fuse 8 sidecars.
 - `count(*)` stays on the metadata-only path even after `DELETE` by popcounting the segment's deletion vector instead of scanning pages.
@@ -82,14 +82,14 @@ Rows are ordered from codec decode to page read to scan to write so low level co
 
 | Bench | Time | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `Codec_Decode/FOR/Int64` | 26 us | 16 K | 1 |
-| `Codec_Decode/Delta/Int64` | 22 us | 33 K | 2 |
-| `Codec_Decode/Pcodec/Int64` | 22 us | 16 K | 1 |
-| `Codec_Decode/Constant/Int64` | 5.3 us | 0 | 0 |
+| `Codec_Decode/FOR/Int64` | 20 us | 16 K | 1 |
+| `Codec_Decode/Delta/Int64` | 13 us | 33 K | 2 |
+| `Codec_Decode/Pcodec/Int64` | 6.5 us | 16 K | 1 |
+| `Codec_Decode/Constant/Int64` | 5.2 us | 0 | 0 |
 | `Codec_Decode/Sequence/Int64` | 1.6 us | 0 | 0 |
-| `Codec_Decode/Plain/Int64` | 160 ns | 0 | 0 |
-| `Codec_Decode/Dict/Text` | 9.7 us | 33 K | 5 |
-| `Codec_Decode/Plain/Text` | 48 us | 55 K | 3 |
+| `Codec_Decode/Plain/Int64` | 170 ns | 0 | 0 |
+| `Codec_Decode/Dict/Text` | 7.4 us | 33 K | 5 |
+| `Codec_Decode/Plain/Text` | 39 us | 55 K | 3 |
 | `Storage_ReadPage/Int64` | 6.23 us | 16 K | 2 |
 | `Storage_ReadPage/Text` | 8.64 us | 33 K | 6 |
 | `Storage_Scan/One/Int64` | 23.4 us | 17 K | 12 |

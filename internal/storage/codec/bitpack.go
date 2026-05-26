@@ -68,6 +68,25 @@ func Unpack(width int, src []byte, rows int, dst []uint64) {
 	}
 }
 
+var unpackBytePlaneTable = buildUnpackBytePlaneTable()
+
+func buildUnpackBytePlaneTable() [8][256]uint64 {
+	var table [8][256]uint64
+	for plane := range table {
+		weight := uint64(1 << plane)
+		for b := range 256 {
+			var packed uint64
+			for bit := range 8 {
+				if b&(1<<bit) != 0 {
+					packed |= weight << (uint(bit) * 8)
+				}
+			}
+			table[plane][b] = packed
+		}
+	}
+	return table
+}
+
 // packBlock emits 16 groups of width uint64s for a full 1024-element block.
 // Within each group, output word i holds bit i of all 64 input elements.
 func packBlock(width int, block []uint64, dst []byte) {
@@ -87,6 +106,10 @@ func packBlock(width int, block []uint64, dst []byte) {
 // unpackBlock reverses packBlock: for each (j, k), gather bit k from each of the
 // width words in group j and assemble the element.
 func unpackBlock(width int, src []byte, block []uint64) {
+	if width <= 8 {
+		unpackBlockSmallWidth(width, src, block)
+		return
+	}
 	var words [64]uint64
 	for j := range 16 {
 		groupOff := j * width * 8
@@ -100,6 +123,33 @@ func unpackBlock(width int, src []byte, block []uint64) {
 				elem |= ((words[i] >> uint(k)) & 1) << uint(i)
 			}
 			block[base+k] = elem
+		}
+	}
+}
+
+func unpackBlockSmallWidth(width int, src []byte, block []uint64) {
+	var words [8]uint64
+	for j := range 16 {
+		groupOff := j * width * 8
+		base := j * 64
+		for i := range width {
+			words[i] = binary.LittleEndian.Uint64(src[groupOff+i*8 : groupOff+i*8+8])
+		}
+		for lane := range 8 {
+			shift := uint(lane * 8)
+			var packed uint64
+			for i := range width {
+				packed |= unpackBytePlaneTable[i][byte(words[i]>>shift)]
+			}
+			out := block[base+lane*8 : base+lane*8+8]
+			out[0] = uint64(byte(packed))
+			out[1] = uint64(byte(packed >> 8))
+			out[2] = uint64(byte(packed >> 16))
+			out[3] = uint64(byte(packed >> 24))
+			out[4] = uint64(byte(packed >> 32))
+			out[5] = uint64(byte(packed >> 40))
+			out[6] = uint64(byte(packed >> 48))
+			out[7] = uint64(byte(packed >> 56))
 		}
 	}
 }
