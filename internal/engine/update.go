@@ -50,14 +50,14 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan, commit commitFn) (int6
 			return err
 		}
 		path := db.nextSegmentPath(def.Name)
-		span, err := storage.WriteSegment(path, []vector.Batch{batch}, columnCodecs(def))
+		span, err := storage.WriteSegmentWithIdentity(path, []vector.Batch{batch}, columnCodecs(def), db.segmentIdentity(def))
 		if span != nil {
 			stmt.AppendChild(span)
 		}
 		if err != nil {
 			return err
 		}
-		stage.adds = append(stage.adds, storage.ManifestSegmentAdd{Path: path, Rows: uint32(pending.rows)})
+		stage.adds = append(stage.adds, storage.ManifestSegmentAdd{Path: path, Rows: uint32(pending.rows), SchemaGeneration: uint64(db.catalog.Generation)})
 		stage.paths = append(stage.paths, path)
 		return pending.reset()
 	}

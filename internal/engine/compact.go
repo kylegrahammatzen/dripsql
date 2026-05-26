@@ -32,7 +32,8 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 	for _, s := range segs {
 		segByPath[s.Path()] = s
 	}
-	codecs := columnCodecs(db.boundTable(db.tables[schema.NormalizeName(table)]))
+	def := db.boundTable(db.tables[schema.NormalizeName(table)])
+	codecs := columnCodecs(def)
 	rewritten := 0
 	stmt := storage.NewSpan("COMPACT " + table)
 	defer func() {
@@ -61,7 +62,7 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		}
 		newPath := db.nextSegmentPath(table)
 		if liveCount > 0 {
-			span, err := storage.WriteSegment(newPath, []vector.Batch{liveBatch}, codecs)
+			span, err := storage.WriteSegmentWithIdentity(newPath, []vector.Batch{liveBatch}, codecs, db.segmentIdentity(def))
 			if span != nil {
 				stmt.AppendChild(span)
 			}
@@ -82,7 +83,7 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		}
 		var adds []storage.ManifestSegmentAdd
 		if liveCount > 0 {
-			adds = append(adds, storage.ManifestSegmentAdd{Path: newPath, Rows: uint32(liveCount)})
+			adds = append(adds, storage.ManifestSegmentAdd{Path: newPath, Rows: uint32(liveCount), SchemaGeneration: uint64(db.catalog.Generation)})
 		}
 		if err := db.commitManifestTxn(table, adds, []storage.ManifestDVUpdate{{SegmentPath: entry.Path, DVPath: dvPath, Rows: uint32(rows)}}); err != nil {
 			if liveCount > 0 {

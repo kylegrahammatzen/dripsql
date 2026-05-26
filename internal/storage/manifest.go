@@ -29,6 +29,7 @@ type ManifestEntry struct {
 	Path               string `json:"path,omitempty"`
 	Rows               uint32 `json:"rows,omitempty"`
 	ContentHash        uint64 `json:"content_hash,omitempty"`
+	SchemaGeneration   uint64 `json:"schema_generation,omitempty"`
 	DeletionVectorPath string `json:"deletion_vector_path,omitempty"`
 	// DVCommitTs is the CommitTs of the record that wrote DeletionVectorPath. Zero when
 	// there is no DV. Retention reads it to keep a segment alive for readers pinned
@@ -44,6 +45,9 @@ type ManifestSegmentAdd struct {
 	Path        string `json:"path"`
 	Rows        uint32 `json:"rows"`
 	ContentHash uint64 `json:"content_hash,omitempty"`
+	// SchemaGeneration is the catalog Generation in effect when the segment was written.
+	// Zero on legacy records and on tests that don't pipe a generation in.
+	SchemaGeneration uint64 `json:"schema_generation,omitempty"`
 }
 
 type ManifestDVUpdate struct {
@@ -237,11 +241,12 @@ func (m *Manifest) resolveLockedFiltered(upTo, maxCommitTs uint64) []ManifestEnt
 		}
 		for _, a := range rec.Adds {
 			out = append(out, ManifestEntry{
-				Version:     rec.Version,
-				CommitTs:    rec.CommitTs,
-				Path:        a.Path,
-				Rows:        a.Rows,
-				ContentHash: a.ContentHash,
+				Version:          rec.Version,
+				CommitTs:         rec.CommitTs,
+				Path:             a.Path,
+				Rows:             a.Rows,
+				ContentHash:      a.ContentHash,
+				SchemaGeneration: a.SchemaGeneration,
 			})
 			idxByPath[a.Path] = len(out) - 1
 		}

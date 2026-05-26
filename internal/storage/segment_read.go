@@ -24,6 +24,11 @@ type SegmentColumn struct {
 	Pages      []Page
 	PageStats  [][StatsWireSize]byte
 
+	// ColumnID is the stable catalog id for this column. Zero on legacy dsv4
+	// segments written before the identity sidecar landed; callers must fall back
+	// to positional mapping when zero.
+	ColumnID uint64
+
 	// Lazily inflated into PageStats on first prune call. Skips the per-column
 	// alloc on cold open when no predicate ever runs.
 	pageStatsRaw []byte
@@ -42,6 +47,11 @@ type Segment struct {
 	// ReadTs. Zero on standalone OpenSegment paths (tests, tooling), which treat the
 	// segment as committed at time 0 -- always visible.
 	CommitTs uint64
+
+	// TableID and SchemaGeneration are populated from the identity sidecar when present.
+	// Zero on legacy dsv4 segments and signals the engine to use positional mapping.
+	TableID          uint64
+	SchemaGeneration uint64
 
 	containerOnce sync.Once
 	container     map[uint8][]byte
@@ -210,7 +220,7 @@ func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
 		return nil, fmt.Errorf("OpenSegment: load DV: %w", err)
 	}
 	// Sidecar container lives inline between footer and suffix; lazily read on first access.
-	return &Segment{
+	seg := &Segment{
 		f:            f,
 		path:         path,
 		bodyEnd:      layout.bodyEnd,
@@ -219,7 +229,38 @@ func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
 		sidecarLen:   layout.sidecarLen,
 		Cols:         layout.cols,
 		DV:           dv,
-	}, nil
+	}
+	if err := seg.hydrateIdentity(); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return seg, nil
+}
+
+// hydrateIdentity pulls the identity sidecar section if present and stamps TableID,
+// SchemaGeneration on the segment plus ColumnID on each column. Missing section is
+// fine and leaves zero values that signal positional fallback to the engine.
+func (s *Segment) hydrateIdentity() error {
+	body, err := s.sidecarSection(sidecarSectionIdentity)
+	if err != nil {
+		return err
+	}
+	if body == nil {
+		return nil
+	}
+	id, err := decodeIdentitySidecar(body)
+	if err != nil {
+		return fmt.Errorf("OpenSegment: %w", err)
+	}
+	s.TableID = id.TableID
+	s.SchemaGeneration = id.SchemaGeneration
+	if len(id.ColumnIDs) != len(s.Cols) {
+		return fmt.Errorf("OpenSegment: identity column count %d != footer column count %d", len(id.ColumnIDs), len(s.Cols))
+	}
+	for i, cid := range id.ColumnIDs {
+		s.Cols[i].ColumnID = cid
+	}
+	return nil
 }
 
 // ValidateColumns runs structural checks on all column directories. Called once

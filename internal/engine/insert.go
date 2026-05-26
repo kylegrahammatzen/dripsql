@@ -88,7 +88,7 @@ func (db *DB) BulkInsert(ctx context.Context, statements []string) (int64, error
 // writeSegmentAdd writes batches to a fresh segment file and returns the matching manifest entry plus a cleanup func that removes the file when called.
 func (db *DB) writeSegmentAdd(def sql.BoundTableDef, batches []vector.Batch, rows uint32, parent *storage.Span) (storage.ManifestSegmentAdd, func(), error) {
 	path := db.nextSegmentPath(def.Name)
-	span, err := storage.WriteSegment(path, batches, columnCodecs(def))
+	span, err := storage.WriteSegmentWithIdentity(path, batches, columnCodecs(def), db.segmentIdentity(def))
 	if span != nil && parent != nil {
 		parent.AppendChild(span)
 	}
@@ -96,7 +96,7 @@ func (db *DB) writeSegmentAdd(def sql.BoundTableDef, batches []vector.Batch, row
 		os.Remove(path)
 		return storage.ManifestSegmentAdd{}, nil, err
 	}
-	return storage.ManifestSegmentAdd{Path: path, Rows: rows}, func() { os.Remove(path) }, nil
+	return storage.ManifestSegmentAdd{Path: path, Rows: rows, SchemaGeneration: uint64(db.catalog.Generation)}, func() { os.Remove(path) }, nil
 }
 
 func (db *DB) insert(ctx context.Context, plan *sql.Plan, commit commitFn) (int64, error) {

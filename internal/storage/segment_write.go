@@ -36,10 +36,22 @@ type writerColumn struct {
 	PageStats [][StatsWireSize]byte
 }
 
+// WriteSegmentWithIdentity stamps a SegmentIdentity sidecar into the file so the
+// reader can resolve columns by stable catalog identity rather than ordinal. Callers
+// that have no identity to stamp should keep calling WriteSegment; this function is
+// the engine's write path once stable ids are wired in.
+func WriteSegmentWithIdentity(path string, pages []vector.Batch, codecs map[string]schema.Encoding, id SegmentIdentity) (*Span, error) {
+	return writeSegmentImpl(path, pages, codecs, id)
+}
+
 // codecs may be nil to use the cascade. A non-nil entry per column overrides
 // EncInvalid and bypasses Pick. The span is always returned, even on error,
 // so partial timings remain visible.
 func WriteSegment(path string, pages []vector.Batch, codecs map[string]schema.Encoding) (*Span, error) {
+	return writeSegmentImpl(path, pages, codecs, SegmentIdentity{})
+}
+
+func writeSegmentImpl(path string, pages []vector.Batch, codecs map[string]schema.Encoding, id SegmentIdentity) (*Span, error) {
 	root := NewSpan("write")
 	defer root.End()
 
@@ -66,7 +78,7 @@ func WriteSegment(path string, pages []vector.Batch, codecs map[string]schema.En
 	}
 
 	body := root.Child("body")
-	err = writeSegmentBody(tmpPath, pages, cols, codecs, sinks, root)
+	err = writeSegmentBody(tmpPath, pages, cols, codecs, sinks, root, id)
 	body.End()
 	if err != nil {
 		os.Remove(tmpPath)
@@ -91,14 +103,18 @@ func WriteSegment(path string, pages []vector.Batch, codecs map[string]schema.En
 // materializeSidecarBytes builds the sidecar container body to be appended inside the
 // segment file. Returns nil when there's nothing to write. All work is done now so the
 // segment write streams it in one bufio path with the column data and footer.
-func materializeSidecarBytes(root *Span, cols []writerColumn, sinks []*colSink) []byte {
+func materializeSidecarBytes(root *Span, cols []writerColumn, sinks []*colSink, id SegmentIdentity) []byte {
 	hists, filters, sums, varBlooms := materializeSidecarsFromSinks(cols, sinks)
-	if hists == nil && filters == nil && sums == nil && varBlooms == nil {
+	identityBytes := encodeIdentitySidecar(id)
+	if hists == nil && filters == nil && sums == nil && varBlooms == nil && identityBytes == nil {
 		return nil
 	}
 	sc := root.Child("sidecars")
 	defer sc.End()
-	sections := make(map[uint8][]byte, 4)
+	sections := make(map[uint8][]byte, 5)
+	if identityBytes != nil {
+		sections[sidecarSectionIdentity] = identityBytes
+	}
 	if hists != nil {
 		dh := sc.Child("dicthist")
 		if b, err := dictHistSidecar.Encode(map[string]DictHistogram(hists)); err == nil && b != nil {
@@ -133,21 +149,21 @@ func materializeSidecarBytes(root *Span, cols []writerColumn, sinks []*colSink) 
 	return EncodeSidecarContainer(sections)
 }
 
-func writeSegmentBody(path string, pages []vector.Batch, cols []writerColumn, codecs map[string]schema.Encoding, sinks []*colSink, root *Span) error {
+func writeSegmentBody(path string, pages []vector.Batch, cols []writerColumn, codecs map[string]schema.Encoding, sinks []*colSink, root *Span, id SegmentIdentity) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	bw := bufio.NewWriterSize(f, segmentWriteBufferSize)
 
-	if err := writeSegmentStream(bw, pages, cols, codecs, sinks, root); err != nil {
+	if err := writeSegmentStream(bw, pages, cols, codecs, sinks, root, id); err != nil {
 		f.Close()
 		return err
 	}
 	return finishSegmentFile(f, bw)
 }
 
-func writeSegmentStream(bw *bufio.Writer, pages []vector.Batch, cols []writerColumn, codecs map[string]schema.Encoding, sinks []*colSink, root *Span) error {
+func writeSegmentStream(bw *bufio.Writer, pages []vector.Batch, cols []writerColumn, codecs map[string]schema.Encoding, sinks []*colSink, root *Span, id SegmentIdentity) error {
 	if _, err := bw.Write([]byte(Magic)); err != nil {
 		return err
 	}
@@ -168,7 +184,7 @@ func writeSegmentStream(bw *bufio.Writer, pages []vector.Batch, cols []writerCol
 	}
 	// Sidecars must materialize AFTER writePayloads since the colSinks are filled
 	// during the analyzer pass that walks each page during body encoding.
-	sidecarBytes := materializeSidecarBytes(root, cols, sinks)
+	sidecarBytes := materializeSidecarBytes(root, cols, sinks, id)
 	if len(sidecarBytes) > 0 {
 		if _, err := bw.Write(sidecarBytes); err != nil {
 			return err

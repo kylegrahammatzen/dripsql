@@ -7,6 +7,8 @@ import (
 
 	"github.com/kylegrahammatzen/dripsql/internal/catalog"
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/sql"
+	"github.com/kylegrahammatzen/dripsql/internal/storage"
 )
 
 // indexTypes/indexTables build by-name maps over the catalog file's slices. Maps share
@@ -69,6 +71,21 @@ func columnName(cols []catalog.Column, id catalog.ColumnID) string {
 		}
 	}
 	return ""
+}
+
+// segmentIdentity builds a SegmentIdentity for a fresh write. ColumnIDs follow the
+// declaration order of def.Columns so the segment's footer columns line up with the
+// catalog identity at index i.
+func (db *DB) segmentIdentity(def sql.BoundTableDef) storage.SegmentIdentity {
+	ids := make([]uint64, len(def.Columns))
+	for i, c := range def.Columns {
+		ids[i] = uint64(c.ID)
+	}
+	return storage.SegmentIdentity{
+		TableID:          uint64(def.ID),
+		SchemaGeneration: uint64(db.catalog.Generation),
+		ColumnIDs:        ids,
+	}
 }
 
 // codecForColumn returns the configured Encoding for a column, or EncInvalid if none.
