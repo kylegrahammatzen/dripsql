@@ -1,6 +1,5 @@
-// Metadata-only aggregate short-circuit. Resolves count, min, max, and varbytes
-// GROUP BY count from manifest row counts, per-column stats, and the dict-histogram
-// sidecar. Skipped when any segment carries a deletion vector.
+// Metadata-only aggregate short-circuit that resolves count plus min and max and sum and varbytes GROUP BY count from manifest row counts and per-column stats and the dict-histogram sidecar.
+// count(*) and non-nullable count(col) survive a deletion vector via a popcount on the loaded DV bits, the other aggregates bail to the scan path because their math depends on individual row values.
 package engine
 
 import (
@@ -36,12 +35,12 @@ func (db *DB) answerFromMetadata(plan *sql.Plan) (*Rows, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	for _, seg := range segs {
-		if seg.DV != nil {
-			return nil, false, nil
-		}
-	}
 	if len(agg.GroupBy) == 1 {
+		for _, seg := range segs {
+			if seg.DV != nil {
+				return nil, false, nil
+			}
+		}
 		return db.tryGroupByDictHistogram(plan, rel, agg, scan, segs)
 	}
 	if len(agg.GroupBy) != 0 {
@@ -256,12 +255,18 @@ func computeMetadataAggregate(a sql.AggSpec, scan *sql.Rel, segs []*storage.Segm
 		}
 		return countColumn(segs, col)
 	case sql.AggregateMin, sql.AggregateMax:
+		if anySegHasDV(segs) {
+			return nil, false, nil
+		}
 		col, ok := scanColumnDefByID(scan, a.ArgColumn)
 		if !ok {
 			return nil, false, fmt.Errorf("metadata aggregate: column id %d not in scan", a.ArgColumn)
 		}
 		return mergeMinMax(segs, col.Name, col.Type.Kind, a.Func == sql.AggregateMax)
 	case sql.AggregateSum:
+		if anySegHasDV(segs) {
+			return nil, false, nil
+		}
 		col, ok := scanColumnDefByID(scan, a.ArgColumn)
 		if !ok {
 			return nil, false, fmt.Errorf("metadata aggregate: column id %d not in scan", a.ArgColumn)
@@ -271,10 +276,23 @@ func computeMetadataAggregate(a sql.AggSpec, scan *sql.Rel, segs []*storage.Segm
 	return nil, false, nil
 }
 
+func anySegHasDV(segs []*storage.Segment) bool {
+	for _, seg := range segs {
+		if seg.DV != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func countAllRows(segs []*storage.Segment) int64 {
 	var total int64
 	for _, seg := range segs {
-		total += int64(seg.Rows())
+		rows := int(seg.Rows())
+		if seg.DV != nil {
+			rows -= seg.DV.NullCount(rows)
+		}
+		total += int64(rows)
 	}
 	return total
 }
@@ -282,6 +300,9 @@ func countAllRows(segs []*storage.Segment) int64 {
 func countColumn(segs []*storage.Segment, col sql.BoundColumnDef) (any, bool, error) {
 	if !col.Nullable {
 		return countAllRows(segs), true, nil
+	}
+	if anySegHasDV(segs) {
+		return nil, false, nil
 	}
 	var total int64
 	for _, seg := range segs {
