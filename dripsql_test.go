@@ -123,25 +123,6 @@ func TestSetCacheSize_AcceptsRange(t *testing.T) {
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
 }
 
-// All drains the entire result set into a slice so terse one-shot reads skip the Next plus Scan loop.
-func TestRows_All(t *testing.T) {
-	db := openTestDB(t)
-	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
-	mustExec(t, db, "INSERT INTO t (id) VALUES (10), (20), (30)")
-	rows, err := db.Query(context.Background(), "SELECT id FROM t")
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-	defer rows.Close()
-	vals, err := rows.All()
-	if err != nil {
-		t.Fatalf("All: %v", err)
-	}
-	if len(vals) != 3 || vals[0][0].(int64) != 10 || vals[2][0].(int64) != 30 {
-		t.Errorf("All = %v, want three rows 10,20,30", vals)
-	}
-}
-
 // Positional placeholders bind left-to-right across types and reach both Query and Exec paths.
 func TestPlaceholders_BindAcrossTypesAndPaths(t *testing.T) {
 	db := openTestDB(t)
@@ -208,19 +189,74 @@ func TestUpdate_CommitsOnNilRollsBackOnError(t *testing.T) {
 	}
 }
 
-// QueryRow rejects zero-row and multi-row results so callers do not silently scan stale values.
-func TestQueryRow_RejectsZeroAndMultipleRows(t *testing.T) {
+// QueryRow succeeds on exactly one row and errors on zero or multiple rows so callers do not silently scan stale values.
+func TestQueryRow_OneRowSucceedsZeroAndMultipleError(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
 	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
 	mustExec(t, db, "INSERT INTO t (id) VALUES (1), (2)")
 
 	var id int64
+	if err := db.QueryRow(ctx, "SELECT id FROM t WHERE id = ?", int64(1)).Scan(&id); err != nil {
+		t.Fatalf("one-row Scan: %v", err)
+	}
+	if id != 1 {
+		t.Errorf("Scan = %d, want 1", id)
+	}
 	if err := db.QueryRow(ctx, "SELECT id FROM t WHERE id = ?", int64(999)).Scan(&id); err == nil {
 		t.Fatal("expected no-rows error")
 	}
 	if err := db.QueryRow(ctx, "SELECT id FROM t").Scan(&id); err == nil {
 		t.Fatal("expected too-many-rows error")
+	}
+}
+
+// Rows.All drains unread rows on a fresh cursor, skips the row a prior Next consumed, returns empty after exhaustion, and Columns hands back a copy so caller mutation cannot corrupt engine metadata.
+func TestRows_All_AndColumnsCopy(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
+	mustExec(t, db, "INSERT INTO t (id) VALUES (1), (2), (3)")
+
+	fresh, err := db.Query(ctx, "SELECT id FROM t")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	vals, err := fresh.All()
+	if err != nil {
+		t.Fatalf("fresh All: %v", err)
+	}
+	if len(vals) != 3 || vals[0][0].(int64) != 1 || vals[2][0].(int64) != 3 {
+		t.Errorf("fresh All = %v, want three rows", vals)
+	}
+	fresh.Close()
+
+	post, err := db.Query(ctx, "SELECT id FROM t")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	defer post.Close()
+	if !post.Next() {
+		t.Fatal("expected first row")
+	}
+	rest, err := post.All()
+	if err != nil {
+		t.Fatalf("post-Next All: %v", err)
+	}
+	if len(rest) != 2 || rest[0][0].(int64) != 2 || rest[1][0].(int64) != 3 {
+		t.Errorf("post-Next All = %v, want rows 2 and 3", rest)
+	}
+	more, err := post.All()
+	if err != nil {
+		t.Fatalf("post-exhaustion All: %v", err)
+	}
+	if len(more) != 0 {
+		t.Errorf("post-exhaustion All = %v, want empty", more)
+	}
+	cols := post.Columns()
+	cols[0] = "stomped"
+	if post.Columns()[0] != "id" {
+		t.Error("Columns must return a copy")
 	}
 }
 

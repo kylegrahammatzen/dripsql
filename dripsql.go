@@ -86,7 +86,7 @@ func (db *DB) Update(ctx context.Context, fn func(*Tx) error) (err error) {
 	return fn(tx)
 }
 
-// QueryRow runs sql expecting at most one result row and returns a single-shot scanner.
+// QueryRow runs sql expecting exactly one result row and returns a single-shot scanner that errors on zero or multiple rows.
 func (db *DB) QueryRow(ctx context.Context, sql string, args ...any) *Row {
 	rows, err := db.Query(ctx, sql, args...)
 	return &Row{rows: rows, err: err}
@@ -158,8 +158,10 @@ func newRows(rs *engine.Rows) *Rows {
 	return &Rows{rs: rs, cursor: -1}
 }
 
-// Columns returns the result-set column names in select order.
-func (r *Rows) Columns() []string { return r.rs.Columns }
+// Columns returns the result-set column names in select order; the returned slice is owned by the caller.
+func (r *Rows) Columns() []string {
+	return append([]string(nil), r.rs.Columns...)
+}
 
 // Next advances to the next row and reports whether one is available.
 func (r *Rows) Next() bool {
@@ -194,15 +196,19 @@ func (r *Rows) Scan(dst ...any) error {
 // Err returns the deferred error from iteration or nil if Next exhausted cleanly.
 func (r *Rows) Err() error { return r.err }
 
-// All drains the cursor into a slice of rows where each row is its column values in select order.
+// All drains the unread rows into a fresh slice so iteration after Next picks up at the next row not the current one.
 func (r *Rows) All() ([][]any, error) {
 	if r.closed {
 		return nil, fmt.Errorf("dripsql.Rows.All: cursor already closed")
 	}
-	remaining := r.rs.Values
-	if r.cursor >= 0 && r.cursor < len(r.rs.Values) {
-		remaining = r.rs.Values[r.cursor:]
+	start := r.cursor + 1
+	if start < 0 {
+		start = 0
 	}
+	if start > len(r.rs.Values) {
+		start = len(r.rs.Values)
+	}
+	remaining := r.rs.Values[start:]
 	out := make([][]any, len(remaining))
 	for i, row := range remaining {
 		copied := make([]any, len(row))
@@ -239,7 +245,7 @@ func (tx *Tx) Query(ctx context.Context, sql string, args ...any) (*Rows, error)
 	return newRows(rs), nil
 }
 
-// QueryRow runs sql inside the transaction expecting at most one result row.
+// QueryRow runs sql inside the transaction expecting exactly one result row.
 func (tx *Tx) QueryRow(ctx context.Context, sql string, args ...any) *Row {
 	rows, err := tx.Query(ctx, sql, args...)
 	return &Row{rows: rows, err: err}
