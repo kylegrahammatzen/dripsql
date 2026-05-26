@@ -15,6 +15,8 @@ Embeddable single-node SQL analytics engine for Go with columnar storage and vec
 - Columnar storage with FOR, Delta, Dictionary, FSST, ALP, and Pcodec cascades
 - ACID transactions with snapshot isolation and atomic multi-table commit
 - Window functions, CTEs, hash joins, and correlated subqueries
+- Segment pruning via zone maps, dictionary counts, integer filters, and var-bytes blooms
+- EXPLAIN and EXPLAIN ANALYZE for plan and runtime inspection
 - Metadata-only ALTER TABLE rename, add, drop, and widening type changes
 
 ## Tests
