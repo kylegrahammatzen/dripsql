@@ -75,12 +75,40 @@ func TestPcodec_SkipsShortPage(t *testing.T) {
 	}
 }
 
-func TestPcodec_SkipsNonFOR(t *testing.T) {
-	v := vector.Vec{Kind: vector.VecFloat64, Len: 4096}
+func TestPcodec_RoundTrip_Float64Clustered(t *testing.T) {
+	rows := 4096
+	v := vector.Vec{Kind: vector.VecFloat64, Len: int32(rows)}
+	v.EnsureFixedBytes(rows)
+	for i := range v.F64() {
+		switch (i / 1024) % 2 {
+		case 0:
+			v.F64()[i] = 1.5 + float64(i%32)*0.001
+		case 1:
+			v.F64()[i] = 1e9 + float64(i%32)
+		}
+	}
+	c := pcodecCodec{}
+	payload, err := c.Encode(v, &EncodeContext{Scratch: NewScratchPool()})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var dst vector.Vec
+	if err := c.Decode(payload, vector.VecFloat64, rows, 0, &dst); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for i, want := range v.F64() {
+		if dst.F64()[i] != want {
+			t.Fatalf("row %d: got %v want %v", i, dst.F64()[i], want)
+		}
+	}
+}
+
+func TestPcodec_SkipsFloat32(t *testing.T) {
+	v := vector.Vec{Kind: vector.VecFloat32, Len: 4096}
 	v.EnsureFixedBytes(4096)
 	_, err := (pcodecCodec{}).Encode(v, &EncodeContext{Scratch: NewScratchPool()})
 	if !errors.Is(err, ErrSkip) {
-		t.Fatalf("expected ErrSkip for float64, got %v", err)
+		t.Fatalf("expected ErrSkip for float32, got %v", err)
 	}
 }
 

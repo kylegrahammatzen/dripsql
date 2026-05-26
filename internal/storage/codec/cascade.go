@@ -30,7 +30,7 @@ func Candidates(k vector.VecKind) []Codec {
 	case k == vector.VecFloat32 || k == vector.VecFloat64:
 		base = append(base, mustLookup(schema.EncodingALP))
 		if k == vector.VecFloat64 {
-			base = append(base, mustLookup(schema.EncodingALPRD))
+			base = append(base, mustLookup(schema.EncodingALPRD), mustLookup(schema.EncodingPcodec))
 		}
 	}
 	return append(base, mustLookup(schema.EncodingFlat))
