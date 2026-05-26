@@ -27,11 +27,10 @@ func (db *DB) BulkInsert(ctx context.Context, statements []string) (int64, error
 		ctx = context.Background()
 	}
 
-	db.mu.Lock()
-	defer db.mu.Unlock()
-	if db.closed {
-		return 0, fmt.Errorf("engine: database is closed")
+	if err := db.lockOpen(); err != nil {
+		return 0, err
 	}
+	defer db.mu.Unlock()
 
 	var (
 		def     sql.BoundTableDef
@@ -76,30 +75,33 @@ func (db *DB) BulkInsert(ctx context.Context, statements []string) (int64, error
 		return 0, nil
 	}
 
-	path := db.nextSegmentPath(def.Name)
-	cleanup := true
-	defer func() {
-		if cleanup {
-			os.Remove(path)
-		}
-	}()
-
 	root := storage.NewSpan("BulkInsert " + def.Name)
-	span, err := storage.WriteSegment(path, batches, columnCodecs(def))
-	if span != nil {
-		root.AppendChild(span)
-	}
+	add, cleanup, err := db.writeSegmentAdd(def, batches, uint32(total), root)
 	root.End()
 	db.publishWriteSpan(root)
 	if err != nil {
 		return total, err
 	}
-
-	if err := db.commitManifestTxn(def.Name, []storage.ManifestSegmentAdd{{Path: path, Rows: uint32(total)}}, nil); err != nil {
+	defer func() { cleanup() }()
+	if err := db.commitManifestTxn(def.Name, []storage.ManifestSegmentAdd{add}, nil); err != nil {
 		return total, err
 	}
-	cleanup = false
+	cleanup = func() {}
 	return total, nil
+}
+
+// writeSegmentAdd writes batches to a fresh segment file and returns the matching manifest entry plus a cleanup func that removes the file when called.
+func (db *DB) writeSegmentAdd(def sql.BoundTableDef, batches []vector.Batch, rows uint32, parent *storage.Span) (storage.ManifestSegmentAdd, func(), error) {
+	path := db.nextSegmentPath(def.Name)
+	span, err := storage.WriteSegment(path, batches, columnCodecs(def))
+	if span != nil && parent != nil {
+		parent.AppendChild(span)
+	}
+	if err != nil {
+		os.Remove(path)
+		return storage.ManifestSegmentAdd{}, nil, err
+	}
+	return storage.ManifestSegmentAdd{Path: path, Rows: rows}, func() { os.Remove(path) }, nil
 }
 
 func (db *DB) insert(ctx context.Context, plan *sql.Plan, commit commitFn) (int64, error) {
@@ -118,27 +120,18 @@ func (db *DB) insert(ctx context.Context, plan *sql.Plan, commit commitFn) (int6
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	path := db.nextSegmentPath(def.Name)
-	cleanup := true
-	defer func() {
-		if cleanup {
-			os.Remove(path)
-		}
-	}()
 	stmt := storage.NewSpan("INSERT " + def.Name)
-	span, err := storage.WriteSegment(path, []vector.Batch{batch}, columnCodecs(def))
-	if span != nil {
-		stmt.AppendChild(span)
-	}
+	add, cleanup, err := db.writeSegmentAdd(def, []vector.Batch{batch}, uint32(values.RowCount), stmt)
 	stmt.End()
 	db.publishWriteSpan(stmt)
 	if err != nil {
 		return 0, err
 	}
-	if err := commit(def.Name, []storage.ManifestSegmentAdd{{Path: path, Rows: uint32(values.RowCount)}}, nil); err != nil {
+	defer func() { cleanup() }()
+	if err := commit(def.Name, []storage.ManifestSegmentAdd{add}, nil); err != nil {
 		return 0, err
 	}
-	cleanup = false
+	cleanup = func() {}
 	return int64(values.RowCount), nil
 }
 
