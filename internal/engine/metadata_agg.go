@@ -28,6 +28,11 @@ func (db *DB) answerFromMetadata(plan *sql.Plan) (*Rows, bool, error) {
 	if scan.Op != sql.RelScan {
 		return nil, false, nil
 	}
+	// Metadata aggregates read manifest-wide stats that ignore commit_ts visibility, so
+	// any AS OF (or future per-table snapshot) must bail to the scan path.
+	if scan.Table.AsOf != 0 {
+		return nil, false, nil
+	}
 	if scan.Where != nil {
 		return db.tryCountWithFilter(plan, rel, agg, scan)
 	}

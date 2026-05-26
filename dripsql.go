@@ -144,6 +144,9 @@ func (db *DB) Tables() []string { return db.e.Tables() }
 // TableSchema returns column metadata for name or an error if the table is unknown.
 func (db *DB) TableSchema(name string) ([]ColumnInfo, error) { return db.e.TableSchema(name) }
 
+// LastCommitTs returns the highest commit timestamp written so far, suitable as the readTs argument to QueryAt or the integer in `AS OF` SQL.
+func (db *DB) LastCommitTs() uint64 { return db.e.LastCommitTs() }
+
 // ColumnInfo describes one column returned by TableSchema.
 type ColumnInfo = engine.ColumnInfo
 

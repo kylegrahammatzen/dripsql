@@ -66,6 +66,8 @@ func (db *DB) SetCacheSize(n int) {
 
 func (db *DB) SetReadOnly(on bool) { db.readOnly.Store(on) }
 
+func (db *DB) LastCommitTs() uint64 { return db.nextCommitTs.Load() }
+
 // Default keeps us well below the Windows default-handle ceiling without thrashing on typical workloads.
 const defaultSegCacheLimit = 256
 

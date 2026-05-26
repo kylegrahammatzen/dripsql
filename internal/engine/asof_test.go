@@ -61,6 +61,28 @@ func TestSQLAsOf_AliasAndAsOf(t *testing.T) {
 	}
 }
 
+// count(*) used to slip past the AS OF clause because the metadata aggregate
+// short-circuit ignored scan.Table.AsOf. Regression for that path.
+func TestSQLAsOf_CountStarRespectsSnapshot(t *testing.T) {
+	db := openTestDB(t)
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
+	mustExec(t, db, "INSERT INTO t (id) VALUES (1), (2)")
+	tsAfterFirst := db.nextCommitTs.Load()
+	mustExec(t, db, "INSERT INTO t (id) VALUES (3), (4)")
+
+	q := fmt.Sprintf("SELECT count(*) FROM t AS OF %d", tsAfterFirst)
+	rows, err := db.Query(context.Background(), q)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(rows.Values) != 1 {
+		t.Fatalf("count rows = %d, want 1", len(rows.Values))
+	}
+	if got := rows.Values[0][0]; got != int64(2) {
+		t.Fatalf("count(*) AS OF earlyTs = %v, want 2", got)
+	}
+}
+
 func TestSQLAsOf_PerTableInJoin(t *testing.T) {
 	db := openTestDB(t)
 	mustExec(t, db, "CREATE TABLE a (id int64 NOT NULL, v int64 NOT NULL)")
