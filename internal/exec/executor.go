@@ -591,9 +591,10 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, ou
 	opts := storage.ScanOpts{Segments: segs, Columns: names, TopK: topK}
 	var residual *sql.BoundExpr
 	if rel.Where != nil {
-		if pred, ok := loweredPredicate(*rel.Where); ok {
-			opts.Pred = &pred
-			if len(rel.PredicateOnly) > 0 {
+		push, res := splitWhere(*rel.Where)
+		if push != nil {
+			opts.Pred = push
+			if res == nil && len(rel.PredicateOnly) > 0 {
 				drop := make(map[sql.ColumnID]struct{}, len(rel.PredicateOnly))
 				for _, id := range rel.PredicateOnly {
 					drop[id] = struct{}{}
@@ -606,9 +607,8 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, ou
 				}
 				opts.Columns = kept
 			}
-		} else {
-			residual = rel.Where
 		}
+		residual = res
 	}
 	parallelism := 1
 	if topK == nil && len(segs) > 1 {

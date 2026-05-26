@@ -1,4 +1,4 @@
-// loweredPredicate maps binary comparison ops to storage.Pred with reversed-operand handling and overflow guards.
+﻿// loweredPredicate maps binary comparison ops to storage.Pred with reversed-operand handling and overflow guards.
 package exec
 
 import (
@@ -168,6 +168,58 @@ func TestLoweredPredicate_InSingleton(t *testing.T) {
 	want := intLeaf(storage.OpEq, "id", 42)
 	if !predEq(got, want) {
 		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// Mixed-WHERE contract pushes the lowerable conjunct and keeps the rest as residual instead of falling back to a full FilterOp.
+func TestSplitWhere_MixedConjuncts(t *testing.T) {
+	unlowerable := sql.BoundExpr{Op: sql.ExprAdd, Args: []sql.BoundExpr{
+		{Op: sql.ExprColumn, Column: "y"},
+		{Op: sql.ExprLiteral, Literal: int64(1)},
+	}}
+	expr := sql.BoundExpr{Op: sql.ExprAnd, Args: []sql.BoundExpr{
+		cmp(sql.ExprEqual, "x", 7),
+		unlowerable,
+	}}
+	push, res := splitWhere(expr)
+	if push == nil {
+		t.Fatal("expected push pred for x=7")
+	}
+	if !predEq(*push, intLeaf(storage.OpEq, "x", 7)) {
+		t.Errorf("push got %#v", *push)
+	}
+	if res == nil || res.Op != sql.ExprAdd {
+		t.Fatalf("residual got %#v", res)
+	}
+}
+
+// All-pushable WHERE must leave residual nil so the PredicateOnly column-narrowing path stays active.
+func TestSplitWhere_AllPushed(t *testing.T) {
+	expr := sql.BoundExpr{Op: sql.ExprAnd, Args: []sql.BoundExpr{
+		cmp(sql.ExprEqual, "x", 1),
+		cmp(sql.ExprGreater, "x", 0),
+	}}
+	push, res := splitWhere(expr)
+	if push == nil || push.Op != storage.OpAnd || len(push.Children) != 2 {
+		t.Fatalf("push got %#v", push)
+	}
+	if res != nil {
+		t.Fatalf("expected nil residual, got %#v", *res)
+	}
+}
+
+// No pushable conjunct means residual carries the whole expression so FilterOp runs it unchanged.
+func TestSplitWhere_NothingPushed(t *testing.T) {
+	expr := sql.BoundExpr{Op: sql.ExprAdd, Args: []sql.BoundExpr{
+		{Op: sql.ExprColumn, Column: "y"},
+		{Op: sql.ExprLiteral, Literal: int64(1)},
+	}}
+	push, res := splitWhere(expr)
+	if push != nil {
+		t.Fatalf("expected nil push, got %#v", *push)
+	}
+	if res == nil || res.Op != sql.ExprAdd {
+		t.Fatalf("residual got %#v", res)
 	}
 }
 

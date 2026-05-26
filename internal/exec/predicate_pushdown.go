@@ -8,6 +8,50 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
+func splitWhere(expr sql.BoundExpr) (*storage.Pred, *sql.BoundExpr) {
+	var pushable []storage.Pred
+	var residual []sql.BoundExpr
+	var walk func(sql.BoundExpr)
+	walk = func(e sql.BoundExpr) {
+		if e.Op == sql.ExprAnd && len(e.Args) == 2 {
+			walk(e.Args[0])
+			walk(e.Args[1])
+			return
+		}
+		if p, ok := loweredPredicate(e); ok {
+			pushable = append(pushable, p)
+			return
+		}
+		residual = append(residual, e)
+	}
+	walk(expr)
+
+	var push *storage.Pred
+	switch len(pushable) {
+	case 0:
+	case 1:
+		p := pushable[0]
+		push = &p
+	default:
+		p := storage.Pred{Op: storage.OpAnd, Children: pushable}
+		push = &p
+	}
+	var res *sql.BoundExpr
+	switch len(residual) {
+	case 0:
+	case 1:
+		r := residual[0]
+		res = &r
+	default:
+		r := residual[0]
+		for i := 1; i < len(residual); i++ {
+			r = sql.BoundExpr{Op: sql.ExprAnd, Type: r.Type, Args: []sql.BoundExpr{r, residual[i]}}
+		}
+		res = &r
+	}
+	return push, res
+}
+
 func loweredPredicate(expr sql.BoundExpr) (storage.Pred, bool) {
 	switch expr.Op {
 	case sql.ExprAnd:
