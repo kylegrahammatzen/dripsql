@@ -3,6 +3,7 @@ package dripsql
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -172,6 +173,54 @@ func TestPlaceholders_BindAcrossTypesAndPaths(t *testing.T) {
 
 	if _, err := db.Query(ctx, "SELECT id FROM t WHERE id = ?"); err == nil {
 		t.Fatal("expected error when args are short of placeholder count")
+	}
+}
+
+// Update commits the staged writes when fn returns nil and rolls them back when fn returns an error.
+func TestUpdate_CommitsOnNilRollsBackOnError(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
+
+	if err := db.Update(ctx, func(tx *Tx) error {
+		_, err := tx.Exec(ctx, "INSERT INTO t (id) VALUES (1), (2)")
+		return err
+	}); err != nil {
+		t.Fatalf("Update commit: %v", err)
+	}
+
+	wantErr := fmt.Errorf("simulated failure")
+	if err := db.Update(ctx, func(tx *Tx) error {
+		if _, err := tx.Exec(ctx, "INSERT INTO t (id) VALUES (99)"); err != nil {
+			return err
+		}
+		return wantErr
+	}); err != wantErr {
+		t.Fatalf("Update rollback err = %v, want simulated failure", err)
+	}
+
+	var n int64
+	if err := db.QueryRow(ctx, "SELECT count(*) FROM t").Scan(&n); err != nil {
+		t.Fatalf("QueryRow: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("count = %d, want 2 (rolled-back insert must not survive)", n)
+	}
+}
+
+// QueryRow rejects zero-row and multi-row results so callers do not silently scan stale values.
+func TestQueryRow_RejectsZeroAndMultipleRows(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL)")
+	mustExec(t, db, "INSERT INTO t (id) VALUES (1), (2)")
+
+	var id int64
+	if err := db.QueryRow(ctx, "SELECT id FROM t WHERE id = ?", int64(999)).Scan(&id); err == nil {
+		t.Fatal("expected no-rows error")
+	}
+	if err := db.QueryRow(ctx, "SELECT id FROM t").Scan(&id); err == nil {
+		t.Fatal("expected too-many-rows error")
 	}
 }
 

@@ -12,24 +12,29 @@ import (
 )
 
 func main() {
+	if err := run(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(ctx context.Context) error {
 	dbPath := flag.String("db", "", "directory to open as the database (required)")
 	flag.Parse()
 	if *dbPath == "" {
-		log.Fatal("missing -db <path>")
+		return fmt.Errorf("missing -db <path>")
 	}
 
 	db, err := dripsql.Open(*dbPath)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer db.Close()
 
-	ctx := context.Background()
 	if _, err := db.Exec(ctx, "CREATE TABLE IF NOT EXISTS events (id int64 NOT NULL)"); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if _, err := db.Exec(ctx, "INSERT INTO events (id) VALUES (1), (2), (3)"); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	db.SetReadOnly(true)
@@ -37,19 +42,10 @@ func main() {
 		fmt.Printf("write rejected as expected: %v\n", err)
 	}
 
-	rows, err := db.Query(ctx, "SELECT count(*) FROM events")
-	if err != nil {
-		log.Fatal(err)
+	var n int64
+	if err := db.QueryRow(ctx, "SELECT count(*) FROM events").Scan(&n); err != nil {
+		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var n int64
-		if err := rows.Scan(&n); err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("read in read-only mode: %d rows\n", n)
-	}
-	if err := rows.Err(); err != nil {
-		log.Fatal(err)
-	}
+	fmt.Printf("read in read-only mode: %d rows\n", n)
+	return nil
 }

@@ -66,6 +66,32 @@ func (db *DB) BeginTx(ctx context.Context) (*Tx, error) {
 	return &Tx{t: t}, nil
 }
 
+// Update runs fn inside a transaction that commits on nil return and rolls back on error or panic.
+func (db *DB) Update(ctx context.Context, fn func(*Tx) error) (err error) {
+	tx, err := db.BeginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			return
+		}
+		err = tx.Commit()
+	}()
+	return fn(tx)
+}
+
+// QueryRow runs sql expecting at most one result row and returns a single-shot scanner.
+func (db *DB) QueryRow(ctx context.Context, sql string, args ...any) *Row {
+	rows, err := db.Query(ctx, sql, args...)
+	return &Row{rows: rows, err: err}
+}
+
 // Compact rewrites half-or-more-deleted segments for table into fresh segments under one atomic manifest swap.
 func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 	return db.e.Compact(ctx, table)
@@ -90,6 +116,33 @@ func (db *DB) SetReadOnly(on bool) { db.e.SetReadOnly(on) }
 type Result struct {
 	Statements   int
 	RowsAffected int64
+}
+
+// Row is a one-shot scanner for the single result row of QueryRow.
+type Row struct {
+	rows *Rows
+	err  error
+}
+
+// Scan copies the single row into dst pointers and reports an error if the query produced zero or more than one row.
+func (r *Row) Scan(dst ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	defer r.rows.Close()
+	if !r.rows.Next() {
+		if err := r.rows.Err(); err != nil {
+			return err
+		}
+		return fmt.Errorf("dripsql.Row.Scan: query returned no rows")
+	}
+	if err := r.rows.Scan(dst...); err != nil {
+		return err
+	}
+	if r.rows.Next() {
+		return fmt.Errorf("dripsql.Row.Scan: query returned more than one row")
+	}
+	return r.rows.Err()
 }
 
 // Rows is the single-pass cursor returned by Query and must always be Closed.
@@ -184,6 +237,12 @@ func (tx *Tx) Query(ctx context.Context, sql string, args ...any) (*Rows, error)
 		return nil, err
 	}
 	return newRows(rs), nil
+}
+
+// QueryRow runs sql inside the transaction expecting at most one result row.
+func (tx *Tx) QueryRow(ctx context.Context, sql string, args ...any) *Row {
+	rows, err := tx.Query(ctx, sql, args...)
+	return &Row{rows: rows, err: err}
 }
 
 // Commit publishes the transaction's writes atomically and releases the writer lock.
