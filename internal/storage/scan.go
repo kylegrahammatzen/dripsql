@@ -75,7 +75,7 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 	}
 	var topKPages map[[2]int]bool
 	if opts.TopK != nil && opts.Pred == nil {
-		topKPages = selectTopKPages(opts.Segments, opts.TopK)
+		topKPages = SelectTopKPages(opts.Segments, opts.TopK)
 	}
 	var predNeeded []bool
 	if len(predCols) != 0 {
@@ -97,8 +97,7 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 		if opts.Pred != nil {
 			predIDs = opts.Pred.ColumnIDs()
 		}
-		synthKinds := decodeSynthKinds(decode, opts.Columns, opts.ColumnKinds)
-		synthDefaults := decodeSynthDefaults(decode, opts.Columns, opts.ColumnDefaults)
+		synthKinds, synthDefaults := decodeSynthMeta(decode, opts.Columns, opts.ColumnKinds, opts.ColumnDefaults)
 		decodeIdx, projIdx, err := resolveSegmentColumns(seg, decode, projection, decodeIDs(decode, opts.Columns, opts.ColumnIDs, predCols, predIDs), synthKinds)
 		if err != nil {
 			return fmt.Errorf("Scan: %w", err)
@@ -137,9 +136,9 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 	return nil
 }
 
-// selectTopKPages returns pages that cannot be proven irrelevant to the top K+Offset
+// SelectTopKPages returns pages that cannot be proven irrelevant to the top K+Offset
 // rows. Returns nil to signal no pruning (caller should scan everything).
-func selectTopKPages(segments []*Segment, tk *TopKPushdown) map[[2]int]bool {
+func SelectTopKPages(segments []*Segment, tk *TopKPushdown) map[[2]int]bool {
 	if tk.K <= 0 || tk.Offset < 0 {
 		return nil
 	}
@@ -486,34 +485,37 @@ func widenVec(src vector.Vec, dst vector.VecKind) (vector.Vec, error) {
 	return out, nil
 }
 
-func decodeSynthDefaults(decode []string, projNames []string, projDefaults []ScanDefault) []ScanDefault {
-	if len(projDefaults) != len(projNames) || len(projDefaults) == 0 {
-		return nil
+func decodeSynthMeta(decode []string, projNames []string, projKinds []vector.VecKind, projDefaults []ScanDefault) ([]vector.VecKind, []ScanDefault) {
+	useKinds := len(projKinds) == len(projNames) && len(projKinds) != 0
+	useDefaults := len(projDefaults) == len(projNames) && len(projDefaults) != 0
+	if !useKinds && !useDefaults {
+		return nil, nil
 	}
-	byName := make(map[string]ScanDefault, len(projNames))
+	byName := make(map[string]int, len(projNames))
 	for i, n := range projNames {
-		byName[strings.ToLower(n)] = projDefaults[i]
+		byName[strings.ToLower(n)] = i
 	}
-	out := make([]ScanDefault, len(decode))
+	var kinds []vector.VecKind
+	if useKinds {
+		kinds = make([]vector.VecKind, len(decode))
+	}
+	var defaults []ScanDefault
+	if useDefaults {
+		defaults = make([]ScanDefault, len(decode))
+	}
 	for i, n := range decode {
-		out[i] = byName[strings.ToLower(n)]
+		j, ok := byName[strings.ToLower(n)]
+		if !ok {
+			continue
+		}
+		if useKinds {
+			kinds[i] = projKinds[j]
+		}
+		if useDefaults {
+			defaults[i] = projDefaults[j]
+		}
 	}
-	return out
-}
-
-func decodeSynthKinds(decode []string, projNames []string, projKinds []vector.VecKind) []vector.VecKind {
-	if len(projKinds) != len(projNames) || len(projKinds) == 0 {
-		return nil
-	}
-	byName := make(map[string]vector.VecKind, len(projNames))
-	for i, n := range projNames {
-		byName[strings.ToLower(n)] = projKinds[i]
-	}
-	out := make([]vector.VecKind, len(decode))
-	for i, n := range decode {
-		out[i] = byName[strings.ToLower(n)]
-	}
-	return out
+	return kinds, defaults
 }
 
 func resolveSegmentColumns(seg *Segment, decode, projection []string, decodeIDs []uint64, synthKinds []vector.VecKind) (decodeIdx, projIdx []int, err error) {
@@ -597,6 +599,17 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 	var sel vector.SelectionMask
 	var scratch []byte
 	predOnly := predicateOnlyMask(decodeIdx, projIdx)
+	predOnlyAny := false
+	for _, b := range predOnly {
+		if b {
+			predOnlyAny = true
+			break
+		}
+	}
+	encodedBeforeDecode := false
+	if pred != nil {
+		_, encodedBeforeDecode = pred.bp.(boundEqBytes)
+	}
 	for i, ci := range decodeIdx {
 		// Emit the caller's name so a renamed column resolves downstream even though the segment footer still has the old one.
 		decoded[i].Name = decode[i]
@@ -682,7 +695,7 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 			}
 			sel.FillAll()
 			encodedDone = true
-		} else if pred != nil && (hasAny(predOnly) || shouldApplyEncodedBeforeDecode(pred)) {
+		} else if pred != nil && (predOnlyAny || encodedBeforeDecode) {
 			handled, newScratch, err := pred.ApplyEncoded(seg, pi, &sel, scratch)
 			scratch = newScratch
 			if err != nil {
@@ -776,21 +789,4 @@ func predicateOnlyMask(decodeIdx, projIdx []int) []bool {
 		}
 	}
 	return mask
-}
-
-func hasAny(mask []bool) bool {
-	for _, b := range mask {
-		if b {
-			return true
-		}
-	}
-	return false
-}
-
-func shouldApplyEncodedBeforeDecode(pred *CompiledPred) bool {
-	if pred == nil {
-		return false
-	}
-	_, ok := pred.bp.(boundEqBytes)
-	return ok
 }

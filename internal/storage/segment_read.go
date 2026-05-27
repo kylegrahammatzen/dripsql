@@ -3,6 +3,7 @@
 package storage
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
@@ -12,6 +13,60 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
+
+// SegmentIdentity is the optional sidecar that records the table_id, schema_generation, and per-chunk column_id list.
+// Absence means a legacy dsv4 segment that the engine still resolves positionally.
+type SegmentIdentity struct {
+	TableID          uint64
+	SchemaGeneration uint64
+	ColumnIDs        []uint64
+}
+
+const identitySidecarMagic = "DSID"
+
+const sidecarSectionIdentity uint8 = 5
+
+func encodeIdentitySidecar(id SegmentIdentity) []byte {
+	if id.TableID == 0 && id.SchemaGeneration == 0 && len(id.ColumnIDs) == 0 {
+		return nil
+	}
+	size := len(identitySidecarMagic) + 8 + 8 + 4 + 8*len(id.ColumnIDs)
+	buf := make([]byte, 0, size)
+	buf = append(buf, identitySidecarMagic...)
+	buf = binary.LittleEndian.AppendUint64(buf, id.TableID)
+	buf = binary.LittleEndian.AppendUint64(buf, id.SchemaGeneration)
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(id.ColumnIDs)))
+	for _, c := range id.ColumnIDs {
+		buf = binary.LittleEndian.AppendUint64(buf, c)
+	}
+	return buf
+}
+
+func decodeIdentitySidecar(data []byte) (SegmentIdentity, error) {
+	hdr := len(identitySidecarMagic) + 8 + 8 + 4
+	if len(data) < hdr {
+		return SegmentIdentity{}, fmt.Errorf("identity sidecar: short header (%d bytes)", len(data))
+	}
+	if string(data[:len(identitySidecarMagic)]) != identitySidecarMagic {
+		return SegmentIdentity{}, fmt.Errorf("identity sidecar: bad magic")
+	}
+	pos := len(identitySidecarMagic)
+	tableID := binary.LittleEndian.Uint64(data[pos : pos+8])
+	pos += 8
+	gen := binary.LittleEndian.Uint64(data[pos : pos+8])
+	pos += 8
+	n := int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+	pos += 4
+	if pos+n*8 != len(data) {
+		return SegmentIdentity{}, fmt.Errorf("identity sidecar: body length mismatch (have %d, want %d)", len(data)-pos, n*8)
+	}
+	ids := make([]uint64, n)
+	for i := range ids {
+		ids[i] = binary.LittleEndian.Uint64(data[pos : pos+8])
+		pos += 8
+	}
+	return SegmentIdentity{TableID: tableID, SchemaGeneration: gen, ColumnIDs: ids}, nil
+}
 
 type SegmentColumn struct {
 	Name       string
@@ -360,6 +415,14 @@ func (s *Segment) ReadPageInto(colIdx, pageIdx int, scratch []byte) (vector.Vec,
 	var v vector.Vec
 	scratch, err := s.readPageIntoValidated(colIdx, pageIdx, scratch, &v)
 	return v, scratch, err
+}
+
+// ReadPageIntoVec decodes a page into dst and returns reusable scratch.
+func (s *Segment) ReadPageIntoVec(colIdx, pageIdx int, scratch []byte, dst *vector.Vec) ([]byte, error) {
+	if err := s.ValidateColumns(); err != nil {
+		return scratch, err
+	}
+	return s.readPageIntoValidated(colIdx, pageIdx, scratch, dst)
 }
 
 func (s *Segment) readPageIntoValidated(colIdx, pageIdx int, scratch []byte, dst *vector.Vec) ([]byte, error) {

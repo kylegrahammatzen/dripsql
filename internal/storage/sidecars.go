@@ -1,11 +1,189 @@
 // Optional sidecars built post-segment-publish and consulted at OpenSegment.
-// A failed build or read falls back to the operator scan with no error surfaced.
+// Generic Sidecar[T] plumbing, the per-tag container framer, and the four concrete sidecars all live here.
 package storage
 
 import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
+
+type Sidecar[T any] struct {
+	Magic      string
+	Suffix     string
+	BufHint    int
+	EncodeBody func(name string, v T, w *wireBuffer) error
+	DecodeBody func(name string, r *wireReader) (T, error)
+}
+
+func (s Sidecar[T]) Path(segPath string) string { return segPath + s.Suffix }
+
+// Encode returns the body bytes (magic+colCount+entries) for use either as a
+// standalone sidecar file or as a section inside a container.
+func (s Sidecar[T]) Encode(entries map[string]T) ([]byte, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	hint := s.BufHint
+	if hint <= 0 {
+		hint = 64
+	}
+	w := newWireBuffer(hint + len(entries)*64)
+	w.Raw([]byte(s.Magic))
+	w.U32(uint32(len(entries)))
+	for name, v := range entries {
+		w.LenPrefixedString(name)
+		if err := s.EncodeBody(name, v, w); err != nil {
+			return nil, fmt.Errorf("%s: encode body %q: %w", s.Suffix, name, err)
+		}
+	}
+	return w.Bytes(), nil
+}
+
+// Decode parses bytes previously produced by Encode. Returns (nil, nil) for empty
+// input so callers can treat absent sections as no-op.
+func (s Sidecar[T]) Decode(data []byte) (map[string]T, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	if len(data) < 8 || string(data[:4]) != s.Magic {
+		return nil, fmt.Errorf("%s: bad magic", s.Suffix)
+	}
+	r := newWireReader(data[4:])
+	cols := int(r.U32())
+	out := make(map[string]T, cols)
+	for range cols {
+		name := r.LenPrefixedString()
+		if err := r.Err(); err != nil {
+			return nil, fmt.Errorf("%s: decode: %w", s.Suffix, err)
+		}
+		v, err := s.DecodeBody(name, r)
+		if err != nil {
+			return nil, fmt.Errorf("%s: decode body %q: %w", s.Suffix, name, err)
+		}
+		out[schema.NormalizeName(name)] = v
+	}
+	if err := r.Err(); err != nil {
+		return nil, fmt.Errorf("%s: decode: %w", s.Suffix, err)
+	}
+	if !r.AtEnd() {
+		return nil, fmt.Errorf("%s: trailing bytes (remaining=%d)", s.Suffix, r.Remaining())
+	}
+	return out, nil
+}
+
+// Empty entries produce no file so sidecars stay best-effort.
+func (s Sidecar[T]) Write(segPath string, entries map[string]T) error {
+	data, err := s.Encode(entries)
+	if err != nil {
+		return err
+	}
+	if data == nil {
+		return nil
+	}
+	path := s.Path(segPath)
+	tmpPath := path + ".tmp"
+	_ = os.Remove(tmpPath)
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// Missing file returns (nil, nil). Bad magic or trailing bytes are an error so
+// silent corruption never serves stale data.
+func (s Sidecar[T]) Read(segPath string) (map[string]T, error) {
+	path := s.Path(segPath)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return s.Decode(data)
+}
+
+const sidecarContainerMagic = "DSCV1"
+
+const (
+	sidecarSectionDictHist  uint8 = 1
+	sidecarSectionIntFilter uint8 = 2
+	sidecarSectionNumSum    uint8 = 3
+	sidecarSectionVarBloom  uint8 = 4
+)
+
+const sidecarSectionHeaderSize = 1 + 4
+
+// EncodeSidecarContainer serializes sections to a single byte buffer suitable for
+// embedding inline at the end of a segment file. Empty sections are skipped.
+// Returns nil when every section is empty.
+func EncodeSidecarContainer(sections map[uint8][]byte) []byte {
+	live := make([]uint8, 0, len(sections))
+	total := 0
+	for tag, body := range sections {
+		if len(body) == 0 {
+			continue
+		}
+		live = append(live, tag)
+		total += sidecarSectionHeaderSize + len(body)
+	}
+	if len(live) == 0 {
+		return nil
+	}
+	hdr := len(sidecarContainerMagic) + 1
+	buf := make([]byte, 0, hdr+total)
+	buf = append(buf, sidecarContainerMagic...)
+	buf = append(buf, uint8(len(live)))
+	for _, tag := range live {
+		body := sections[tag]
+		buf = append(buf, tag)
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(body)))
+		buf = append(buf, body...)
+	}
+	return buf
+}
+
+// DecodeSidecarContainer parses bytes previously produced by EncodeSidecarContainer.
+// Empty input returns (nil, nil). Bad magic or truncated section is an error.
+func DecodeSidecarContainer(data []byte) (map[uint8][]byte, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	hdr := len(sidecarContainerMagic) + 1
+	if len(data) < hdr || string(data[:len(sidecarContainerMagic)]) != sidecarContainerMagic {
+		return nil, errors.New("sidecar container: bad magic")
+	}
+	count := int(data[len(sidecarContainerMagic)])
+	pos := hdr
+	out := make(map[uint8][]byte, count)
+	for range count {
+		if pos+sidecarSectionHeaderSize > len(data) {
+			return nil, fmt.Errorf("sidecar container: header truncated at pos %d", pos)
+		}
+		tag := data[pos]
+		bodyLen := int(binary.LittleEndian.Uint32(data[pos+1 : pos+5]))
+		pos += sidecarSectionHeaderSize
+		if pos+bodyLen > len(data) {
+			return nil, fmt.Errorf("sidecar container: body truncated for tag %d", tag)
+		}
+		out[tag] = data[pos : pos+bodyLen]
+		pos += bodyLen
+	}
+	if pos != len(data) {
+		return nil, errors.New("sidecar container: trailing bytes")
+	}
+	return out, nil
+}
 
 const (
 	dictHistMagic         = "DHV1"
@@ -106,7 +284,7 @@ func readInt64Key(v vector.Vec, row int) int64 {
 
 // VarBloom is a per-page bloom filter set for one varbytes column. Index in the
 // outer slice is the segment-relative page index. A nil entry means no bloom for
-// that page (all-null or build skipped); callers must treat that as "cannot prune".
+// that page (all-null or build skipped) and callers must treat that as cannot-prune.
 type VarBloom struct {
 	Pages []*bloomFilter
 }
@@ -158,7 +336,7 @@ var varBloomSidecar = Sidecar[*VarBloom]{
 }
 
 // hashBytesFNV is the byte-string-to-uint64 hash used to feed the per-page bloom.
-// Build and query must use the same function; FNV-1a-64 is fast and seedless.
+// Build and query must use the same function and FNV-1a-64 is fast and seedless.
 func hashBytesFNV(b []byte) uint64 {
 	const (
 		offset64 = 14695981039346656037

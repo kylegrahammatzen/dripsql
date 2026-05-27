@@ -1,8 +1,8 @@
-// Bloom filter correctness and the boundEqInt64.PruneSegment fast path.
-// Filter reports presence for every inserted key and rejects absent keys.
+// Sidecar tests covering bloom-filter correctness, the boundEqInt64 PruneSegment fast path, and per-page varbytes bloom pruning.
 package storage
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -59,5 +59,61 @@ func TestBoundEqInt64_PruneSegment_UsesIntFilterWhenInRange(t *testing.T) {
 	p = Pred{Op: OpEq, Col: "id", Kind: vector.VecInt64, I64: 100}
 	if p.Skips(seg) {
 		t.Fatalf("Skips(id=100) must not prune a key present in segment")
+	}
+}
+
+func TestVarBloom_PrunesAbsentPerPage(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "seg.dat")
+
+	makePage := func(values []string) vector.Batch {
+		v := vector.NewVarVec(vector.VecText, len(values), 0)
+		vb := v.Var()
+		for i, s := range values {
+			vb.AppendString(i, s)
+		}
+		b, err := vector.NewBatch([]vector.Column{{Name: "k", Type: schema.Text, V: v}})
+		if err != nil {
+			t.Fatalf("NewBatch: %v", err)
+		}
+		return b
+	}
+	pages := []vector.Batch{
+		makePage([]string{"alpha", "alpha", "alpha"}),
+		makePage([]string{"beta", "beta"}),
+		makePage([]string{"gamma", "gamma", "gamma", "gamma"}),
+	}
+	if _, err := WriteSegment(path, pages, nil); err != nil {
+		t.Fatalf("WriteSegment: %v", err)
+	}
+	defer os.Remove(path)
+
+	seg, err := OpenSegment(path)
+	if err != nil {
+		t.Fatalf("OpenSegment: %v", err)
+	}
+	defer seg.Close()
+
+	blooms, err := seg.VarBlooms()
+	if err != nil {
+		t.Fatalf("VarBlooms: %v", err)
+	}
+	vb := blooms[schema.NormalizeName("k")]
+	if vb == nil {
+		t.Fatal("missing varbloom for k")
+	}
+	if len(vb.Pages) != 3 {
+		t.Fatalf("want 3 page blooms got %d", len(vb.Pages))
+	}
+
+	bp := boundEqBytes{column: "k", value: []byte("beta")}
+	if !bp.PrunePage(seg, 0) {
+		t.Errorf("page 0 should prune 'beta'")
+	}
+	if bp.PrunePage(seg, 1) {
+		t.Errorf("page 1 must NOT prune 'beta' (value present)")
+	}
+	if !bp.PrunePage(seg, 2) {
+		t.Errorf("page 2 should prune 'beta'")
 	}
 }

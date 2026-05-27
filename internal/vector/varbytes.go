@@ -39,6 +39,17 @@ func (v VarBytes) Prefix(row int) uint32 {
 	return binary.LittleEndian.Uint32(v.views[row].Prefix[:])
 }
 
+func (v VarBytes) InlineKey(row int) ([2]uint64, bool) {
+	view := &v.views[row]
+	if view.Length > StringViewInlineMax {
+		return [2]uint64{}, false
+	}
+	return [2]uint64{
+		*(*uint64)(unsafe.Pointer(view)),
+		*(*uint64)(unsafe.Pointer(&view.Body[0])),
+	}, true
+}
+
 func (v VarBytes) Bytes(row int) []byte {
 	view := &v.views[row]
 	length := int(view.Length)
