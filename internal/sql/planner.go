@@ -1,4 +1,4 @@
-﻿// Planner turns a parsed Stmt into a bound *Plan. Single-table and joined SELECTs flow
+// Planner turns a parsed Stmt into a bound *Plan. Single-table and joined SELECTs flow
 // through one planQuery tail; planFrom builds the source *Rel and scope for both shapes.
 // DDL/DML/SELECT/EXPLAIN binders all live in this file alongside the planner dispatcher.
 package sql
@@ -153,7 +153,6 @@ func (p *Planner) planSelect(stmt *SelectStmt) (*Plan, error) {
 		return nil, err
 	}
 	pruneJoinedScans(rel)
-	rel = fusePlan(rel)
 	return &Plan{Kind: PlanQuery, Rel: rel}, nil
 }
 
@@ -178,7 +177,7 @@ func (p *Planner) planSelectUnion(stmt *SelectStmt) (*Plan, error) {
 	if err := checkUnionShape(leftPlan.Rel.Outputs, rightPlan.Rel.Outputs); err != nil {
 		return nil, err
 	}
-	root := unionRel(leftPlan.Rel, rightPlan.Rel)
+	root := &Rel{Op: RelUnion, Outputs: leftPlan.Rel.Outputs, Inputs: []*Rel{leftPlan.Rel, rightPlan.Rel}}
 	if !tail.All {
 		root = dedupRel(root)
 	}
@@ -189,7 +188,7 @@ func (p *Planner) planSelectUnion(stmt *SelectStmt) (*Plan, error) {
 			return nil, err
 		}
 	}
-	return &Plan{Kind: PlanQuery, Rel: fusePlan(root)}, nil
+	return &Plan{Kind: PlanQuery, Rel: root}, nil
 }
 
 func checkUnionShape(left, right []BoundOutput) error {
@@ -213,7 +212,7 @@ func dedupRel(src *Rel) *Rel {
 		group = append(group, ref)
 		outputs = append(outputs, BoundOutput{Alias: name, Expr: ref})
 	}
-	return aggregateRel(src, group, nil, nil, nil, outputs)
+	return &Rel{Op: RelAggregate, Outputs: outputs, Inputs: []*Rel{src}, GroupBy: group}
 }
 
 func unionOutputColumns(outputs []BoundOutput) map[string]BoundColumnDef {
@@ -263,26 +262,9 @@ func (p *Planner) planSelectWithCTEs(stmt *SelectStmt) (*Plan, error) {
 		return nil, err
 	}
 	if plan.Rel != nil {
-		plan.Rel = substituteCTEAtRoot(plan.Rel, p.ctes)
-		substituteCTEScans(plan.Rel, p.ctes)
+		plan.Rel = substituteCTEScans(plan.Rel, p.ctes)
 	}
 	return plan, nil
-}
-
-func substituteCTEAtRoot(rel *Rel, ctes map[string]*cteEntry) *Rel {
-	if rel == nil || rel.Op != RelScan {
-		return rel
-	}
-	entry, ok := ctes[schema.NormalizeName(rel.Table.Name)]
-	if !ok {
-		return rel
-	}
-	return &Rel{
-		Op:      RelCTE,
-		Outputs: rel.Outputs,
-		Inputs:  []*Rel{entry.rel},
-		Alias:   rel.Alias,
-	}
 }
 
 func cteDefFromRel(name string, rel *Rel) BoundTableDef {
@@ -291,7 +273,10 @@ func cteDefFromRel(name string, rel *Rel) BoundTableDef {
 	for i, out := range rel.Outputs {
 		colName := out.Alias
 		if colName == "" {
-			colName = lastNameSegment(out.Expr.Column)
+			colName = out.Expr.Column
+			if dot := strings.LastIndexByte(colName, '.'); dot >= 0 {
+				colName = colName[dot+1:]
+			}
 		}
 		if colName == "" {
 			colName = fmt.Sprintf("col%d", i)
@@ -314,34 +299,24 @@ func cteDefFromRel(name string, rel *Rel) BoundTableDef {
 		Columns: cols,
 	}
 }
-
-func lastNameSegment(qualified string) string {
-	for i := len(qualified) - 1; i >= 0; i-- {
-		if qualified[i] == '.' {
-			return qualified[i+1:]
-		}
-	}
-	return qualified
-}
-
-func substituteCTEScans(rel *Rel, ctes map[string]*cteEntry) {
+func substituteCTEScans(rel *Rel, ctes map[string]*cteEntry) *Rel {
 	if rel == nil {
-		return
+		return nil
 	}
-	for i, in := range rel.Inputs {
-		if in != nil && in.Op == RelScan {
-			if entry, ok := ctes[schema.NormalizeName(in.Table.Name)]; ok {
-				rel.Inputs[i] = &Rel{
-					Op:      RelCTE,
-					Outputs: in.Outputs,
-					Inputs:  []*Rel{entry.rel},
-					Alias:   in.Alias,
-				}
-				continue
+	if rel.Op == RelScan {
+		if entry, ok := ctes[schema.NormalizeName(rel.Table.Name)]; ok {
+			return &Rel{
+				Op:      RelCTE,
+				Outputs: rel.Outputs,
+				Inputs:  []*Rel{entry.rel},
+				Alias:   rel.Alias,
 			}
 		}
-		substituteCTEScans(in, ctes)
 	}
+	for i, in := range rel.Inputs {
+		rel.Inputs[i] = substituteCTEScans(in, ctes)
+	}
+	return rel
 }
 
 func lowerDistinctToGroupBy(stmt *SelectStmt) (*SelectStmt, error) {
@@ -593,7 +568,7 @@ func planQuery(stmt *SelectStmt, src *Rel, sc *scope) (*Rel, error) {
 		if src.Op == RelScan && !sc.joined {
 			src.Where = &where
 		} else {
-			src = filterRel(src, where)
+			src = &Rel{Op: RelFilter, Outputs: src.Outputs, Inputs: []*Rel{src}, Predicate: where}
 		}
 	}
 
@@ -663,7 +638,7 @@ func planAggregateTail(stmt *SelectStmt, src *Rel, sc *scope, groupExprs []Bound
 	if src.Op == RelScan && !sc.joined {
 		src.Columns = aggregateScanColumnIDs(group, aggregates, hidden, src.Where)
 	}
-	aggRel := aggregateRel(src, group, aggregates, hidden, having, outputs)
+	aggRel := &Rel{Op: RelAggregate, Outputs: outputs, Inputs: []*Rel{src}, GroupBy: group, Aggregates: aggregates, Hidden: hidden, Having: having}
 	return applyOrderLimit(aggRel, stmt, outputs, sc.columns)
 }
 
@@ -675,36 +650,11 @@ func planScanTail(stmt *SelectStmt, src *Rel, sc *scope) (*Rel, error) {
 		return nil, fmt.Errorf("HAVING requires an aggregate query")
 	}
 	if sc.joined {
-		if len(stmt.OrderBy) != 0 {
-			keys, err := bindJoinedSortKeys(stmt.OrderBy, sc.columns)
-			if err != nil {
-				return nil, err
-			}
-			src = sortRel(src, keys, 0, 0)
-		}
 		outputs, err := bindJoinedOutputs(stmt, sc.sources, sc.columns)
 		if err != nil {
 			return nil, err
 		}
-		root := projectRel(src, outputs)
-		if stmt.Limit != nil || stmt.Offset != nil {
-			limit := int64(-1)
-			offset := int64(0)
-			if stmt.Limit != nil {
-				if *stmt.Limit < 0 {
-					return nil, fmt.Errorf("LIMIT must be non-negative")
-				}
-				limit = *stmt.Limit
-			}
-			if stmt.Offset != nil {
-				if *stmt.Offset < 0 {
-					return nil, fmt.Errorf("OFFSET must be non-negative")
-				}
-				offset = *stmt.Offset
-			}
-			root = limitRel(root, limit, offset)
-		}
-		return root, nil
+		return applyOrderLimit(src, stmt, outputs, sc.columns)
 	}
 	stmtCopy, windowFuncs, err := extractWindowFuncs(stmt, sc.columns)
 	if err != nil {
@@ -1484,21 +1434,6 @@ func splitJoinKeys(on BoundExpr, leftAliases map[string]bool, rightAlias string)
 	return leftKeys, rightKeys, nil
 }
 
-func bindJoinedSortKeys(orderBy []OrderExpr, columns map[string]BoundColumnDef) ([]SortKey, error) {
-	keys := make([]SortKey, 0, len(orderBy))
-	for _, order := range orderBy {
-		if order.Expr == nil {
-			return nil, fmt.Errorf("ORDER BY %q must be a qualified column reference on joined queries", order.Name)
-		}
-		bound, err := bindExpr(columns, order.Expr)
-		if err != nil {
-			return nil, err
-		}
-		keys = append(keys, SortKey{Expr: bound, Desc: order.Desc})
-	}
-	return keys, nil
-}
-
 func columnAlias(qualified string) string {
 	for i, r := range qualified {
 		if r == '.' {
@@ -1543,32 +1478,6 @@ func bindJoinedOutputs(stmt *SelectStmt, sources []joinedSource, columns map[str
 // SELECT binding helpers: scan output expansion, WHERE/HAVING walkers, GROUP BY and
 // aggregate extraction, ORDER BY/LIMIT lowering. The single-table BindSelect wrapper exists
 // for tests that supply a known def directly; production planning runs through planner.go.
-
-func BindSelect(stmt *SelectStmt, def BoundTableDef) (*Plan, error) {
-	if stmt == nil {
-		return nil, fmt.Errorf("SELECT statement is nil")
-	}
-	primary, joins, err := stmt.flattenFrom()
-	if err != nil {
-		return nil, err
-	}
-	if len(joins) != 0 {
-		return nil, fmt.Errorf("BindSelect does not accept joined queries")
-	}
-	if def.Name != "" && schema.NormalizeName(primary.Name) != schema.NormalizeName(def.Name) {
-		return nil, fmt.Errorf("SELECT target %q does not match table %q", primary.Name, def.Name)
-	}
-	sc := &scope{
-		sources: []joinedSource{{Alias: primary.Name, Def: def}},
-		columns: buildColumnIndexQualified(def.Columns, primary.Name, primary.Alias),
-	}
-	src := scanRel(def, "", allColumnIDs(def.Columns), nil)
-	rel, err := planQuery(stmt, src, sc)
-	if err != nil {
-		return nil, err
-	}
-	return &Plan{Kind: PlanQuery, Rel: rel}, nil
-}
 
 func aggregateScanColumnIDs(group []BoundExpr, aggregates, hidden []AggSpec, where *BoundExpr) []ColumnID {
 	var s idSet
@@ -1623,21 +1532,6 @@ func (s *idSet) walk(expr BoundExpr) {
 	}
 }
 
-func BindExplain(stmt *ExplainStmt, def BoundTableDef) (*Plan, error) {
-	if stmt == nil {
-		return nil, fmt.Errorf("EXPLAIN statement is nil")
-	}
-	selectStmt, ok := stmt.Inner.(*SelectStmt)
-	if !ok {
-		return nil, fmt.Errorf("EXPLAIN supports SELECT only")
-	}
-	inner, err := BindSelect(selectStmt, def)
-	if err != nil {
-		return nil, err
-	}
-	return &Plan{Kind: PlanExplain, Inner: inner, Analyze: stmt.Analyze}, nil
-}
-
 func bindScanOutputs(stmt *SelectStmt, def BoundTableDef, columns map[string]BoundColumnDef) ([]BoundOutput, error) {
 	if len(stmt.Select) == 1 {
 		if _, ok := stmt.Select[0].Expr.(*StarRef); ok {
@@ -1676,59 +1570,12 @@ func bindScanOutputExpr(columns map[string]BoundColumnDef, sel SelectExpr) (Boun
 	if sel.Alias == "" {
 		return BoundOutput{}, fmt.Errorf("scan SELECT computed expressions require an alias")
 	}
-	if !isScanComputedOp(bound.Op) {
-		return BoundOutput{}, fmt.Errorf("scan SELECT only supports column, literal, and computed expressions")
-	}
 	return BoundOutput{Alias: sel.Alias, Expr: bound}, nil
-}
-
-func isScanComputedOp(op ExprOp) bool {
-	switch op {
-	case ExprAdd, ExprSubtract, ExprMultiply, ExprDivide, ExprModulo, ExprIntDivide,
-		ExprConcat, ExprLower, ExprUpper, ExprJSONGet, ExprJSONGetText, ExprLength,
-		ExprCoalesce, ExprSubstring, ExprAbs, ExprNullIf, ExprCase, ExprSubquery:
-		return true
-	default:
-		return false
-	}
 }
 
 func bindWhereExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
 	bound, err := bindWhereLogicalExpr(columns, expr)
-	if err == nil {
-		return bound, nil
-	}
-	if col := whereColumnRef(expr); col != "" {
-		if _, ok := findColumn(columns, col); !ok {
-			return BoundExpr{}, fmt.Errorf("missing WHERE column %q", col)
-		}
-	}
-	return BoundExpr{}, err
-}
-
-func whereColumnRef(expr Expr) string {
-	switch expr := expr.(type) {
-	case *BinaryExpr:
-		col, _ := expr.Left.(*ColumnRef)
-		if col == nil {
-			return ""
-		}
-		return col.Name
-	case *BetweenExpr:
-		col, _ := expr.Expr.(*ColumnRef)
-		if col == nil {
-			return ""
-		}
-		return col.Name
-	case *InExpr:
-		col, _ := expr.Expr.(*ColumnRef)
-		if col == nil {
-			return ""
-		}
-		return col.Name
-	default:
-		return ""
-	}
+	return bound, err
 }
 
 func bindWhereLogicalExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
@@ -2192,11 +2039,11 @@ func applyOrderLimit(src *Rel, stmt *SelectStmt, outputs []BoundOutput, columns 
 			off = offset
 			hasLimit = false
 		}
-		src = sortRel(src, keys, k, off)
+		src = &Rel{Op: RelSort, Outputs: src.Outputs, Inputs: []*Rel{src}, SortKeys: keys, K: k, Offset: off}
 	}
-	root := projectRel(src, outputs)
+	root := &Rel{Op: RelProject, Outputs: outputs, Inputs: []*Rel{src}, Projection: outputs}
 	if hasLimit {
-		root = limitRel(root, limit, offset)
+		root = &Rel{Op: RelLimit, Outputs: root.Outputs, Inputs: []*Rel{root}, Limit: limit, Offset: offset}
 	}
 	return root, nil
 }
@@ -2349,28 +2196,4 @@ func allColumnIDs(columns []BoundColumnDef) []ColumnID {
 		ids = append(ids, col.ID)
 	}
 	return ids
-}
-
-func fusePlan(root *Rel) *Rel {
-	if root == nil {
-		return nil
-	}
-	for i, in := range root.Inputs {
-		root.Inputs[i] = fusePlan(in)
-	}
-	if root.Op == RelFilter && len(root.Inputs) == 1 && root.Inputs[0] != nil && root.Inputs[0].Op == RelFilter {
-		child := root.Inputs[0]
-		combined := BoundExpr{
-			Op:   ExprAnd,
-			Type: root.Predicate.Type,
-			Args: []BoundExpr{child.Predicate, root.Predicate},
-		}
-		root = &Rel{
-			Op:        RelFilter,
-			Outputs:   root.Outputs,
-			Inputs:    child.Inputs,
-			Predicate: combined,
-		}
-	}
-	return root
 }
