@@ -376,17 +376,46 @@ func (a *AggregateOp) aggregateBatchTextKeyCountSumInt64(batch vector.Batch, col
 	sumCol := &batch.Columns[specCols[1].idx]
 	sumValid := sumCol.V.Valid
 	sumVals := sumCol.V.I64()
+	var shortKeys [16][2]uint64
+	var shortVals [16]int
+	var shortN int
 	batch.Sel.IterSet(func(row int) {
 		if valid != nil && !valid.IsValid(row) {
 			return
 		}
-		b := vb.Bytes(row)
-		gIdx, ok := idx[string(b)]
-		if !ok {
-			key := string(b)
-			gIdx = len(a.groups)
-			idx[key] = gIdx
-			a.groups = append(a.groups, aggGroup{key: key, aggs: make([]aggAccum, len(a.specs))})
+		gIdx := -1
+		if key, ok := vb.InlineKey(row); ok {
+			for i := range shortN {
+				if shortKeys[i] == key {
+					gIdx = shortVals[i]
+					break
+				}
+			}
+			if gIdx < 0 && shortN < len(shortKeys) {
+				b := vb.Bytes(row)
+				var ok bool
+				gIdx, ok = idx[string(b)]
+				if !ok {
+					name := string(b)
+					gIdx = len(a.groups)
+					idx[name] = gIdx
+					a.groups = append(a.groups, aggGroup{key: name, aggs: make([]aggAccum, len(a.specs))})
+				}
+				shortKeys[shortN] = key
+				shortVals[shortN] = gIdx
+				shortN++
+			}
+		}
+		if gIdx < 0 {
+			b := vb.Bytes(row)
+			var ok bool
+			gIdx, ok = idx[string(b)]
+			if !ok {
+				key := string(b)
+				gIdx = len(a.groups)
+				idx[key] = gIdx
+				a.groups = append(a.groups, aggGroup{key: key, aggs: make([]aggAccum, len(a.specs))})
+			}
 		}
 		g := &a.groups[gIdx]
 		if countStar || countValid == nil || countValid.IsValid(row) {
@@ -709,13 +738,16 @@ func buildAggregateVec(spec sql.AggSpec, argKind vector.VecKind, groups []aggGro
 		v := vector.NewVec(vector.VecFloat64, rows)
 		data := v.F64()
 		var valid vector.Validity
+		setInvalid := func(i int) {
+			if valid == nil {
+				valid = vector.NewAllValid(rows)
+			}
+			valid.SetInvalid(i)
+		}
 		for i, g := range groups {
 			acc := g.aggs[slot]
 			if !acc.init || acc.count == 0 {
-				if valid == nil {
-					valid = vector.NewAllValid(rows)
-				}
-				valid.SetInvalid(i)
+				setInvalid(i)
 				continue
 			}
 			if argKind == vector.VecFloat32 || argKind == vector.VecFloat64 {
@@ -730,33 +762,30 @@ func buildAggregateVec(spec sql.AggSpec, argKind vector.VecKind, groups []aggGro
 		v := vector.NewVec(vector.VecFloat64, rows)
 		data := v.F64()
 		var valid vector.Validity
+		setInvalid := func(i int) {
+			if valid == nil {
+				valid = vector.NewAllValid(rows)
+			}
+			valid.SetInvalid(i)
+		}
 		for i, g := range groups {
 			acc := g.aggs[slot]
 			switch spec.Func {
 			case sql.AggregateSum:
 				if !acc.init {
-					if valid == nil {
-						valid = vector.NewAllValid(rows)
-					}
-					valid.SetInvalid(i)
+					setInvalid(i)
 					continue
 				}
 				data[i] = acc.fsum
 			case sql.AggregateMin:
 				if !acc.init {
-					if valid == nil {
-						valid = vector.NewAllValid(rows)
-					}
-					valid.SetInvalid(i)
+					setInvalid(i)
 					continue
 				}
 				data[i] = acc.fmin
 			case sql.AggregateMax:
 				if !acc.init {
-					if valid == nil {
-						valid = vector.NewAllValid(rows)
-					}
-					valid.SetInvalid(i)
+					setInvalid(i)
 					continue
 				}
 				data[i] = acc.fmax
@@ -769,6 +798,12 @@ func buildAggregateVec(spec sql.AggSpec, argKind vector.VecKind, groups []aggGro
 	v := vector.NewVec(vector.VecInt64, rows)
 	data := v.I64()
 	var valid vector.Validity
+	setInvalid := func(i int) {
+		if valid == nil {
+			valid = vector.NewAllValid(rows)
+		}
+		valid.SetInvalid(i)
+	}
 	for i, g := range groups {
 		acc := g.aggs[slot]
 		switch spec.Func {
@@ -776,28 +811,19 @@ func buildAggregateVec(spec sql.AggSpec, argKind vector.VecKind, groups []aggGro
 			data[i] = acc.count
 		case sql.AggregateSum:
 			if !acc.init {
-				if valid == nil {
-					valid = vector.NewAllValid(rows)
-				}
-				valid.SetInvalid(i)
+				setInvalid(i)
 				continue
 			}
 			data[i] = acc.sum
 		case sql.AggregateMin:
 			if !acc.init {
-				if valid == nil {
-					valid = vector.NewAllValid(rows)
-				}
-				valid.SetInvalid(i)
+				setInvalid(i)
 				continue
 			}
 			data[i] = acc.min
 		case sql.AggregateMax:
 			if !acc.init {
-				if valid == nil {
-					valid = vector.NewAllValid(rows)
-				}
-				valid.SetInvalid(i)
+				setInvalid(i)
 				continue
 			}
 			data[i] = acc.max

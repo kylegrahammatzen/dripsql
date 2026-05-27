@@ -92,19 +92,7 @@ func segmentsFn(seg *storage.Segment) SegmentsFn {
 func TestExec_SelectStar(t *testing.T) {
 	seg := writeUsersSegment(t, t.TempDir())
 	defer seg.Close()
-	stmt, err := sql.ParseOne("SELECT * FROM users")
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	plan, err := sql.BindSelect(stmt.(*sql.SelectStmt), usersDef(seg))
-	if err != nil {
-		t.Fatalf("Bind: %v", err)
-	}
-	op, err := BuildOperator(plan, segmentsFn(seg))
-	if err != nil {
-		t.Fatalf("BuildOperator: %v", err)
-	}
-	rows := runOperator(t, op)
+	rows := runQuery(t, seg, usersDef(seg), "SELECT * FROM users")
 	if len(rows) != 10 {
 		t.Fatalf("got %d rows, want 10", len(rows))
 	}
@@ -118,13 +106,7 @@ func TestExec_SelectStar(t *testing.T) {
 func TestExec_SelectColumnProjection(t *testing.T) {
 	seg := writeUsersSegment(t, t.TempDir())
 	defer seg.Close()
-	stmt, _ := sql.ParseOne("SELECT name FROM users")
-	plan, _ := sql.BindSelect(stmt.(*sql.SelectStmt), usersDef(seg))
-	op, err := BuildOperator(plan, segmentsFn(seg))
-	if err != nil {
-		t.Fatalf("BuildOperator: %v", err)
-	}
-	rows := runOperator(t, op)
+	rows := runQuery(t, seg, usersDef(seg), "SELECT name FROM users")
 	if len(rows) != 10 {
 		t.Fatalf("got %d rows, want 10", len(rows))
 	}
@@ -139,13 +121,7 @@ func TestExec_SelectColumnProjection(t *testing.T) {
 func TestExec_WhereFilter(t *testing.T) {
 	seg := writeUsersSegment(t, t.TempDir())
 	defer seg.Close()
-	stmt, _ := sql.ParseOne("SELECT id FROM users WHERE id > 5")
-	plan, err := sql.BindSelect(stmt.(*sql.SelectStmt), usersDef(seg))
-	if err != nil {
-		t.Fatalf("Bind: %v", err)
-	}
-	op, _ := BuildOperator(plan, segmentsFn(seg))
-	rows := runOperator(t, op)
+	rows := runQuery(t, seg, usersDef(seg), "SELECT id FROM users WHERE id > 5")
 	if len(rows) != 4 {
 		t.Fatalf("got %d rows, want 4 (id in {6,7,8,9})", len(rows))
 	}
@@ -160,10 +136,7 @@ func TestExec_WhereFilter(t *testing.T) {
 func TestExec_Limit(t *testing.T) {
 	seg := writeUsersSegment(t, t.TempDir())
 	defer seg.Close()
-	stmt, _ := sql.ParseOne("SELECT id FROM users LIMIT 3")
-	plan, _ := sql.BindSelect(stmt.(*sql.SelectStmt), usersDef(seg))
-	op, _ := BuildOperator(plan, segmentsFn(seg))
-	rows := runOperator(t, op)
+	rows := runQuery(t, seg, usersDef(seg), "SELECT id FROM users LIMIT 3")
 	if len(rows) != 3 {
 		t.Fatalf("got %d rows, want 3", len(rows))
 	}
@@ -177,10 +150,7 @@ func TestExec_Limit(t *testing.T) {
 func TestExec_LimitOffset(t *testing.T) {
 	seg := writeUsersSegment(t, t.TempDir())
 	defer seg.Close()
-	stmt, _ := sql.ParseOne("SELECT id FROM users LIMIT 2 OFFSET 5")
-	plan, _ := sql.BindSelect(stmt.(*sql.SelectStmt), usersDef(seg))
-	op, _ := BuildOperator(plan, segmentsFn(seg))
-	rows := runOperator(t, op)
+	rows := runQuery(t, seg, usersDef(seg), "SELECT id FROM users LIMIT 2 OFFSET 5")
 	if len(rows) != 2 {
 		t.Fatalf("got %d rows, want 2", len(rows))
 	}
@@ -192,10 +162,7 @@ func TestExec_LimitOffset(t *testing.T) {
 func TestExec_FilterThenLimit(t *testing.T) {
 	seg := writeUsersSegment(t, t.TempDir())
 	defer seg.Close()
-	stmt, _ := sql.ParseOne("SELECT id FROM users WHERE id >= 3 LIMIT 2")
-	plan, _ := sql.BindSelect(stmt.(*sql.SelectStmt), usersDef(seg))
-	op, _ := BuildOperator(plan, segmentsFn(seg))
-	rows := runOperator(t, op)
+	rows := runQuery(t, seg, usersDef(seg), "SELECT id FROM users WHERE id >= 3 LIMIT 2")
 	if len(rows) != 2 || rows[0][0].(int64) != 3 || rows[1][0].(int64) != 4 {
 		t.Fatalf("rows = %v", rows)
 	}
@@ -207,7 +174,7 @@ func runQuery(t *testing.T, seg *storage.Segment, def sql.BoundTableDef, src str
 	if err != nil {
 		t.Fatalf("Parse %q: %v", src, err)
 	}
-	plan, err := sql.BindSelect(stmt.(*sql.SelectStmt), def)
+	plan, err := sql.NewPlanner(func(string) (sql.BoundTableDef, error) { return def, nil }).Plan(stmt)
 	if err != nil {
 		t.Fatalf("Bind %q: %v", src, err)
 	}
@@ -400,7 +367,7 @@ func TestExec_GroupBy_PaginatesAboveStandardBatchRows(t *testing.T) {
 	defer seg2.Close()
 
 	stmt, _ := sql.ParseOne("SELECT tag, count(id) FROM wide GROUP BY tag")
-	plan, err := sql.BindSelect(stmt.(*sql.SelectStmt), wideGroupDef())
+	plan, err := sql.NewPlanner(func(string) (sql.BoundTableDef, error) { return wideGroupDef(), nil }).Plan(stmt)
 	if err != nil {
 		t.Fatalf("Bind: %v", err)
 	}

@@ -5,6 +5,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 
@@ -13,6 +14,55 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
+
+// Operator is the pull-based interface every exec node implements.
+// Next returns ok=false when exhausted. Row visibility lives in batch.Sel and nil Sel means all batch.Len rows are visible.
+var (
+	ErrOperatorAlreadyOpen = errors.New("operator already open")
+	ErrOperatorNotOpen     = errors.New("operator not open")
+	ErrOperatorClosed      = errors.New("operator closed")
+)
+
+type Operator interface {
+	Open(ctx context.Context) error
+	Next() (batch vector.Batch, ok bool, err error)
+	Close() error
+}
+
+type operatorState uint8
+
+const (
+	operatorNew operatorState = iota
+	operatorOpen
+	operatorClosed
+)
+
+func (s *operatorState) open() error {
+	switch *s {
+	case operatorOpen:
+		return ErrOperatorAlreadyOpen
+	case operatorClosed:
+		return ErrOperatorClosed
+	default:
+		*s = operatorOpen
+		return nil
+	}
+}
+
+func (s operatorState) requireOpen() error {
+	switch s {
+	case operatorOpen:
+		return nil
+	case operatorClosed:
+		return ErrOperatorClosed
+	default:
+		return ErrOperatorNotOpen
+	}
+}
+
+func (s *operatorState) close() {
+	*s = operatorClosed
+}
 
 type SegmentsFn func(def sql.BoundTableDef) ([]*storage.Segment, error)
 
@@ -417,6 +467,11 @@ func buildRelWithOuter(rel *sql.Rel, segments SegmentsFn, outer *correlatedOuter
 				return nil, err
 			}
 		}
+		if op, ok, err := buildLateTopKScan(rel, segments); err != nil {
+			return nil, err
+		} else if ok {
+			return op, nil
+		}
 		source, err := buildSortInput(rel, segments, outer)
 		if err != nil {
 			return nil, err
@@ -424,6 +479,57 @@ func buildRelWithOuter(rel *sql.Rel, segments SegmentsFn, outer *correlatedOuter
 		return &SortOp{Source: source, Keys: rel.SortKeys, K: rel.K, Offset: rel.Offset}, nil
 	}
 	return nil, fmt.Errorf("BuildOperator: unsupported rel op %v", rel.Op)
+}
+
+func buildLateTopKScan(sortRel *sql.Rel, segments SegmentsFn) (Operator, bool, error) {
+	child := sortRel.Inputs[0]
+	if child.Op != sql.RelScan || child.Where != nil || child.Alias != "" || sortRel.K <= 0 || len(sortRel.SortKeys) != 1 {
+		return nil, false, nil
+	}
+	if sortRel.Offset < 0 || sortRel.K+sortRel.Offset > vector.StandardBatchRows {
+		return nil, false, nil
+	}
+	key := sortRel.SortKeys[0]
+	if key.Expr.Op != sql.ExprColumn || !intLikeType(key.Expr.Type) {
+		return nil, false, nil
+	}
+	keyName := scanColumnName(child, key.Expr.ColumnID)
+	if keyName == "" {
+		return nil, false, nil
+	}
+	segs, err := segments(child.Table)
+	if err != nil {
+		return nil, false, fmt.Errorf("BuildOperator: resolve segments: %w", err)
+	}
+	names, _, kinds, _, types, labels, err := scanColumnMetadata(child)
+	if err != nil {
+		return nil, false, err
+	}
+	if !topKScanColumnsPresent(segs, append(append([]string(nil), names...), keyName)) {
+		return nil, false, nil
+	}
+	return &TopKScanOp{
+		Segments: segs,
+		Columns:  names,
+		Kinds:    kinds,
+		Types:    types,
+		Labels:   labels,
+		Key:      keyName,
+		Desc:     key.Desc,
+		K:        sortRel.K,
+		Offset:   sortRel.Offset,
+	}, true, nil
+}
+
+func topKScanColumnsPresent(segs []*storage.Segment, names []string) bool {
+	for _, seg := range segs {
+		for _, name := range names {
+			if findTopKColumn(seg, name) < 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func isIdentityProject(rel *sql.Rel) bool {
@@ -521,11 +627,13 @@ func intLikeType(t schema.Type) bool {
 	return false
 }
 
-func scanColumnNames(rel *sql.Rel) ([]string, []uint64, []vector.VecKind, []storage.ScanDefault, error) {
+func scanColumnMetadata(rel *sql.Rel) ([]string, []uint64, []vector.VecKind, []storage.ScanDefault, []schema.Type, [][]string, error) {
 	names := make([]string, 0, len(rel.Columns))
 	ids := make([]uint64, 0, len(rel.Columns))
 	kinds := make([]vector.VecKind, 0, len(rel.Columns))
 	defaults := make([]storage.ScanDefault, 0, len(rel.Columns))
+	types := make([]schema.Type, 0, len(rel.Columns))
+	labels := make([][]string, 0, len(rel.Columns))
 	for _, id := range rel.Columns {
 		found := false
 		for _, c := range rel.Table.Columns {
@@ -534,7 +642,7 @@ func scanColumnNames(rel *sql.Rel) ([]string, []uint64, []vector.VecKind, []stor
 				ids = append(ids, uint64(c.ID))
 				k, err := vector.VecKindOf(c.Type)
 				if err != nil {
-					return nil, nil, nil, nil, fmt.Errorf("BuildOperator: column %q vec kind: %w", c.Name, err)
+					return nil, nil, nil, nil, nil, nil, fmt.Errorf("BuildOperator: column %q vec kind: %w", c.Name, err)
 				}
 				kinds = append(kinds, k)
 				defaults = append(defaults, storage.ScanDefault{
@@ -545,15 +653,17 @@ func scanColumnNames(rel *sql.Rel) ([]string, []uint64, []vector.VecKind, []stor
 					Bytes: c.Default.Bytes,
 					Bool:  c.Default.Bool,
 				})
+				types = append(types, c.Type)
+				labels = append(labels, c.Labels)
 				found = true
 				break
 			}
 		}
 		if !found {
-			return nil, nil, nil, nil, fmt.Errorf("BuildOperator: unknown ColumnID %d in scan for table %q", id, rel.Table.Name)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("BuildOperator: unknown ColumnID %d in scan for table %q", id, rel.Table.Name)
 		}
 	}
-	return names, ids, kinds, defaults, nil
+	return names, ids, kinds, defaults, types, labels, nil
 }
 
 func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, outer *correlatedOuter) (Operator, error) {
@@ -566,7 +676,7 @@ func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, ou
 	if err != nil {
 		return nil, fmt.Errorf("BuildOperator: resolve segments: %w", err)
 	}
-	names, ids, kinds, defaults, err := scanColumnNames(rel)
+	names, ids, kinds, defaults, _, _, err := scanColumnMetadata(rel)
 	if err != nil {
 		return nil, err
 	}

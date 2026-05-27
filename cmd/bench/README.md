@@ -39,17 +39,18 @@ Use fresh JSON or JSONL artifacts because `compare` reports median deltas agains
 | --- | --- | --- | --- | --- | --- | --- |
 | `count` | 100k | 200 | <1 us | <1 us | <1 us | <1 us |
 | `id_lookup` | 100k | 200 | <1 us | 25.3 us | 50.3 us | <1 us |
-| `category_groupby` | 100k | 100 | 4.30 ms | 1.56 ms | 1.50 ms | 1.24 ms |
-| `category_groupby` | 10M | 10 | 310.53 ms | 73.30 ms | 74.72 ms | 162.51 ms |
-| `top_age` | 100k | 200 | 1.58 ms | 487 us | 395 us | 695 us |
-| `top_age` | 1M | 50 | 10.51 ms | 3.47 ms | 3.94 ms | 3.09 ms |
-| `top_age` | 10M | 10 | 98.49 ms | 32.76 ms | 37.46 ms | 28.27 ms |
+| `category_groupby` | 100k | 100 | 3.79 ms | 2.01 ms | 1.44 ms | 339 us |
+| `category_groupby` | 10M | 10 | 275.76 ms | 86.87 ms | 97.71 ms | 91.17 ms |
+| `top_age` | 100k | 200 | 1.00 ms | 213 us | 302 us | 485 us |
+| `top_age` | 1M | 50 | 8.48 ms | 1.39 ms | 3.20 ms | 3.89 ms |
+| `top_age` | 10M | 10 | 78.53 ms | 15.28 ms | 28.83 ms | 34.42 ms |
 
 - `count` and `id_lookup` short-circuit via the `.sm` numsum and Binary Fuse 8 sidecars.
 - `count(*)` stays on the metadata-only path even after `DELETE` by popcounting the segment's deletion vector instead of scanning pages.
-- `category_groupby` reads from the dict-histogram sidecar when no `WHERE` is present.
+- `category_count` reads from the dict-histogram sidecar when no `WHERE` is present.
 - TPC-H Q1 and Q6 run against a synthetic `lineitem` with dates as int64 days since 1992-01-01.
 - `<1 us` means the workload driver rounded the median below the microsecond measurement floor.
+- For parallel scans, `io` and `decode` are summed worker time rather than wall time.
 
 ## Exec microbenchmarks
 

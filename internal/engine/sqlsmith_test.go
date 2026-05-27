@@ -8,7 +8,6 @@ import (
 	"os"
 	"runtime/debug"
 	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -47,31 +46,4 @@ func TestSQLSmith_RandomQueriesSurviveExec(t *testing.T) {
 			}
 		}()
 	}
-}
-
-func TestSQLSmith_ShrinkOnFailure(t *testing.T) {
-	// Sanity check the shrinker by feeding a query we know fails.
-	bad := "SELECT bogus_col FROM fuzz_t"
-	got := smithShrink(bad, func(q string) bool { return strings.Contains(q, "bogus_col") })
-	if got != bad && !strings.Contains(got, "bogus_col") {
-		t.Fatalf("shrink should preserve the failure marker, got %q", got)
-	}
-}
-
-// smithShrink trims trailing clauses while the predicate still reports failure.
-// The check func returns true when q still triggers the bug.
-func smithShrink(q string, fails func(string) bool) string {
-	cur := q
-	clauses := []string{" LIMIT ", " ORDER BY ", " GROUP BY ", " WHERE "}
-	for _, c := range clauses {
-		i := strings.Index(cur, c)
-		if i < 0 {
-			continue
-		}
-		trial := cur[:i]
-		if fails(trial) {
-			cur = trial
-		}
-	}
-	return cur
 }
