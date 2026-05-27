@@ -1,9 +1,10 @@
-// Vec invariant tests: FixedBytes round-trip, varbytes access, header size budget.
-// FixedBytes is the codec hot path. The size test pins the slim-Vec layout goal.
+// Vec invariant tests plus UUID parse and format round-trips.
+// FixedBytes is the codec hot path. The size test pins the slim-Vec layout goal. Parse and String are the boundary between SQL literals and the 16-byte UUID value.
 package vector
 
 import (
 	"encoding/binary"
+	"strings"
 	"testing"
 	"unsafe"
 )
@@ -101,5 +102,30 @@ func TestVec_ResetForDecode_WiderKindRealloc(t *testing.T) {
 		if x != int64(i)*1_000_000 {
 			t.Fatalf("row %d corrupt: got %d", i, x)
 		}
+	}
+}
+
+func TestUUID_StringRoundTrip(t *testing.T) {
+	canonical := "550e8400-e29b-41d4-a716-446655440000"
+	u, err := ParseUUID(canonical)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if u.String() != canonical {
+		t.Fatalf("round-trip: got %q want %q", u.String(), canonical)
+	}
+	upper, err := ParseUUID(strings.ToUpper(canonical))
+	if err != nil {
+		t.Fatalf("uppercase parse: %v", err)
+	}
+	if upper != u {
+		t.Fatal("uppercase parse must match canonical")
+	}
+	bare, err := ParseUUID("550e8400e29b41d4a716446655440000")
+	if err != nil {
+		t.Fatalf("bare parse: %v", err)
+	}
+	if bare != u {
+		t.Fatal("bare hex must match canonical")
 	}
 }

@@ -1,4 +1,4 @@
-// Dataset generators and query catalog where each generator fills a fresh DB with a deterministic synthetic schema.
+// Dataset generators and the query catalog. Each generator fills a fresh DB with a deterministic synthetic schema covering users, TPC-H lineitem, and ClickBench hits.
 // Each query targets one schema and carries a name used as the benchstat label.
 package main
 
@@ -91,6 +91,139 @@ func setupUsers(ctx context.Context, db *engine.DB, rows int, segmentRows int) e
 			}
 			cents := r.IntN(100000)
 			fmt.Fprintf(&b, "(%d, 'user%d', %d, '%s', %d.%02d)", i, i, r.IntN(100), cats[r.IntN(len(cats))], cents/100, cents%100)
+		}
+		pending = append(pending, b.String())
+		if len(pending) >= bulkPagesPerSegment {
+			if err := flush(); err != nil {
+				return fmt.Errorf("seed flush ending at row %d: %w", end, err)
+			}
+		}
+		id = end
+	}
+	return flush()
+}
+
+// Days since 1992-01-01 for the date windows TPC-H Q1 and Q6 reference.
+const (
+	tpchDayQ1Cutoff = 2526
+	tpchDayQ6Lo     = 731
+	tpchDayQ6Hi     = 1096
+)
+
+func setupLineitem(ctx context.Context, db *engine.DB, rows int, segmentRows int) error {
+	ddl := "CREATE TABLE lineitem (" +
+		"l_orderkey int64 NOT NULL, " +
+		"l_quantity int64 NOT NULL, " +
+		"l_extprice float64 NOT NULL, " +
+		"l_discount float64 NOT NULL, " +
+		"l_disc_rev float64 NOT NULL, " +
+		"l_disc_price float64 NOT NULL, " +
+		"l_returnflag text NOT NULL, " +
+		"l_linestatus text NOT NULL, " +
+		"l_shipdate int64 NOT NULL)"
+	if _, err := db.Exec(ctx, ddl); err != nil {
+		return err
+	}
+	if segmentRows <= 0 || segmentRows > vector.StandardBatchRows {
+		segmentRows = vector.StandardBatchRows
+	}
+	flags := []string{"A", "N", "R"}
+	stats := []string{"F", "O"}
+	r := rand.New(rand.NewPCG(42, 7))
+	id := 0
+	pending := make([]string, 0, bulkPagesPerSegment)
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		if _, err := db.BulkInsert(ctx, pending); err != nil {
+			return err
+		}
+		pending = pending[:0]
+		return nil
+	}
+	for id < rows {
+		end := min(id+segmentRows, rows)
+		var b strings.Builder
+		b.WriteString("INSERT INTO lineitem (l_orderkey, l_quantity, l_extprice, l_discount, l_disc_rev, l_disc_price, l_returnflag, l_linestatus, l_shipdate) VALUES ")
+		for i := id; i < end; i++ {
+			if i > id {
+				b.WriteByte(',')
+			}
+			qty := int64(r.IntN(50) + 1)
+			priceCents := int64(r.IntN(10_000_000) + 100)
+			ext := float64(priceCents) / 100.0
+			disc := float64(r.IntN(11)) / 100.0
+			discRev := ext * (1.0 - disc)
+			discPrice := ext * disc
+			rf := flags[r.IntN(len(flags))]
+			ls := stats[r.IntN(len(stats))]
+			ship := int64(r.IntN(2557))
+			fmt.Fprintf(&b, "(%d, %d, %.2f, %.2f, %.4f, %.4f, '%s', '%s', %d)",
+				int64(i), qty, ext, disc, discRev, discPrice, rf, ls, ship)
+		}
+		pending = append(pending, b.String())
+		if len(pending) >= bulkPagesPerSegment {
+			if err := flush(); err != nil {
+				return fmt.Errorf("seed flush ending at row %d: %w", end, err)
+			}
+		}
+		id = end
+	}
+	return flush()
+}
+
+func setupHits(ctx context.Context, db *engine.DB, rows int, segmentRows int) error {
+	ddl := "CREATE TABLE hits (" +
+		"WatchID int64 NOT NULL, " +
+		"UserID int64 NOT NULL, " +
+		"EventTime int64 NOT NULL, " +
+		"URL text NOT NULL, " +
+		"Title text NOT NULL, " +
+		"RegionID int64 NOT NULL, " +
+		"SearchEngineID int64 NOT NULL, " +
+		"AdvEngineID int64 NOT NULL, " +
+		"SearchPhrase text NOT NULL)"
+	if _, err := db.Exec(ctx, ddl); err != nil {
+		return err
+	}
+	if segmentRows <= 0 || segmentRows > vector.StandardBatchRows {
+		segmentRows = vector.StandardBatchRows
+	}
+	urls := []string{"/", "/index", "/home", "/search", "/cart", "/product", "/about", "/contact"}
+	phrases := []string{"", "buy", "sale", "review", "best", "cheap", "near me", "tutorial"}
+	r := rand.New(rand.NewPCG(11, 13))
+	id := 0
+	pending := make([]string, 0, bulkPagesPerSegment)
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		if _, err := db.BulkInsert(ctx, pending); err != nil {
+			return err
+		}
+		pending = pending[:0]
+		return nil
+	}
+	for id < rows {
+		end := min(id+segmentRows, rows)
+		var b strings.Builder
+		b.WriteString("INSERT INTO hits (WatchID, UserID, EventTime, URL, Title, RegionID, SearchEngineID, AdvEngineID, SearchPhrase) VALUES ")
+		for i := id; i < end; i++ {
+			if i > id {
+				b.WriteByte(',')
+			}
+			watch := int64(i)
+			user := int64(r.IntN(1_000_000))
+			event := int64(1_500_000_000 + r.IntN(86400*365))
+			url := urls[r.IntN(len(urls))]
+			title := fmt.Sprintf("Page %d", r.IntN(10000))
+			region := int64(r.IntN(100))
+			seid := int64(r.IntN(10))
+			adv := int64(r.IntN(5))
+			ph := phrases[r.IntN(len(phrases))]
+			fmt.Fprintf(&b, "(%d, %d, %d, '%s', '%s', %d, %d, %d, '%s')",
+				watch, user, event, url, title, region, seid, adv, ph)
 		}
 		pending = append(pending, b.String())
 		if len(pending) >= bulkPagesPerSegment {
