@@ -1,9 +1,10 @@
-// Plan is the top-level bound form of any SQL statement. Relational SELECT bodies live under
-// Plan.Rel as a tree of Rel nodes; DDL/DML payload fields hold the spec or assignment data.
-// Catalog identifiers are assigned by the catalog, not by Bind.
+// Plan is the top-level bound form of any SQL statement plus the PlanCache that engines memoize bound Plans through.
+// Relational SELECT bodies live under Plan.Rel as a tree of Rel nodes and DDL/DML payload fields hold the spec or assignment data.
 package sql
 
 import (
+	"sync"
+
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 )
 
@@ -268,35 +269,11 @@ func scanRel(table BoundTableDef, alias string, cols []ColumnID, where *BoundExp
 	return &Rel{Op: RelScan, Outputs: outputs, Table: table, Alias: alias, Columns: cols, Where: where}
 }
 
-func filterRel(src *Rel, pred BoundExpr) *Rel {
-	return &Rel{Op: RelFilter, Outputs: src.Outputs, Inputs: []*Rel{src}, Predicate: pred}
-}
-
 func joinRel(kind JoinKind, left, right *Rel, keys []JoinKey) *Rel {
 	outputs := make([]BoundOutput, 0, len(left.Outputs)+len(right.Outputs))
 	outputs = append(outputs, left.Outputs...)
 	outputs = append(outputs, right.Outputs...)
 	return &Rel{Op: RelJoin, Outputs: outputs, Inputs: []*Rel{left, right}, JoinKind: kind, JoinKeys: keys}
-}
-
-func aggregateRel(src *Rel, group []BoundExpr, agg, hidden []AggSpec, having *BoundExpr, outputs []BoundOutput) *Rel {
-	return &Rel{Op: RelAggregate, Outputs: outputs, Inputs: []*Rel{src}, GroupBy: group, Aggregates: agg, Hidden: hidden, Having: having}
-}
-
-func projectRel(src *Rel, projection []BoundOutput) *Rel {
-	return &Rel{Op: RelProject, Outputs: projection, Inputs: []*Rel{src}, Projection: projection}
-}
-
-func sortRel(src *Rel, keys []SortKey, k, offset int64) *Rel {
-	return &Rel{Op: RelSort, Outputs: src.Outputs, Inputs: []*Rel{src}, SortKeys: keys, K: k, Offset: offset}
-}
-
-func limitRel(src *Rel, n, offset int64) *Rel {
-	return &Rel{Op: RelLimit, Outputs: src.Outputs, Inputs: []*Rel{src}, Limit: n, Offset: offset}
-}
-
-func unionRel(left, right *Rel) *Rel {
-	return &Rel{Op: RelUnion, Outputs: left.Outputs, Inputs: []*Rel{left, right}}
 }
 
 type AggregateFunc uint8
@@ -395,4 +372,55 @@ type BoundExpr struct {
 	// current batch. The evaluator reads its value from a runtime outer-row table
 	// keyed by Column name. Only meaningful for Op == ExprColumn.
 	Outer bool
+}
+
+// PlanCache memoizes bound Plans keyed by SQL text plus the catalog SchemaVersion they were bound against.
+// Stale-version hits miss so DDL invalidates wholesale.
+type PlanCache struct {
+	mu      sync.Mutex
+	max     int
+	entries map[string]planCacheEntry
+}
+
+type planCacheEntry struct {
+	version SchemaVersion
+	plan    *Plan
+}
+
+func NewPlanCache(max int) *PlanCache {
+	if max <= 0 {
+		max = 256
+	}
+	return &PlanCache{max: max, entries: make(map[string]planCacheEntry)}
+}
+
+func (c *PlanCache) Get(sql string, version SchemaVersion) (*Plan, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[sql]
+	if !ok || e.version != version {
+		return nil, false
+	}
+	return e.plan, true
+}
+
+func (c *PlanCache) Put(sql string, version SchemaVersion, plan *Plan) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if existing, ok := c.entries[sql]; ok && existing.version == version {
+		return
+	}
+	if len(c.entries) >= c.max {
+		for k := range c.entries {
+			delete(c.entries, k)
+			break
+		}
+	}
+	c.entries[sql] = planCacheEntry{version: version, plan: plan}
+}
+
+func (c *PlanCache) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries)
 }
