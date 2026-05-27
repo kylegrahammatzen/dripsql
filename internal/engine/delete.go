@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -14,6 +15,29 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
+
+// addExprColumns walks a bound expression and seeds every ExprColumn name into the caller's set.
+// exprColumnNames is the sorted-slice variant for callers that need deterministic order.
+func addExprColumns(seen map[string]struct{}, expr sql.BoundExpr) {
+	if expr.Op == sql.ExprColumn {
+		seen[schema.NormalizeName(expr.Column)] = struct{}{}
+		return
+	}
+	for _, a := range expr.Args {
+		addExprColumns(seen, a)
+	}
+}
+
+func exprColumnNames(expr sql.BoundExpr) []string {
+	seen := make(map[string]struct{})
+	addExprColumns(seen, expr)
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
 
 func (db *DB) delete(ctx context.Context, plan *sql.Plan, commit commitFn) (int64, error) {
 	def := plan.Table

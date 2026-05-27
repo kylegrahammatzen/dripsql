@@ -1,10 +1,11 @@
-// Query runner. Resolves segments via the DB-level handle cache, builds the operator chain, drains to Rows.
-// Cache misses open lazily and stay open until DB.Close.
+// Query runner plus EXPLAIN driver. Resolves segments via the DB-level handle cache, builds the operator chain, drains to Rows.
+// EXPLAIN emits the bound Rel tree as text and EXPLAIN ANALYZE wraps the inner plan with timing wrappers.
 package engine
 
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/exec"
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
@@ -163,4 +164,55 @@ func appendBatchRows(rows *Rows, batch vector.Batch) error {
 		rows.Values = append(rows.Values, vals)
 		return nil
 	})
+}
+
+func (db *DB) runExplain(ctx context.Context, plan *sql.Plan) (*Rows, error) {
+	if plan == nil || plan.Inner == nil || plan.Inner.Rel == nil {
+		return nil, fmt.Errorf("engine: EXPLAIN missing inner SELECT")
+	}
+	body := plan.Inner.Rel.String()
+	rows := &Rows{Columns: []string{"plan"}}
+	for line := range strings.SplitSeq(body, "\n") {
+		rows.Values = append(rows.Values, []any{line})
+	}
+	if !plan.Analyze {
+		return rows, nil
+	}
+	root, err := db.runAnalyze(ctx, plan.Inner)
+	if err != nil {
+		return nil, err
+	}
+	rows.Values = append(rows.Values, []any{""})
+	rows.Values = append(rows.Values, []any{"ANALYZE timings:"})
+	for line := range strings.SplitSeq(strings.TrimRight(root.Tree(), "\n"), "\n") {
+		rows.Values = append(rows.Values, []any{line})
+	}
+	return rows, nil
+}
+
+func (db *DB) runAnalyze(ctx context.Context, plan *sql.Plan) (*exec.TimingStats, error) {
+	resolve := cachedSegmentResolver(func(d sql.BoundTableDef) ([]*storage.Segment, error) {
+		return db.openSegmentsForQuery(d.Name)
+	})
+	op, root, err := exec.BuildOperatorAnalyzed(plan, resolve)
+	if err != nil {
+		return nil, err
+	}
+	if err := op.Open(ctx); err != nil {
+		return nil, err
+	}
+	defer op.Close()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		_, ok, err := op.Next()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			break
+		}
+	}
+	return root, nil
 }
