@@ -184,8 +184,12 @@ func TestPlain_EncodeReusesScratch(t *testing.T) {
 }
 
 func TestValidateDecodeArgs_RowsCapInt32(t *testing.T) {
-	if err := validateDecodeArgs(math.MaxInt32+1, 0); err == nil {
-		t.Fatal("validateDecodeArgs must reject rows > int32 max")
+	// The reject case only exists on 64-bit ints because a 32-bit int cannot hold MaxInt32+1.
+	if math.MaxInt > math.MaxInt32 {
+		over := int64(math.MaxInt32) + 1
+		if err := validateDecodeArgs(int(over), 0); err == nil {
+			t.Fatal("validateDecodeArgs must reject rows > int32 max")
+		}
 	}
 	if err := validateDecodeArgs(math.MaxInt32, 0); err != nil {
 		t.Fatalf("validateDecodeArgs must accept exactly int32 max: %v", err)

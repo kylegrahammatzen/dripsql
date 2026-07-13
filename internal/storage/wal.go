@@ -96,7 +96,7 @@ func (w *WAL) append(rec WALRecord, sync bool) (int64, error) {
 	if w.f == nil {
 		return 0, errors.New("WAL: closed")
 	}
-	if len(rec.Payload) > int(^uint32(0)) {
+	if uint64(len(rec.Payload)) > uint64(^uint32(0)) {
 		return 0, fmt.Errorf("WAL: payload too large (%d bytes)", len(rec.Payload))
 	}
 	padded := walPaddedFrameSize(len(rec.Payload))
