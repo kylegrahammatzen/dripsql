@@ -57,14 +57,18 @@ func Unpack(width int, src []byte, rows int, dst []uint64) {
 	if len(dst) < rows {
 		panic(fmt.Sprintf("bitpack Unpack: dst %d < rows %d", len(dst), rows))
 	}
+	// Full blocks unpack straight into dst so only a trailing partial block pays the copy.
 	var block [BitpackBlockSize]uint64
 	blocks := (rows + BitpackBlockSize - 1) / BitpackBlockSize
 	for b := range blocks {
 		srcOff := b * width * 128
-		unpackBlock(width, src[srcOff:srcOff+width*128], block[:])
 		dstOff := b * BitpackBlockSize
-		end := min(dstOff+BitpackBlockSize, rows)
-		copy(dst[dstOff:end], block[:end-dstOff])
+		if rows-dstOff >= BitpackBlockSize {
+			unpackBlock(width, src[srcOff:srcOff+width*128], dst[dstOff:dstOff+BitpackBlockSize])
+			continue
+		}
+		unpackBlock(width, src[srcOff:srcOff+width*128], block[:])
+		copy(dst[dstOff:rows], block[:rows-dstOff])
 	}
 }
 
@@ -103,45 +107,36 @@ func packBlock(width int, block []uint64, dst []byte) {
 	}
 }
 
-// unpackBlock reverses packBlock: for each (j, k), gather bit k from each of the
-// width words in group j and assemble the element.
+// unpackBlock reverses packBlock through byte-plane table kernels. Each width band
+// keeps its accumulators in registers, which a single unified loop fails to do.
 func unpackBlock(width int, src []byte, block []uint64) {
-	if width <= 8 {
-		unpackBlockSmallWidth(width, src, block)
-		return
-	}
-	var words [64]uint64
-	for j := range 16 {
-		groupOff := j * width * 8
-		base := j * 64
-		for i := range width {
-			words[i] = binary.LittleEndian.Uint64(src[groupOff+i*8 : groupOff+i*8+8])
-		}
-		for k := range 64 {
-			var elem uint64
-			for i := range width {
-				elem |= ((words[i] >> uint(k)) & 1) << uint(i)
-			}
-			block[base+k] = elem
-		}
+	switch {
+	case width <= 8:
+		unpackBlockW8(width, src, block)
+	case width <= 16:
+		unpackBlockW16(width, src, block)
+	default:
+		unpackBlockWide(width, src, block)
 	}
 }
 
-func unpackBlockSmallWidth(width int, src []byte, block []uint64) {
-	var words [8]uint64
+func unpackBlockW8(width int, src []byte, block []uint64) {
+	var wordsBuf [8]uint64
+	words := wordsBuf[:width]
+	tbl := unpackBytePlaneTable[:width]
 	for j := range 16 {
-		groupOff := j * width * 8
+		group := src[j*width*8 : (j+1)*width*8]
 		base := j * 64
-		for i := range width {
-			words[i] = binary.LittleEndian.Uint64(src[groupOff+i*8 : groupOff+i*8+8])
+		for i := range words {
+			words[i] = binary.LittleEndian.Uint64(group[i*8 : i*8+8])
 		}
 		for lane := range 8 {
 			shift := uint(lane * 8)
 			var packed uint64
-			for i := range width {
-				packed |= unpackBytePlaneTable[i][byte(words[i]>>shift)]
+			for i, w := range words {
+				packed |= tbl[i][byte(w>>shift)]
 			}
-			out := block[base+lane*8 : base+lane*8+8]
+			out := block[base+lane*8 : base+lane*8+8 : base+lane*8+8]
 			out[0] = uint64(byte(packed))
 			out[1] = uint64(byte(packed >> 8))
 			out[2] = uint64(byte(packed >> 16))
@@ -150,6 +145,82 @@ func unpackBlockSmallWidth(width int, src []byte, block []uint64) {
 			out[5] = uint64(byte(packed >> 40))
 			out[6] = uint64(byte(packed >> 48))
 			out[7] = uint64(byte(packed >> 56))
+		}
+	}
+}
+
+// unpackBlockW16 runs one byte-plane pass for bits 0-7 and a second for bits 8-15,
+// merging the two packed lanes per element.
+func unpackBlockW16(width int, src []byte, block []uint64) {
+	var wordsBuf [16]uint64
+	words := wordsBuf[:width]
+	tbl := unpackBytePlaneTable[:]
+	for j := range 16 {
+		group := src[j*width*8 : (j+1)*width*8]
+		base := j * 64
+		for i := range words {
+			words[i] = binary.LittleEndian.Uint64(group[i*8 : i*8+8])
+		}
+		for lane := range 8 {
+			shift := uint(lane * 8)
+			var lo, hi uint64
+			for i := 0; i < 8; i++ {
+				lo |= tbl[i][byte(words[i]>>shift)]
+			}
+			for i := 8; i < width; i++ {
+				hi |= tbl[i-8][byte(words[i]>>shift)]
+			}
+			out := block[base+lane*8 : base+lane*8+8 : base+lane*8+8]
+			out[0] = uint64(byte(lo)) | uint64(byte(hi))<<8
+			out[1] = uint64(byte(lo>>8)) | uint64(byte(hi>>8))<<8
+			out[2] = uint64(byte(lo>>16)) | uint64(byte(hi>>16))<<8
+			out[3] = uint64(byte(lo>>24)) | uint64(byte(hi>>24))<<8
+			out[4] = uint64(byte(lo>>32)) | uint64(byte(hi>>32))<<8
+			out[5] = uint64(byte(lo>>40)) | uint64(byte(hi>>40))<<8
+			out[6] = uint64(byte(lo>>48)) | uint64(byte(hi>>48))<<8
+			out[7] = uint64(byte(lo>>56)) | uint64(byte(hi>>56))<<8
+		}
+	}
+}
+
+// unpackBlockWide generalizes the byte-plane pass to one group per 8 bit positions.
+func unpackBlockWide(width int, src []byte, block []uint64) {
+	var wordsBuf [64]uint64
+	words := wordsBuf[:width]
+	for j := range 16 {
+		group := src[j*width*8 : (j+1)*width*8]
+		base := j * 64
+		for i := range words {
+			words[i] = binary.LittleEndian.Uint64(group[i*8 : i*8+8])
+		}
+		for lane := range 8 {
+			shift := uint(lane * 8)
+			var elems [8]uint64
+			for g := 0; g < width; g += 8 {
+				planes := min(width-g, 8)
+				var packed uint64
+				for i := range planes {
+					packed |= unpackBytePlaneTable[i][byte(words[g+i]>>shift)]
+				}
+				sh := uint(g)
+				elems[0] |= uint64(byte(packed)) << sh
+				elems[1] |= uint64(byte(packed>>8)) << sh
+				elems[2] |= uint64(byte(packed>>16)) << sh
+				elems[3] |= uint64(byte(packed>>24)) << sh
+				elems[4] |= uint64(byte(packed>>32)) << sh
+				elems[5] |= uint64(byte(packed>>40)) << sh
+				elems[6] |= uint64(byte(packed>>48)) << sh
+				elems[7] |= uint64(byte(packed>>56)) << sh
+			}
+			out := block[base+lane*8 : base+lane*8+8 : base+lane*8+8]
+			out[0] = elems[0]
+			out[1] = elems[1]
+			out[2] = elems[2]
+			out[3] = elems[3]
+			out[4] = elems[4]
+			out[5] = elems[5]
+			out[6] = elems[6]
+			out[7] = elems[7]
 		}
 	}
 }
