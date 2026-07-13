@@ -114,6 +114,21 @@ func (sv *StringView) SetBufID(bufID, offset uint32) {
 	binary.LittleEndian.PutUint32(sv.Body[4:8], offset)
 }
 
+// CopyFrom deep-copies src into v, reusing v's views and data buffers when large enough.
+func (v *VarBytes) CopyFrom(src *VarBytes) {
+	if cap(v.views) >= len(src.views) {
+		v.views = v.views[:len(src.views)]
+	} else {
+		v.views = make([]StringView, len(src.views))
+	}
+	copy(v.views, src.views)
+	v.data = append(v.data[:0], src.data...)
+	v.extras = v.extras[:0]
+	for _, e := range src.extras {
+		v.extras = append(v.extras, append([]byte(nil), e...))
+	}
+}
+
 func (v VarBytes) Clone() VarBytes {
 	out := VarBytes{
 		views: make([]StringView, len(v.views)),

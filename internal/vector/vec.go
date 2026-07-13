@@ -152,6 +152,47 @@ func (v Vec) Clone() Vec {
 	return out
 }
 
+// CloneInto copies v into dst like Clone but reuses dst's backing buffers when the
+// kind matches and capacity suffices, so pooled batches avoid reallocating per page.
+func (v Vec) CloneInto(dst *Vec) {
+	switch v.Kind.FixedWidth() {
+	case WidthVarBytes:
+		if v.data == nil {
+			dst.data = nil
+		} else if dst.Kind.IsVarBytes() && dst.data != nil {
+			(*VarBytes)(dst.data).CopyFrom(v.Var())
+		} else {
+			vb := v.Var().Clone()
+			dst.data = unsafe.Pointer(&vb)
+		}
+	case WidthBool:
+		if v.data == nil {
+			dst.data = nil
+		} else if dst.Kind == v.Kind && dst.data != nil && dst.Cap >= v.Len {
+			copy(vecBytes(dst, (int(v.Len)+7)/8), v.BoolBits())
+		} else {
+			buf := append([]byte(nil), v.BoolBits()...)
+			dst.data = unsafe.Pointer(unsafe.SliceData(buf))
+		}
+	default:
+		if v.data == nil {
+			dst.data = nil
+		} else if dst.Kind == v.Kind && dst.data != nil && dst.Cap >= v.Len {
+			copy(vecBytes(dst, int(v.Len)*int(v.Kind.FixedWidth())), v.FixedBytes())
+		} else {
+			buf := append([]byte(nil), v.FixedBytes()...)
+			dst.data = unsafe.Pointer(unsafe.SliceData(buf))
+		}
+	}
+	dst.Kind = v.Kind
+	dst.Enc = v.Enc
+	if dst.Cap < v.Len || dst.data == nil {
+		dst.Cap = v.Len
+	}
+	dst.Len = v.Len
+	dst.Valid = v.Valid.CloneInto(dst.Valid)
+}
+
 // Drops the existing buffer when kind changes so a wider element type cannot reuse
 // an undersized allocation (Cap counts rows, not bytes).
 func (v *Vec) ResetForDecode(kind VecKind) {

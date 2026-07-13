@@ -79,6 +79,20 @@ func (v Validity) Clone() Validity {
 	return out
 }
 
+// CloneInto reuses dst's backing array when it is large enough so recycled
+// vectors avoid a fresh allocation per batch.
+func (v Validity) CloneInto(dst Validity) Validity {
+	if v == nil {
+		return nil
+	}
+	if cap(dst) >= len(v) {
+		dst = dst[:len(v)]
+		copy(dst, v)
+		return dst
+	}
+	return v.Clone()
+}
+
 func (v Validity) MarshalLE(dst []byte) int {
 	pos := 0
 	for _, word := range v {

@@ -32,10 +32,11 @@ func (s *SelectionMask) Resize(rows int) {
 
 func (s SelectionMask) Rows() int { return s.rows }
 
-func (s SelectionMask) Clone() SelectionMask {
-	out := SelectionMask{rows: s.rows, allSet: s.allSet, words: make([]uint64, len(s.words))}
-	copy(out.words, s.words)
-	return out
+// CopyFrom reuses s's word buffer when large enough so recycled masks avoid reallocating.
+func (s *SelectionMask) CopyFrom(other *SelectionMask) {
+	s.Resize(other.rows)
+	copy(s.words, other.words)
+	s.allSet = other.allSet
 }
 
 func (s SelectionMask) IsAllSet() bool { return s.allSet }

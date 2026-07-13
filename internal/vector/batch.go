@@ -15,6 +15,40 @@ type Column struct {
 	Type       schema.Type
 	EnumLabels []string
 	V          Vec
+	Dict       *DictCol
+}
+
+// DictCol carries a dictionary page through the scan without materializing per-row
+// strings. When set, V is a kind-only placeholder and consumers must read Codes/Entries.
+type DictCol struct {
+	Codes   []byte
+	Entries [][]byte
+	data    []byte
+}
+
+// CopyFrom deep-copies src so the destination owns its bytes after the source's
+// scan buffers are reused, reusing existing capacity where possible.
+func (d *DictCol) CopyFrom(src *DictCol) {
+	d.Codes = append(d.Codes[:0], src.Codes...)
+	total := 0
+	for _, e := range src.Entries {
+		total += len(e)
+	}
+	if cap(d.data) < total {
+		d.data = make([]byte, 0, total)
+	} else {
+		d.data = d.data[:0]
+	}
+	if cap(d.Entries) >= len(src.Entries) {
+		d.Entries = d.Entries[:len(src.Entries)]
+	} else {
+		d.Entries = make([][]byte, len(src.Entries))
+	}
+	for i, e := range src.Entries {
+		off := len(d.data)
+		d.data = append(d.data, e...)
+		d.Entries[i] = d.data[off:len(d.data)]
+	}
 }
 
 type Batch struct {
