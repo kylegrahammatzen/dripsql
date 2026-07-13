@@ -3,10 +3,12 @@
 package storage
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
@@ -22,6 +24,10 @@ type ScanOpts struct {
 	Pred           *Pred
 	TopK           *TopKPushdown
 	ReadTs         uint64
+	// DictCodeColumns lists varbytes columns whose dict-encoded pages should be
+	// emitted as Column.Dict codes instead of materialized strings. Pages that are
+	// not dict-encoded fall back to normal decode, so consumers must handle both.
+	DictCodeColumns []string
 }
 
 type ScanDefault struct {
@@ -89,6 +95,18 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 			}
 		}
 	}
+	var dictWanted []bool
+	if len(opts.DictCodeColumns) > 0 {
+		dictWanted = make([]bool, len(decode))
+		for i, name := range decode {
+			for _, d := range opts.DictCodeColumns {
+				if strings.EqualFold(name, d) {
+					dictWanted[i] = true
+					break
+				}
+			}
+		}
+	}
 	for si, seg := range opts.Segments {
 		if opts.ReadTs != 0 && seg.CommitTs > opts.ReadTs {
 			continue
@@ -129,7 +147,7 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 				pageMask[pi] = topKPages[[2]int{si, pi}]
 			}
 		}
-		if err := scanSegment(seg, decode, decodeIdx, projIdx, predNeeded, synthKinds, synthDefaults, compiled, pageMask, fn); err != nil {
+		if err := scanSegment(seg, decode, decodeIdx, projIdx, predNeeded, dictWanted, synthKinds, synthDefaults, compiled, pageMask, fn); err != nil {
 			return err
 		}
 	}
@@ -565,7 +583,7 @@ func resolveSegmentColumns(seg *Segment, decode, projection []string, decodeIDs 
 	return decodeIdx, projIdx, nil
 }
 
-func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNeeded []bool, synthKinds []vector.VecKind, synthDefaults []ScanDefault, pred *CompiledPred, pageMask []bool, fn ScanFn) error {
+func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNeeded, dictWanted []bool, synthKinds []vector.VecKind, synthDefaults []ScanDefault, pred *CompiledPred, pageMask []bool, fn ScanFn) error {
 	if len(decodeIdx) == 0 {
 		return nil
 	}
@@ -594,6 +612,17 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 			return fmt.Errorf("scan: column %q has %d pages, expected %d", seg.Cols[ci].Name, len(seg.Cols[ci].Pages), pageCount)
 		}
 	}
+	needed := make([]bool, pageCount)
+	for pi := range pageCount {
+		if pageMask != nil && !pageMask[pi] {
+			continue
+		}
+		if pred != nil && pred.SkipsPage(seg, pi) {
+			continue
+		}
+		needed[pi] = true
+	}
+	src := pageSource{Segment: seg, stripes: newStripeSet(seg, needed)}
 	decoded := make([]vector.Column, len(decode))
 	projected := make([]vector.Column, len(projIdx))
 	var sel vector.SelectionMask
@@ -639,19 +668,36 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 		}
 	}
 	decodeOne := func(i, ci, pi, pageRows int) error {
-		var (
-			v   vector.Vec
-			err error
-		)
+		var v vector.Vec
 		segKind := seg.Cols[ci].Kind
 		targetKind := segKind
 		if i < len(synthKinds) && synthKinds[i] != 0 {
 			targetKind = synthKinds[i]
 		}
+		raw, err := src.stripes.raw(ci, pi)
+		if err != nil {
+			return fmt.Errorf("scan: col %q page %d: %w", decode[i], pi, err)
+		}
+		page := seg.Cols[ci].Pages[pi]
+		if dictWanted != nil && dictWanted[i] && targetKind == segKind &&
+			schema.Encoding(page.Encoding) == schema.EncDict &&
+			page.NullCount == 0 && page.Flags&PageFlagAllNull == 0 {
+			// Codes and entries alias the stripe buffer, valid until the callback returns.
+			entries, codes, derr := parseDictPayload(raw, pageRows)
+			if derr == nil {
+				if decoded[i].Dict == nil {
+					decoded[i].Dict = &vector.DictCol{}
+				}
+				decoded[i].Dict.Entries = entries
+				decoded[i].Dict.Codes = codes
+				decoded[i].V = vector.Vec{Kind: segKind}
+				return nil
+			}
+		}
+		decoded[i].Dict = nil
 		if targetKind != segKind {
 			var tmp vector.Vec
-			scratch, err = seg.readPageIntoValidated(ci, pi, scratch, &tmp)
-			if err != nil {
+			if err := decodePageBytes(page, raw, &tmp); err != nil {
 				return fmt.Errorf("scan: col %q page %d: %w", decode[i], pi, err)
 			}
 			if int(tmp.Len) != pageRows {
@@ -665,10 +711,10 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 			return nil
 		}
 		if segKind.FixedWidth() > 0 {
-			scratch, err = seg.readPageIntoValidated(ci, pi, scratch, &decoded[i].V)
+			err = decodePageBytes(page, raw, &decoded[i].V)
 			v = decoded[i].V
 		} else {
-			scratch, err = seg.readPageIntoValidated(ci, pi, scratch, &v)
+			err = decodePageBytes(page, raw, &v)
 		}
 		if err != nil {
 			return fmt.Errorf("scan: col %q page %d: %w", decode[i], pi, err)
@@ -680,10 +726,7 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 		return nil
 	}
 	for pi := range pageCount {
-		if pageMask != nil && !pageMask[pi] {
-			continue
-		}
-		if pred != nil && pred.SkipsPage(seg, pi) {
+		if !needed[pi] {
 			continue
 		}
 		pageRows := int(seg.Cols[anchor].Pages[pi].Rows)
@@ -696,7 +739,7 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 			sel.FillAll()
 			encodedDone = true
 		} else if pred != nil && (predOnlyAny || encodedBeforeDecode) {
-			handled, newScratch, err := pred.ApplyEncoded(seg, pi, &sel, scratch)
+			handled, newScratch, err := pred.ApplyEncoded(src, pi, &sel, scratch)
 			scratch = newScratch
 			if err != nil {
 				return fmt.Errorf("scan: ApplyEncoded page %d: %w", pi, err)
@@ -776,6 +819,43 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 		}
 	}
 	return nil
+}
+
+// parseDictPayload splits a dict page payload into entry byte slices and the per-row
+// code stream. Both alias payload, so callers own copying before the buffer is reused.
+func parseDictPayload(payload []byte, rows int) (entries [][]byte, codes []byte, err error) {
+	const dictHeaderSize = 2
+	if len(payload) < dictHeaderSize {
+		return nil, nil, fmt.Errorf("dict payload: header truncated")
+	}
+	count := int(binary.LittleEndian.Uint16(payload[0:2]))
+	if count == 0 || count > 256 {
+		return nil, nil, fmt.Errorf("dict payload: count %d out of range", count)
+	}
+	pos := dictHeaderSize
+	entries = make([][]byte, count)
+	for i := range count {
+		if pos+4 > len(payload) {
+			return nil, nil, fmt.Errorf("dict payload: entry %d length truncated", i)
+		}
+		length := int(binary.LittleEndian.Uint32(payload[pos : pos+4]))
+		pos += 4
+		if pos+length > len(payload) {
+			return nil, nil, fmt.Errorf("dict payload: entry %d bytes truncated", i)
+		}
+		entries[i] = payload[pos : pos+length]
+		pos += length
+	}
+	if pos+rows != len(payload) {
+		return nil, nil, fmt.Errorf("dict payload: indices %d != rows %d", len(payload)-pos, rows)
+	}
+	codes = payload[pos : pos+rows]
+	for _, c := range codes {
+		if int(c) >= count {
+			return nil, nil, fmt.Errorf("dict payload: code %d >= count %d", c, count)
+		}
+	}
+	return entries, codes, nil
 }
 
 func predicateOnlyMask(decodeIdx, projIdx []int) []bool {

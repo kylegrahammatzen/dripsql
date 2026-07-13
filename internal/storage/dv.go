@@ -12,10 +12,6 @@ import (
 
 func DVPath(segmentPath string) string { return segmentPath + ".dv" }
 
-func loadDV(path string, rows int) (vector.Validity, error) {
-	return loadDVAtPath(DVPath(path), rows)
-}
-
 func loadDVAtPath(dvPath string, rows int) (vector.Validity, error) {
 	data, err := os.ReadFile(dvPath)
 	if os.IsNotExist(err) {

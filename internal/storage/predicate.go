@@ -22,68 +22,12 @@ type BoundPredicate interface {
 
 type SchemaLookup func(name string) (vector.VecKind, bool)
 
-func BatchSchema(batch vector.Batch) SchemaLookup {
-	return func(name string) (vector.VecKind, bool) {
-		c, ok := batch.ColumnByName(name)
-		if !ok {
-			return 0, false
-		}
-		return c.V.Kind, true
-	}
-}
-
-func SegmentSchema(seg *Segment) SchemaLookup {
-	return func(name string) (vector.VecKind, bool) {
-		for i := range seg.Cols {
-			if strings.EqualFold(seg.Cols[i].Name, name) {
-				return seg.Cols[i].Kind, true
-			}
-		}
-		return 0, false
-	}
-}
-
-func ColumnsSchema(cols []vector.Column) SchemaLookup {
-	return func(name string) (vector.VecKind, bool) {
-		for i := range cols {
-			if strings.EqualFold(cols[i].Name, name) {
-				k, err := vector.VecKindOf(cols[i].Type)
-				if err != nil {
-					return 0, false
-				}
-				return k, true
-			}
-		}
-		return 0, false
-	}
-}
-
-func checkKind(lookup SchemaLookup, name string, want vector.VecKind) error {
-	kind, ok := lookup(name)
-	if !ok {
-		return fmt.Errorf("column %q not in schema", name)
-	}
-	if kind != want {
-		return fmt.Errorf("column %q kind %v != predicate kind %v", name, kind, want)
-	}
-	return nil
-}
-
 func ensureMaskSize(sel *vector.SelectionMask, rows int) {
 	if sel.Rows() != rows {
 		sel.Resize(rows)
 		return
 	}
 	sel.Clear()
-}
-
-func findSegmentColumn(seg *Segment, name string) (*SegmentColumn, bool) {
-	for i := range seg.Cols {
-		if strings.EqualFold(seg.Cols[i].Name, name) {
-			return &seg.Cols[i], true
-		}
-	}
-	return nil, false
 }
 
 // Prefers a column id match so renames survive, with name fallback for legacy segments.
@@ -95,7 +39,12 @@ func findSegmentColumnByID(seg *Segment, name string, colID uint64) (*SegmentCol
 			}
 		}
 	}
-	return findSegmentColumn(seg, name)
+	for i := range seg.Cols {
+		if strings.EqualFold(seg.Cols[i].Name, name) {
+			return &seg.Cols[i], true
+		}
+	}
+	return nil, false
 }
 
 func numericStatsFromCol(c *SegmentColumn) (NumericStats[int64], bool) {
@@ -628,11 +577,11 @@ func childAlwaysMatchesPage(child BoundPredicate, seg *Segment, pageIdx int) boo
 }
 
 type EncodedEvaluator interface {
-	EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (handled bool, scratchOut []byte, err error)
+	EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (handled bool, scratchOut []byte, err error)
 }
 
-func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
-	colIdx, ok := findSegmentColumnIdx(seg, b.column)
+func (b boundEqBytes) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
+	colIdx, ok := findSegmentColumnIdx(seg.Segment, b.column)
 	if !ok {
 		return false, scratch, nil
 	}
@@ -650,7 +599,7 @@ func (b boundEqBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.Selecti
 	return false, scratch, nil
 }
 
-func evalEncodedDictEq(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target []byte) (bool, []byte, error) {
+func evalEncodedDictEq(seg pageSource, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target []byte) (bool, []byte, error) {
 	page := seg.Cols[colIdx].Pages[pageIdx]
 	rows := int(page.Rows)
 	ensureMaskSize(sel, rows)
@@ -677,7 +626,7 @@ func evalEncodedDictEq(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionM
 
 // evalEncodedFSSTEq encodes target against the page symbol table once and byte-compares each row.
 // FSST encoding is deterministic against a fixed symbol table so equality requires no decode.
-func evalEncodedFSSTEq(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target []byte) (bool, []byte, error) {
+func evalEncodedFSSTEq(seg pageSource, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target []byte) (bool, []byte, error) {
 	page := seg.Cols[colIdx].Pages[pageIdx]
 	rows := int(page.Rows)
 	ensureMaskSize(sel, rows)
@@ -721,19 +670,19 @@ func evalEncodedFSSTEq(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionM
 	return true, newScratch, nil
 }
 
-func (b boundLtBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
+func (b boundLtBytes) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	return evalEncodedDictOrdered(seg, pageIdx, sel, scratch, b.column, b.value, false, b.inclusive)
 }
 
-func (b boundGtBytes) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
+func (b boundGtBytes) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	return evalEncodedDictOrdered(seg, pageIdx, sel, scratch, b.column, b.value, true, b.inclusive)
 }
 
 // evalEncodedDictOrdered narrows sel for dictionary-encoded text under a LT/GT comparison.
 // It builds a 256-bit accept mask by comparing every dict entry against target, then walks
 // the index stream once. Same allocation profile as the eq path.
-func evalEncodedDictOrdered(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte, column string, target []byte, greater, inclusive bool) (bool, []byte, error) {
-	colIdx, ok := findSegmentColumnIdx(seg, column)
+func evalEncodedDictOrdered(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte, column string, target []byte, greater, inclusive bool) (bool, []byte, error) {
+	colIdx, ok := findSegmentColumnIdx(seg.Segment, column)
 	if !ok {
 		return false, scratch, nil
 	}
@@ -762,29 +711,15 @@ func evalEncodedDictOrdered(seg *Segment, pageIdx int, sel *vector.SelectionMask
 	return true, newScratch, nil
 }
 
-// dictAcceptMask walks the dictionary header once and returns a 256-bit acceptance mask
-// plus the indices slice. Bit i of accept[i>>6]>>(i&63) is set when dict entry i passes
-// the LT/GT comparison.
+// dictAcceptMask returns a 256-bit acceptance mask plus the indices slice. Bit i of
+// accept[i>>6]>>(i&63) is set when dict entry i passes the LT/GT comparison.
 func dictAcceptMask(payload []byte, rows int, target []byte, greater, inclusive bool) (accept [4]uint64, indices []byte, err error) {
-	const dictHeaderSize = 2
-	if len(payload) < dictHeaderSize {
-		return accept, nil, fmt.Errorf("EvalEncoded dict: header truncated")
+	entries, indices, err := parseDictPayload(payload, rows)
+	if err != nil {
+		return accept, nil, err
 	}
-	dictCount := int(binary.LittleEndian.Uint16(payload[0:2]))
-	if dictCount == 0 || dictCount > 256 {
-		return accept, nil, fmt.Errorf("EvalEncoded dict: dictCount %d out of range", dictCount)
-	}
-	pos := dictHeaderSize
-	for i := range dictCount {
-		if pos+4 > len(payload) {
-			return accept, nil, fmt.Errorf("EvalEncoded dict: entry %d length truncated", i)
-		}
-		length := int(binary.LittleEndian.Uint32(payload[pos : pos+4]))
-		pos += 4
-		if pos+length > len(payload) {
-			return accept, nil, fmt.Errorf("EvalEncoded dict: entry %d bytes truncated", i)
-		}
-		cmp := bytes.Compare(payload[pos:pos+length], target)
+	for i, e := range entries {
+		cmp := bytes.Compare(e, target)
 		var pass bool
 		if greater {
 			pass = cmp > 0 || (inclusive && cmp == 0)
@@ -794,12 +729,7 @@ func dictAcceptMask(payload []byte, rows int, target []byte, greater, inclusive 
 		if pass {
 			accept[i>>6] |= 1 << uint(i&63)
 		}
-		pos += length
 	}
-	if pos+rows != len(payload) {
-		return accept, nil, fmt.Errorf("EvalEncoded dict: indices payload mismatch")
-	}
-	indices = payload[pos : pos+rows]
 	return accept, indices, nil
 }
 
@@ -818,8 +748,8 @@ func narrowDictByMask(indices []byte, accept [4]uint64, valid vector.Validity, s
 	}
 }
 
-func (b boundEqInt64) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
-	colIdx, ok := findSegmentColumnIdx(seg, b.column)
+func (b boundEqInt64) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
+	colIdx, ok := findSegmentColumnIdx(seg.Segment, b.column)
 	if !ok {
 		return false, scratch, nil
 	}
@@ -837,7 +767,7 @@ func (b boundEqInt64) EvalEncoded(seg *Segment, pageIdx int, sel *vector.Selecti
 	return false, scratch, nil
 }
 
-func evalEncodedEqFOR(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target int64) (bool, []byte, error) {
+func evalEncodedEqFOR(seg pageSource, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target int64) (bool, []byte, error) {
 	page := seg.Cols[colIdx].Pages[pageIdx]
 	rows := int(page.Rows)
 	ensureMaskSize(sel, rows)
@@ -851,14 +781,9 @@ func evalEncodedEqFOR(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMa
 	if allNull {
 		return true, newScratch, nil
 	}
-	const forHeaderSize = 9
-	if len(payload) < forHeaderSize {
-		return false, newScratch, fmt.Errorf("EvalEncoded FOR: header truncated")
-	}
-	base := int64(binary.LittleEndian.Uint64(payload[0:8]))
-	width := int(payload[8])
-	if width < 1 || width > 64 {
-		return false, newScratch, fmt.Errorf("EvalEncoded FOR: width %d out of range", width)
+	base, width, err := parseFORHeader(payload)
+	if err != nil {
+		return false, newScratch, err
 	}
 	residualSigned := target - base
 	if residualSigned < 0 {
@@ -876,7 +801,7 @@ func evalEncodedEqFOR(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMa
 	return true, newScratch, nil
 }
 
-func evalEncodedEqDelta(seg *Segment, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target int64) (bool, []byte, error) {
+func evalEncodedEqDelta(seg pageSource, colIdx, pageIdx int, sel *vector.SelectionMask, scratch []byte, target int64) (bool, []byte, error) {
 	page := seg.Cols[colIdx].Pages[pageIdx]
 	rows := int(page.Rows)
 	ensureMaskSize(sel, rows)
@@ -935,11 +860,11 @@ func narrowFOREq(residuals []uint64, target uint64, valid vector.Validity, sel *
 	}
 }
 
-func (b boundLtInt64) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
+func (b boundLtInt64) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	return evalEncodedFORRange(seg, pageIdx, sel, scratch, b.column, b.value, forRangeLT)
 }
 
-func (b boundGtInt64) EvalEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
+func (b boundGtInt64) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	return evalEncodedFORRange(seg, pageIdx, sel, scratch, b.column, b.value, forRangeGT)
 }
 
@@ -950,8 +875,8 @@ const (
 	forRangeGT
 )
 
-func evalEncodedFORRange(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte, column string, limit int64, op forRangeOp) (bool, []byte, error) {
-	colIdx, ok := findSegmentColumnIdx(seg, column)
+func evalEncodedFORRange(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte, column string, limit int64, op forRangeOp) (bool, []byte, error) {
+	colIdx, ok := findSegmentColumnIdx(seg.Segment, column)
 	if !ok {
 		return false, scratch, nil
 	}
@@ -974,14 +899,9 @@ func evalEncodedFORRange(seg *Segment, pageIdx int, sel *vector.SelectionMask, s
 		sel.Clear()
 		return true, newScratch, nil
 	}
-	const forHeaderSize = 9
-	if len(payload) < forHeaderSize {
-		return false, newScratch, fmt.Errorf("EvalEncoded FOR range: header truncated")
-	}
-	base := int64(binary.LittleEndian.Uint64(payload[0:8]))
-	width := int(payload[8])
-	if width < 1 || width > 64 {
-		return false, newScratch, fmt.Errorf("EvalEncoded FOR range: width %d out of range", width)
+	base, width, err := parseFORHeader(payload)
+	if err != nil {
+		return false, newScratch, err
 	}
 	threshold := limit - base
 	var maxResidual uint64
@@ -1082,51 +1002,33 @@ func equalFoldFast(a, b string) bool {
 	return true
 }
 
-// resolveDictCode walks a dictionary-encoded payload, finds the entry that matches lit, and
-// returns its u8 code plus the indices slice. Layout matches codec/dictionary.go:
-// [u16 LE dictCount][u32 LE len + bytes per entry][u8 indices x rows].
-func resolveDictCode(payload []byte, rows int, lit []byte) (code uint8, indices []byte, found bool, err error) {
-	const dictHeaderSize = 2
-	if len(payload) < dictHeaderSize {
-		return 0, nil, false, fmt.Errorf("EvalEncoded dict: header truncated")
+const forHeaderSize = 9
+
+func parseFORHeader(payload []byte) (base int64, width int, err error) {
+	if len(payload) < forHeaderSize {
+		return 0, 0, fmt.Errorf("EvalEncoded FOR: header truncated")
 	}
-	dictCount := int(binary.LittleEndian.Uint16(payload[0:2]))
-	if dictCount == 0 || dictCount > 256 {
-		return 0, nil, false, fmt.Errorf("EvalEncoded dict: dictCount %d out of range", dictCount)
+	base = int64(binary.LittleEndian.Uint64(payload[0:8]))
+	width = int(payload[8])
+	if width < 1 || width > 64 {
+		return 0, 0, fmt.Errorf("EvalEncoded FOR: width %d out of range", width)
 	}
-	pos := dictHeaderSize
-	for i := range dictCount {
-		if pos+4 > len(payload) {
-			return 0, nil, false, fmt.Errorf("EvalEncoded dict: entry %d length truncated", i)
-		}
-		length := int(binary.LittleEndian.Uint32(payload[pos : pos+4]))
-		pos += 4
-		if pos+length > len(payload) {
-			return 0, nil, false, fmt.Errorf("EvalEncoded dict: entry %d bytes truncated", i)
-		}
-		if !found && length == len(lit) && bytesEqual(payload[pos:pos+length], lit) {
-			code = uint8(i)
-			found = true
-		}
-		pos += length
-	}
-	if pos+rows != len(payload) {
-		return 0, nil, false, fmt.Errorf("EvalEncoded dict: indices payload mismatch")
-	}
-	indices = payload[pos : pos+rows]
-	return code, indices, found, nil
+	return base, width, nil
 }
 
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
+// resolveDictCode finds the dictionary entry matching lit and returns its u8 code
+// plus the indices slice. Layout parsing is shared with the scan's dict path.
+func resolveDictCode(payload []byte, rows int, lit []byte) (code uint8, indices []byte, found bool, err error) {
+	entries, indices, err := parseDictPayload(payload, rows)
+	if err != nil {
+		return 0, nil, false, err
 	}
-	for i := range len(a) {
-		if a[i] != b[i] {
-			return false
+	for i, e := range entries {
+		if bytes.Equal(e, lit) {
+			return uint8(i), indices, true, nil
 		}
 	}
-	return true
+	return 0, indices, false, nil
 }
 
 // narrowDictEq sets sel[i] when indices[i] == code, gated by validity. The indices are

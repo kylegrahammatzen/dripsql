@@ -43,7 +43,7 @@ func TestOpenSegment_RoundTrip_IntColumn(t *testing.T) {
 		t.Fatalf("pages = %d, want 2", len(seg.Cols[0].Pages))
 	}
 	for i := range 2 {
-		v, err := seg.ReadPage(0, i)
+		v, _, err := seg.ReadPageInto(0, i, nil)
 		if err != nil {
 			t.Fatalf("ReadPage(0, %d): %v", i, err)
 		}
@@ -78,14 +78,14 @@ func TestOpenSegment_RoundTrip_TwoColumns(t *testing.T) {
 	if got := []string{seg.Cols[0].Name, seg.Cols[1].Name}; got[0] != "id" || got[1] != "tag" {
 		t.Fatalf("col names = %v, want [id tag]", got)
 	}
-	idVec, err := seg.ReadPage(0, 1)
+	idVec, _, err := seg.ReadPageInto(0, 1, nil)
 	if err != nil {
 		t.Fatalf("ReadPage(id, 1): %v", err)
 	}
 	if idVec.I64()[0] != 64 {
 		t.Fatalf("id page 1 row 0 = %d, want 64", idVec.I64()[0])
 	}
-	tagVec, err := seg.ReadPage(1, 0)
+	tagVec, _, err := seg.ReadPageInto(1, 0, nil)
 	if err != nil {
 		t.Fatalf("ReadPage(tag, 0): %v", err)
 	}
@@ -146,10 +146,10 @@ func TestSegment_ReadPage_OutOfRange(t *testing.T) {
 		t.Fatalf("OpenSegment: %v", err)
 	}
 	defer seg.Close()
-	if _, err := seg.ReadPage(5, 0); err == nil {
+	if _, _, err := seg.ReadPageInto(5, 0, nil); err == nil {
 		t.Fatal("ReadPage must reject col index out of range")
 	}
-	if _, err := seg.ReadPage(0, 7); err == nil {
+	if _, _, err := seg.ReadPageInto(0, 7, nil); err == nil {
 		t.Fatal("ReadPage must reject page index out of range")
 	}
 }

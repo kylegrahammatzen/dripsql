@@ -179,7 +179,7 @@ func TestWriteSegment_NullableRoundTrip(t *testing.T) {
 	if seg.Cols[0].NullCount != 3 {
 		t.Fatalf("column null count = %d, want 3", seg.Cols[0].NullCount)
 	}
-	got, err := seg.ReadPage(0, 0)
+	got, _, err := seg.ReadPageInto(0, 0, nil)
 	if err != nil {
 		t.Fatalf("ReadPage: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestWriteSegment_AllNullRoundTrip(t *testing.T) {
 	if seg.Cols[0].Marker != columnMarkerAllNull {
 		t.Fatalf("column marker = %d, want AllNull", seg.Cols[0].Marker)
 	}
-	got, err := seg.ReadPage(0, 0)
+	got, _, err := seg.ReadPageInto(0, 0, nil)
 	if err != nil {
 		t.Fatalf("ReadPage: %v", err)
 	}

@@ -254,11 +254,11 @@ func (c CompiledPred) MatchesPage(seg *Segment, pageIdx int) bool {
 	return predicateAlwaysMatchesPage(c.bp, seg, pageIdx)
 }
 
-func (c CompiledPred) ApplyEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
+func (c CompiledPred) ApplyEncoded(src pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	if c.ee == nil {
 		return false, scratch, nil
 	}
-	return c.ee.EvalEncoded(seg, pageIdx, sel, scratch)
+	return c.ee.EvalEncoded(src, pageIdx, sel, scratch)
 }
 
 // Skips reports whether no row in seg can satisfy p.
@@ -299,7 +299,7 @@ func (p Pred) ApplyEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask,
 	if !ok {
 		return false, scratch, nil
 	}
-	return ee.EvalEncoded(seg, pageIdx, sel, scratch)
+	return ee.EvalEncoded(pageSource{Segment: seg}, pageIdx, sel, scratch)
 }
 
 // toBound maps a Pred to the equivalent bound predicate so eval and prune reuse the proven legacy code.
