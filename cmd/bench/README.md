@@ -43,12 +43,12 @@ Use fresh JSON or JSONL artifacts because `compare` reports median deltas agains
 | `count` | 100k | 200 | <1 us | <1 us | <1 us | <1 us |
 | `id_lookup` | 100k | 200 | <1 us | 18.9 us | 70.6 us | <1 us |
 | `category_groupby` | 100k | 100 | 548 us | 115 us | 701 us | <1 us |
-| `category_groupby` | 10M | 30 | 21.69 ms | 23.41 ms | 113.96 ms | <1 us |
+| `category_groupby` | 10M | 30 | 20.77 ms | 22.81 ms | 114.95 ms | <1 us |
 | `top_age` | 100k | 200 | 1.04 ms | 290 us | 388 us | 357 us |
 | `top_age` | 1M | 50 | 10.58 ms | 2.42 ms | 3.58 ms | 4.58 ms |
-| `top_age` | 10M | 10 | 95.11 ms | 23.24 ms | 30.70 ms | 41.17 ms |
+| `top_age` | 10M | 15 | 76.13 ms | 14.95 ms | 26.90 ms | 34.29 ms |
 | `cat_eq` | 1M | 30 | 21.64 ms | 2.08 ms | 2.08 ms | 17.48 ms |
-| `tpch_q1` | 1M | 20 | 25.68 ms | 9.99 ms | 217.74 ms | <1 us |
+| `tpch_q1` | 1M | 25 | 16.16 ms | 10.69 ms | 114.96 ms | <1 us |
 
 - `count` and `id_lookup` short-circuit via the `.sm` numsum and Binary Fuse 8 sidecars.
 - `count(*)` stays on the metadata-only path even after `DELETE` by popcounting the segment's deletion vector instead of scanning pages.
@@ -89,9 +89,9 @@ Rows are ordered from codec decode to page read to scan to write so low level co
 
 | Bench | Time | B/op | allocs/op |
 | --- | --- | --- | --- |
-| `Codec_Decode/FOR/Int64` | 20 us | 16 K | 1 |
-| `Codec_Decode/Delta/Int64` | 13 us | 33 K | 2 |
-| `Codec_Decode/Pcodec/Int64` | 6.5 us | 16 K | 1 |
+| `Codec_Decode/FOR/Int64` | 7.5 us | 16 K | 1 |
+| `Codec_Decode/Delta/Int64` | 11.6 us | 33 K | 2 |
+| `Codec_Decode/Pcodec/Int64` | 6.3 us | 16 K | 1 |
 | `Codec_Decode/Constant/Int64` | 5.2 us | 0 | 0 |
 | `Codec_Decode/Sequence/Int64` | 1.6 us | 0 | 0 |
 | `Codec_Decode/Plain/Int64` | 170 ns | 0 | 0 |
