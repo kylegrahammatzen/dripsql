@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -68,8 +69,9 @@ func (db *DB) SetReadOnly(on bool) { db.readOnly.Store(on) }
 
 func (db *DB) LastCommitTs() uint64 { return db.nextCommitTs.Load() }
 
-// Default keeps us well below the Windows default-handle ceiling without thrashing on typical workloads.
-const defaultSegCacheLimit = 256
+// Default keeps us well below the Windows default-handle ceiling while holding the
+// full working set of a 100M-row table at 262k-row segments without reopen thrash.
+const defaultSegCacheLimit = 1024
 
 func (db *DB) segCacheLimit() int {
 	if n := db.cacheSize.Load(); n > 0 {
@@ -615,16 +617,12 @@ func (db *DB) dropColumn(tab *catalog.Table, p *sql.AlterDropColumn) error {
 	if activeCount <= 1 {
 		return fmt.Errorf("cannot drop the last active column %q in table %q", p.Name, tab.Name)
 	}
-	for _, id := range tab.PrimaryKey {
-		if id == target.ColumnID {
-			return fmt.Errorf("cannot drop column %q referenced by primary key", p.Name)
-		}
+	if slices.Contains(tab.PrimaryKey, target.ColumnID) {
+		return fmt.Errorf("cannot drop column %q referenced by primary key", p.Name)
 	}
 	for _, idx := range tab.Indexes {
-		for _, id := range idx.Columns {
-			if id == target.ColumnID {
-				return fmt.Errorf("cannot drop column %q referenced by index %q", p.Name, idx.Name)
-			}
+		if slices.Contains(idx.Columns, target.ColumnID) {
+			return fmt.Errorf("cannot drop column %q referenced by index %q", p.Name, idx.Name)
 		}
 	}
 	prevGen := db.catalog.Generation

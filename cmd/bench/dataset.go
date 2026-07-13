@@ -58,7 +58,8 @@ var queries = map[string]query{
 }
 
 // Each segment is built from up to bulkPagesPerSegment INSERTs of segmentRows rows each and sealed via BulkInsert into one multi-page file.
-const bulkPagesPerSegment = 16
+// 128 pages of 2048 rows seals ~262k-row segments so scans amortize per-segment open and sidecar cost.
+const bulkPagesPerSegment = 128
 
 func setupUsers(ctx context.Context, db *engine.DB, rows int, segmentRows int) error {
 	if _, err := db.Exec(ctx, "CREATE TABLE users (id int64 NOT NULL, name text NOT NULL, age int64 NOT NULL, category text NOT NULL, price float64 NOT NULL)"); err != nil {

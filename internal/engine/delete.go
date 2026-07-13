@@ -209,16 +209,6 @@ func cloneOrAllValidDV(seg *storage.Segment, rows int) vector.Validity {
 	return vector.NewAllValid(rows)
 }
 
-func findSegmentColumn(seg *storage.Segment, name string) (int, error) {
-	want := schema.NormalizeName(name)
-	for i, c := range seg.Cols {
-		if schema.NormalizeName(c.Name) == want {
-			return i, nil
-		}
-	}
-	return 0, fmt.Errorf("column %q not in segment", name)
-}
-
 func segmentColumnIndex(seg *storage.Segment) map[string]int {
 	out := make(map[string]int, len(seg.Cols))
 	for i, c := range seg.Cols {
