@@ -668,27 +668,37 @@ func scanColumnMetadata(rel *sql.Rel) ([]string, []uint64, []vector.VecKind, []s
 	return names, ids, kinds, defaults, types, labels, nil
 }
 
-// wireDictGroupKey asks the scan for dictionary codes when a single varbytes group
-// key sits directly on it, so the aggregate can group by code instead of by string.
-// Columns the storage predicate reads stay materialized because Pred.Apply needs them.
+// wireDictGroupKey asks the scan for dictionary codes on varbytes group keys sitting
+// directly on it, so the aggregate can group by code instead of by string. Columns
+// the storage predicate reads stay materialized because Pred.Apply needs them.
 func wireDictGroupKey(source Operator, rel *sql.Rel) {
 	scan, ok := source.(*ScanOp)
-	if !ok || len(rel.GroupBy) != 1 || rel.GroupBy[0].Op != sql.ExprColumn {
+	if !ok {
 		return
 	}
-	vk, err := vector.VecKindOf(rel.GroupBy[0].Type)
-	if err != nil || !vk.IsVarBytes() {
-		return
-	}
-	col := rel.GroupBy[0].Column
-	if scan.Opts.Pred != nil {
-		for _, p := range scan.Opts.Pred.Columns() {
-			if strings.EqualFold(p, col) {
-				return
+	var dictCols []string
+	for _, g := range rel.GroupBy {
+		if g.Op != sql.ExprColumn {
+			continue
+		}
+		vk, err := vector.VecKindOf(g.Type)
+		if err != nil || !vk.IsVarBytes() {
+			continue
+		}
+		inPred := false
+		if scan.Opts.Pred != nil {
+			for _, p := range scan.Opts.Pred.Columns() {
+				if strings.EqualFold(p, g.Column) {
+					inPred = true
+					break
+				}
 			}
 		}
+		if !inPred {
+			dictCols = append(dictCols, g.Column)
+		}
 	}
-	scan.Opts.DictCodeColumns = []string{col}
+	scan.Opts.DictCodeColumns = dictCols
 }
 
 func buildScan(rel *sql.Rel, segments SegmentsFn, topK *storage.TopKPushdown, outer *correlatedOuter) (Operator, error) {

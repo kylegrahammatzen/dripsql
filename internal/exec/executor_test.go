@@ -517,6 +517,101 @@ func TestExec_GroupBy_DictCodesMatchDecoded(t *testing.T) {
 	}
 }
 
+// Composite dict grouping must match string grouping exactly, including batches
+// where only one of the two keys is dict-encoded so the mixed path runs.
+func TestExec_GroupBy_CompositeDictMatchesDecoded(t *testing.T) {
+	dir := t.TempDir()
+	k1s := []string{"red", "green", "blue"}
+	type exp struct{ count, sum int64 }
+	want := map[string]*exp{}
+	var segs []*storage.Segment
+	addSeg := func(fname string, rows int, makeK2 func(i int) string) {
+		k1 := vector.NewVarVec(vector.VecText, rows, 0)
+		k2 := vector.NewVarVec(vector.VecText, rows, 0)
+		v := vector.NewVec(vector.VecInt64, rows)
+		for i := range rows {
+			a := k1s[i%len(k1s)]
+			b := makeK2(i)
+			k1.Var().AppendString(i, a)
+			k2.Var().AppendString(i, b)
+			v.I64()[i] = int64(i)
+			key := a + "|" + b
+			e := want[key]
+			if e == nil {
+				e = &exp{}
+				want[key] = e
+			}
+			e.count++
+			e.sum += int64(i)
+		}
+		batch, err := vector.NewBatch([]vector.Column{
+			{Name: "k1", Type: schema.Text, V: k1},
+			{Name: "k2", Type: schema.Text, V: k2},
+			{Name: "v", Type: schema.Int64, V: v},
+		})
+		if err != nil {
+			t.Fatalf("NewBatch: %v", err)
+		}
+		path := filepath.Join(dir, fname)
+		if _, err := storage.WriteSegment(path, []vector.Batch{batch}, nil); err != nil {
+			t.Fatalf("WriteSegment: %v", err)
+		}
+		seg, err := storage.OpenSegment(path)
+		if err != nil {
+			t.Fatalf("OpenSegment: %v", err)
+		}
+		segs = append(segs, seg)
+	}
+	for s := range 4 {
+		addSeg(fmt.Sprintf("cd%d.dsv4", s), 1200, func(i int) string { return fmt.Sprintf("t%d", (i+s)%4) })
+	}
+	// 400 distinct k2 values defeat the dict so only k1 carries codes in this segment.
+	addSeg("cwide.dsv4", 2000, func(i int) string { return fmt.Sprintf("w%03d", i%400) })
+	defer func() {
+		for _, seg := range segs {
+			seg.Close()
+		}
+	}()
+
+	run := func(dictCodes bool) [][]any {
+		opts := storage.ScanOpts{Segments: segs, Columns: []string{"k1", "k2", "v"}}
+		if dictCodes {
+			opts.DictCodeColumns = []string{"k1", "k2"}
+		}
+		agg := &AggregateOp{
+			Source: &ScanOp{Opts: opts, Parallelism: 4},
+			GroupBy: []sql.BoundExpr{
+				{Op: sql.ExprColumn, Column: "k1", Type: schema.Text},
+				{Op: sql.ExprColumn, Column: "k2", Type: schema.Text},
+			},
+			Aggregates: []sql.AggSpec{
+				{Func: sql.AggregateCount, Star: true, Alias: "c"},
+				{Func: sql.AggregateSum, ArgName: "v", Alias: "s"},
+			},
+		}
+		return runOperator(t, agg)
+	}
+	for _, tc := range []struct {
+		name      string
+		dictCodes bool
+	}{{"decoded", false}, {"dict", true}} {
+		rows := run(tc.dictCodes)
+		if len(rows) != len(want) {
+			t.Fatalf("%s: got %d groups, want %d", tc.name, len(rows), len(want))
+		}
+		for _, r := range rows {
+			key := r[0].(string) + "|" + r[1].(string)
+			e := want[key]
+			if e == nil {
+				t.Fatalf("%s: unexpected group %q", tc.name, key)
+			}
+			if r[2].(int64) != e.count || r[3].(int64) != e.sum {
+				t.Fatalf("%s: group %q = %v, want count=%d sum=%d", tc.name, key, r[2:], e.count, e.sum)
+			}
+		}
+	}
+}
+
 // A parallel scan drained by several aggregate workers and merged must produce
 // exactly the groups and values a single worker produces, for every aggregate
 // function over both int and float accumulators.

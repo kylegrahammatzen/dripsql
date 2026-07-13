@@ -326,6 +326,18 @@ func mergeAccum(dst *aggAccum, src aggAccum) {
 }
 
 func (st *aggBuild) aggregateBatchCompositeKey(batch vector.Batch) error {
+	if len(st.groupCols) <= 8 {
+		allDict := true
+		for _, gc := range st.groupCols {
+			if batch.Columns[gc].Dict == nil {
+				allDict = false
+				break
+			}
+		}
+		if allDict {
+			return st.aggregateBatchCompositeAllDict(batch)
+		}
+	}
 	var loopErr error
 	var keyBuf []byte
 	batch.Sel.IterSet(func(row int) {
@@ -346,7 +358,7 @@ func (st *aggBuild) aggregateBatchCompositeKey(batch vector.Batch) error {
 			st.compIdx[string(keyCopy)] = gIdx
 			rowKeys := make([]any, len(st.groupCols))
 			for i, gc := range st.groupCols {
-				rowKeys[i] = readGroupKey(&batch.Columns[gc], st.groupKinds[i], row)
+				rowKeys[i] = readGroupKeyDict(&batch.Columns[gc], st.groupKinds[i], row)
 			}
 			st.groups = append(st.groups, aggGroup{key: rowKeys, aggs: make([]aggAccum, len(st.specs))})
 		}
@@ -357,10 +369,104 @@ func (st *aggBuild) aggregateBatchCompositeKey(batch vector.Batch) error {
 	return loopErr
 }
 
+// aggregateBatchCompositeAllDict packs up to eight per-row dict codes into one
+// uint64 combo key resolved through a small linear cache, so no per-row byte key
+// is built and no string hashing happens. New groups register under the canonical
+// encoded key so merge dedups against groups built by the string path.
+func (st *aggBuild) aggregateBatchCompositeAllDict(batch vector.Batch) error {
+	var dicts [8]*vector.DictCol
+	k := len(st.groupCols)
+	for i, gc := range st.groupCols {
+		dicts[i] = batch.Columns[gc].Dict
+	}
+	const comboCap = 32
+	var comboKeys [comboCap]uint64
+	var comboVals [comboCap]int
+	comboN := 0
+	var overflow map[uint64]int
+	var keyBuf []byte
+	resolve := func(ck uint64, row int) int {
+		keyBuf = keyBuf[:0]
+		for i := range k {
+			d := dicts[i]
+			e := d.Entries[d.Codes[row]]
+			n := uint32(len(e))
+			keyBuf = append(keyBuf, byte(n), byte(n>>8), byte(n>>16), byte(n>>24))
+			keyBuf = append(keyBuf, e...)
+			keyBuf = append(keyBuf, 0x00)
+		}
+		gIdx, ok := st.compIdx[string(keyBuf)]
+		if !ok {
+			gIdx = len(st.groups)
+			st.compIdx[string(keyBuf)] = gIdx
+			rowKeys := make([]any, k)
+			for i := range k {
+				d := dicts[i]
+				rowKeys[i] = string(d.Entries[d.Codes[row]])
+			}
+			st.groups = append(st.groups, aggGroup{key: rowKeys, aggs: make([]aggAccum, len(st.specs))})
+		}
+		if comboN < comboCap {
+			comboKeys[comboN] = ck
+			comboVals[comboN] = gIdx
+			comboN++
+		} else {
+			if overflow == nil {
+				overflow = make(map[uint64]int)
+			}
+			overflow[ck] = gIdx
+		}
+		return gIdx
+	}
+	var loopErr error
+	batch.Sel.IterSet(func(row int) {
+		if loopErr != nil {
+			return
+		}
+		var ck uint64
+		for i := range k {
+			ck |= uint64(dicts[i].Codes[row]) << (uint(i) * 8)
+		}
+		gIdx := -1
+		for i := range comboN {
+			if comboKeys[i] == ck {
+				gIdx = comboVals[i]
+				break
+			}
+		}
+		if gIdx < 0 && overflow != nil {
+			if v, ok := overflow[ck]; ok {
+				gIdx = v
+			}
+		}
+		if gIdx < 0 {
+			gIdx = resolve(ck, row)
+		}
+		if err := st.updateRow(&st.groups[gIdx], batch, row); err != nil {
+			loopErr = err
+		}
+	})
+	return loopErr
+}
+
+func readGroupKeyDict(col *vector.Column, vk vector.VecKind, row int) any {
+	if col.Dict != nil {
+		return string(col.Dict.Entries[col.Dict.Codes[row]])
+	}
+	return readGroupKey(col, vk, row)
+}
+
 func encodeCompositeKey(dst []byte, cols []vector.Column, groupCols []int, groupKinds []vector.VecKind, row int) []byte {
 	for i, gc := range groupCols {
 		col := &cols[gc]
-		dst = appendKeyBytes(dst, col, groupKinds[i], row)
+		if col.Dict != nil {
+			e := col.Dict.Entries[col.Dict.Codes[row]]
+			n := uint32(len(e))
+			dst = append(dst, byte(n), byte(n>>8), byte(n>>16), byte(n>>24))
+			dst = append(dst, e...)
+		} else {
+			dst = appendKeyBytes(dst, col, groupKinds[i], row)
+		}
 		dst = append(dst, 0x00)
 	}
 	return dst
