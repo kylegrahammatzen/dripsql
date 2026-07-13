@@ -5,6 +5,7 @@
 *.out
 db/
 bench-db/
+bench-db.manifest.json
 demo-db/
 *.pprof
 *.exe

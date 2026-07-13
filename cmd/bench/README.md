@@ -8,7 +8,7 @@
 
 # DripSQL - Benchmarks
 
-All numbers were captured on `AMD Ryzen 7 3700X` / `Windows amd64` / `go1.26.0`. Medians across 10 runs at `-benchtime=1s`.
+All numbers were captured on `AMD Ryzen 7 3700X` / `Windows amd64` / `go1.26.5`. Medians across 10 runs at `-benchtime=1s`.
 
 ## Workload driver
 
@@ -23,6 +23,9 @@ go run ./cmd/bench -query <name> -rows <N> -runs <R> -mode hot -json
 | `-runs` | Timed-run count for the median |
 | `-mode` | `hot` or `cold-soft` (close and reopen DB between runs) |
 | `-json` | Emit results as JSON for downstream tooling |
+| `-reuse` | Skip reseeding when `bench-db.manifest.json` matches dataset, rows, and segment rows |
+
+Seeding dominates wall time at 1M+ rows, so pass `-reuse` while iterating and drop it only when the write path itself changed.
 
 ## Comparing workload runs
 
@@ -38,12 +41,14 @@ Use fresh JSON or JSONL artifacts because `compare` reports median deltas agains
 | Query | Rows | Runs | Median | io | decode | exec |
 | --- | --- | --- | --- | --- | --- | --- |
 | `count` | 100k | 200 | <1 us | <1 us | <1 us | <1 us |
-| `id_lookup` | 100k | 200 | <1 us | 25.3 us | 50.3 us | <1 us |
-| `category_groupby` | 100k | 100 | 3.79 ms | 2.01 ms | 1.44 ms | 339 us |
-| `category_groupby` | 10M | 10 | 275.76 ms | 86.87 ms | 97.71 ms | 91.17 ms |
-| `top_age` | 100k | 200 | 1.00 ms | 213 us | 302 us | 485 us |
-| `top_age` | 1M | 50 | 8.48 ms | 1.39 ms | 3.20 ms | 3.89 ms |
-| `top_age` | 10M | 10 | 78.53 ms | 15.28 ms | 28.83 ms | 34.42 ms |
+| `id_lookup` | 100k | 200 | <1 us | 18.9 us | 70.6 us | <1 us |
+| `category_groupby` | 100k | 100 | 548 us | 115 us | 701 us | <1 us |
+| `category_groupby` | 10M | 30 | 21.69 ms | 23.41 ms | 113.96 ms | <1 us |
+| `top_age` | 100k | 200 | 1.04 ms | 290 us | 388 us | 357 us |
+| `top_age` | 1M | 50 | 10.58 ms | 2.42 ms | 3.58 ms | 4.58 ms |
+| `top_age` | 10M | 10 | 95.11 ms | 23.24 ms | 30.70 ms | 41.17 ms |
+| `cat_eq` | 1M | 30 | 21.64 ms | 2.08 ms | 2.08 ms | 17.48 ms |
+| `tpch_q1` | 1M | 20 | 25.68 ms | 9.99 ms | 217.74 ms | <1 us |
 
 - `count` and `id_lookup` short-circuit via the `.sm` numsum and Binary Fuse 8 sidecars.
 - `count(*)` stays on the metadata-only path even after `DELETE` by popcounting the segment's deletion vector instead of scanning pages.
@@ -51,6 +56,7 @@ Use fresh JSON or JSONL artifacts because `compare` reports median deltas agains
 - TPC-H Q1 and Q6 run against a synthetic `lineitem` with dates as int64 days since 1992-01-01.
 - `<1 us` means the workload driver rounded the median below the microsecond measurement floor.
 - For parallel scans, `io` and `decode` are summed worker time rather than wall time.
+- Under parallel aggregation the summed `io` and `decode` can exceed the median wall time, which clamps the residual `exec` column to zero. Compare runs on median wall time.
 
 ## Exec microbenchmarks
 

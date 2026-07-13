@@ -76,6 +76,7 @@ func runBench(args []string) {
 	jsonOut := fs.Bool("json", false, "emit JSON summary on stdout instead of a benchstat-style line")
 	cpuProfile := fs.String("cpuprofile", "", "write a CPU profile to this path (captures the timed runs only)")
 	mode := fs.String("mode", "hot", "hot or cold-soft, cold-soft closes and reopens the DB between runs")
+	reuse := fs.Bool("reuse", false, "reuse the existing bench-db when its manifest matches dataset, rows, and segment rows")
 	fs.Parse(args)
 
 	q, ok := queries[*queryName]
@@ -105,9 +106,13 @@ func runBench(args []string) {
 		segmentRows = 1
 	}
 
-	if err := os.RemoveAll(benchDir); err != nil {
-		fmt.Fprintln(os.Stderr, "bench: reset dir:", err)
-		os.Exit(1)
+	seeded := *reuse && manifestMatches(ds.name, *rows, segmentRows)
+	if !seeded {
+		_ = os.Remove(manifestPath())
+		if err := os.RemoveAll(benchDir); err != nil {
+			fmt.Fprintln(os.Stderr, "bench: reset dir:", err)
+			os.Exit(1)
+		}
 	}
 
 	ctx := context.Background()
@@ -117,13 +122,17 @@ func runBench(args []string) {
 		os.Exit(1)
 	}
 
-	setupStart := time.Now()
-	if err := ds.setup(ctx, db, *rows, segmentRows); err != nil {
-		db.Close()
-		fmt.Fprintln(os.Stderr, "bench: dataset setup:", err)
-		os.Exit(1)
+	var setup time.Duration
+	if !seeded {
+		setupStart := time.Now()
+		if err := ds.setup(ctx, db, *rows, segmentRows); err != nil {
+			db.Close()
+			fmt.Fprintln(os.Stderr, "bench: dataset setup:", err)
+			os.Exit(1)
+		}
+		setup = time.Since(setupStart)
+		writeManifest(ds.name, *rows, segmentRows)
 	}
-	setup := time.Since(setupStart)
 
 	sqlText := q.sql(*rows)
 	if *mode == "hot" {
@@ -214,6 +223,36 @@ func runBench(args []string) {
 		return
 	}
 	printBenchstatLine(os.Stdout, rep)
+}
+
+type benchManifest struct {
+	Dataset     string `json:"dataset"`
+	Rows        int    `json:"rows"`
+	SegmentRows int    `json:"segment_rows"`
+}
+
+// The manifest lives beside the DB dir because the engine owns everything inside it.
+func manifestPath() string { return benchDir + ".manifest.json" }
+
+func manifestMatches(dataset string, rows, segmentRows int) bool {
+	data, err := os.ReadFile(manifestPath())
+	if err != nil {
+		return false
+	}
+	var m benchManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return false
+	}
+	return m.Dataset == dataset && m.Rows == rows && m.SegmentRows == segmentRows
+}
+
+// writeManifest failures only cost a reseed on the next -reuse run, so they are not fatal.
+func writeManifest(dataset string, rows, segmentRows int) {
+	data, err := json.Marshal(benchManifest{Dataset: dataset, Rows: rows, SegmentRows: segmentRows})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(manifestPath(), data, 0o644)
 }
 
 func runCompare(args []string) {
