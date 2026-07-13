@@ -5,6 +5,7 @@ package exec
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
@@ -69,10 +70,7 @@ func (a *AggregateOp) Next() (vector.Batch, bool, error) {
 		a.built = true
 	}
 	for a.cursor < len(a.groups) {
-		end := a.cursor + vector.StandardBatchRows
-		if end > len(a.groups) {
-			end = len(a.groups)
-		}
+		end := min(a.cursor+vector.StandardBatchRows, len(a.groups))
 		batch, sel, err := a.materializeChunk(a.cursor, end)
 		a.cursor = end
 		if err != nil {
@@ -102,109 +100,257 @@ func (a *AggregateOp) build() error {
 			return fmt.Errorf("aggregate: only column-ref GROUP BY is supported")
 		}
 	}
-
 	a.specs = append(append([]sql.AggSpec{}, a.Aggregates...), a.Hidden...)
-	nKeys := len(a.GroupBy)
-	if nKeys == 0 {
-		a.groups = append(a.groups, aggGroup{aggs: make([]aggAccum, len(a.specs))})
+
+	workers := 1
+	if cs, ok := a.Source.(concurrentSource); ok && cs.concurrentDrainWorkers() > workers {
+		workers = cs.concurrentDrainWorkers()
 	}
+	states := make([]*aggBuild, workers)
+	for i := range states {
+		states[i] = newAggBuild(a.GroupBy, a.specs)
+	}
+	if workers == 1 {
+		if err := states[0].drain(a.Source); err != nil {
+			return err
+		}
+	} else {
+		var wg sync.WaitGroup
+		errCh := make(chan error, workers)
+		for _, st := range states {
+			wg.Go(func() {
+				if err := st.drain(a.Source); err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+				}
+			})
+		}
+		wg.Wait()
+		select {
+		case err := <-errCh:
+			return err
+		default:
+		}
+	}
+	merged := states[0]
+	for _, st := range states[1:] {
+		merged.merge(st)
+	}
+	a.groups = merged.groups
+	a.specKind = merged.specKind
+	return nil
+}
 
-	intIdx := map[int64]int{}
-	strIdx := map[string]int{}
-	anyIdx := map[any]int{}
-	compositeIdx := map[string]int{}
+// aggBuild is one drain worker's accumulation state so parallel sources can be
+// consumed by several goroutines and folded together afterwards.
+type aggBuild struct {
+	groupBy    []sql.BoundExpr
+	specs      []sql.AggSpec
+	specCols   []aggCol
+	specKind   []vector.VecKind
+	groupCols  []int
+	groupKinds []vector.VecKind
+	groups     []aggGroup
+	intIdx     map[int64]int
+	strIdx     map[string]int
+	anyIdx     map[any]int
+	compIdx    map[string]int
+}
 
-	var specCols []aggCol
-	groupCols := make([]int, nKeys)
-	groupKinds := make([]vector.VecKind, nKeys)
+func newAggBuild(groupBy []sql.BoundExpr, specs []sql.AggSpec) *aggBuild {
+	st := &aggBuild{
+		groupBy: groupBy,
+		specs:   specs,
+		intIdx:  map[int64]int{},
+		strIdx:  map[string]int{},
+		anyIdx:  map[any]int{},
+		compIdx: map[string]int{},
+	}
+	if len(groupBy) == 0 {
+		st.groups = append(st.groups, aggGroup{aggs: make([]aggAccum, len(specs))})
+	}
+	return st
+}
+
+// Group keys are always copied into the lookup maps, so consumed batches can go
+// straight back to the scan's recycle pool.
+func (st *aggBuild) drain(source Operator) error {
+	rec, _ := source.(batchRecycler)
 	for {
-		batch, ok, err := a.Source.Next()
+		batch, ok, err := source.Next()
 		if err != nil {
 			return err
 		}
 		if !ok {
-			break
+			return nil
 		}
-		if specCols == nil {
-			for i, g := range a.GroupBy {
-				idx := batchColumnIndex(batch, g.Column)
-				if idx == -1 {
-					return fmt.Errorf("aggregate: group column %q not in batch", g.Column)
-				}
-				groupCols[i] = idx
-				groupKinds[i] = batch.Columns[idx].V.Kind
-			}
-			specCols = make([]aggCol, len(a.specs))
-			a.specKind = make([]vector.VecKind, len(a.specs))
-			for i, spec := range a.specs {
-				if spec.Star {
-					specCols[i] = aggCol{idx: -1}
-					continue
-				}
-				ci := batchColumnIndex(batch, spec.ArgName)
-				if ci == -1 {
-					return fmt.Errorf("aggregate: column %q not in batch", spec.ArgName)
-				}
-				specCols[i] = aggCol{idx: ci, vk: batch.Columns[ci].V.Kind}
-				a.specKind[i] = batch.Columns[ci].V.Kind
-			}
+		if err := st.consume(batch); err != nil {
+			return err
 		}
-		switch nKeys {
-		case 0:
-			if err := a.aggregateBatchNoGroup(batch, specCols); err != nil {
-				return err
-			}
-		case 1:
-			col := &batch.Columns[groupCols[0]]
-			switch groupKinds[0] {
-			case vector.VecInt16, vector.VecInt32, vector.VecDate, vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-				if err := a.aggregateBatchIntKey(batch, col, groupKinds[0], specCols, intIdx); err != nil {
-					return err
-				}
-			case vector.VecText, vector.VecBytes, vector.VecJSON:
-				if err := a.aggregateBatchTextKey(batch, col, specCols, strIdx); err != nil {
-					return err
-				}
-			default:
-				if err := a.aggregateBatchAnyKey(batch, col, groupKinds[0], specCols, anyIdx); err != nil {
-					return err
-				}
-			}
-		default:
-			if err := a.aggregateBatchCompositeKey(batch, groupCols, groupKinds, specCols, compositeIdx); err != nil {
-				return err
-			}
+		if rec != nil {
+			rec.Recycle(batch)
 		}
 	}
-	return nil
 }
 
-func (a *AggregateOp) aggregateBatchCompositeKey(batch vector.Batch, groupCols []int, groupKinds []vector.VecKind, specCols []aggCol, idx map[string]int) error {
+func (st *aggBuild) consume(batch vector.Batch) error {
+	if st.specCols == nil {
+		st.groupCols = make([]int, len(st.groupBy))
+		st.groupKinds = make([]vector.VecKind, len(st.groupBy))
+		for i, g := range st.groupBy {
+			idx := batchColumnIndex(batch, g.Column)
+			if idx == -1 {
+				return fmt.Errorf("aggregate: group column %q not in batch", g.Column)
+			}
+			st.groupCols[i] = idx
+			st.groupKinds[i] = batch.Columns[idx].V.Kind
+		}
+		st.specCols = make([]aggCol, len(st.specs))
+		st.specKind = make([]vector.VecKind, len(st.specs))
+		for i, spec := range st.specs {
+			if spec.Star {
+				st.specCols[i] = aggCol{idx: -1}
+				continue
+			}
+			ci := batchColumnIndex(batch, spec.ArgName)
+			if ci == -1 {
+				return fmt.Errorf("aggregate: column %q not in batch", spec.ArgName)
+			}
+			st.specCols[i] = aggCol{idx: ci, vk: batch.Columns[ci].V.Kind}
+			st.specKind[i] = batch.Columns[ci].V.Kind
+		}
+	}
+	switch len(st.groupBy) {
+	case 0:
+		return st.aggregateBatchNoGroup(batch)
+	case 1:
+		col := &batch.Columns[st.groupCols[0]]
+		switch st.groupKinds[0] {
+		case vector.VecInt16, vector.VecInt32, vector.VecDate, vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
+			return st.aggregateBatchIntKey(batch, col, st.groupKinds[0])
+		case vector.VecText, vector.VecBytes, vector.VecJSON:
+			return st.aggregateBatchTextKey(batch, col)
+		default:
+			return st.aggregateBatchAnyKey(batch, col, st.groupKinds[0])
+		}
+	default:
+		return st.aggregateBatchCompositeKey(batch)
+	}
+}
+
+// merge folds another worker's partial groups into st. The single-key dispatch
+// mirrors consume so keys land in the same lookup map they were built with.
+func (st *aggBuild) merge(other *aggBuild) {
+	if other.specCols != nil && st.specCols == nil {
+		st.specCols = other.specCols
+		st.specKind = other.specKind
+		st.groupCols = other.groupCols
+		st.groupKinds = other.groupKinds
+	}
+	if len(st.groupBy) == 0 {
+		mergeGroupAccums(&st.groups[0], &other.groups[0])
+		return
+	}
+	if len(other.groups) == 0 {
+		return
+	}
+	if len(st.groupBy) > 1 {
+		for key, gi := range other.compIdx {
+			tgt, ok := st.compIdx[key]
+			if !ok {
+				tgt = len(st.groups)
+				st.compIdx[key] = tgt
+				st.groups = append(st.groups, aggGroup{key: other.groups[gi].key, aggs: make([]aggAccum, len(st.specs))})
+			}
+			mergeGroupAccums(&st.groups[tgt], &other.groups[gi])
+		}
+		return
+	}
+	for gi := range other.groups {
+		g := &other.groups[gi]
+		var tgt int
+		var ok bool
+		switch st.groupKinds[0] {
+		case vector.VecInt16, vector.VecInt32, vector.VecDate, vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
+			key := g.key.(int64)
+			tgt, ok = st.intIdx[key]
+			if !ok {
+				tgt = len(st.groups)
+				st.intIdx[key] = tgt
+			}
+		case vector.VecText, vector.VecBytes, vector.VecJSON:
+			key := g.key.(string)
+			tgt, ok = st.strIdx[key]
+			if !ok {
+				tgt = len(st.groups)
+				st.strIdx[key] = tgt
+			}
+		default:
+			tgt, ok = st.anyIdx[g.key]
+			if !ok {
+				tgt = len(st.groups)
+				st.anyIdx[g.key] = tgt
+			}
+		}
+		if !ok {
+			st.groups = append(st.groups, aggGroup{key: g.key, aggs: make([]aggAccum, len(st.specs))})
+		}
+		mergeGroupAccums(&st.groups[tgt], g)
+	}
+}
+
+func mergeGroupAccums(dst, src *aggGroup) {
+	for i := range dst.aggs {
+		mergeAccum(&dst.aggs[i], src.aggs[i])
+	}
+}
+
+func mergeAccum(dst *aggAccum, src aggAccum) {
+	dst.count += src.count
+	dst.sum += src.sum
+	dst.fsum += src.fsum
+	if !src.init {
+		return
+	}
+	if !dst.init {
+		dst.min, dst.max, dst.fmin, dst.fmax = src.min, src.max, src.fmin, src.fmax
+		dst.init = true
+		return
+	}
+	dst.min = min(dst.min, src.min)
+	dst.max = max(dst.max, src.max)
+	dst.fmin = min(dst.fmin, src.fmin)
+	dst.fmax = max(dst.fmax, src.fmax)
+}
+
+func (st *aggBuild) aggregateBatchCompositeKey(batch vector.Batch) error {
 	var loopErr error
 	var keyBuf []byte
 	batch.Sel.IterSet(func(row int) {
 		if loopErr != nil {
 			return
 		}
-		for _, gc := range groupCols {
+		for _, gc := range st.groupCols {
 			if v := batch.Columns[gc].V.Valid; v != nil && !v.IsValid(row) {
 				return
 			}
 		}
-		keyBuf = encodeCompositeKey(keyBuf[:0], batch.Columns, groupCols, groupKinds, row)
-		gIdx, ok := idx[string(keyBuf)]
+		keyBuf = encodeCompositeKey(keyBuf[:0], batch.Columns, st.groupCols, st.groupKinds, row)
+		gIdx, ok := st.compIdx[string(keyBuf)]
 		if !ok {
-			gIdx = len(a.groups)
+			gIdx = len(st.groups)
 			keyCopy := make([]byte, len(keyBuf))
 			copy(keyCopy, keyBuf)
-			idx[string(keyCopy)] = gIdx
-			rowKeys := make([]any, len(groupCols))
-			for i, gc := range groupCols {
-				rowKeys[i] = readGroupKey(&batch.Columns[gc], groupKinds[i], row)
+			st.compIdx[string(keyCopy)] = gIdx
+			rowKeys := make([]any, len(st.groupCols))
+			for i, gc := range st.groupCols {
+				rowKeys[i] = readGroupKey(&batch.Columns[gc], st.groupKinds[i], row)
 			}
-			a.groups = append(a.groups, aggGroup{key: rowKeys, aggs: make([]aggAccum, len(a.specs))})
+			st.groups = append(st.groups, aggGroup{key: rowKeys, aggs: make([]aggAccum, len(st.specs))})
 		}
-		if err := a.updateRow(&a.groups[gIdx], batch, specCols, row); err != nil {
+		if err := st.updateRow(&st.groups[gIdx], batch, row); err != nil {
 			loopErr = err
 		}
 	})
@@ -252,20 +398,20 @@ func appendKeyBytes(dst []byte, col *vector.Column, vk vector.VecKind, row int) 
 	return dst
 }
 
-func (a *AggregateOp) updateRow(g *aggGroup, batch vector.Batch, specCols []aggCol, row int) error {
-	for i, spec := range a.specs {
-		if err := updateAccumFast(&g.aggs[i], &batch.Columns[max(specCols[i].idx, 0)], specCols[i], spec, row); err != nil {
+func (st *aggBuild) updateRow(g *aggGroup, batch vector.Batch, row int) error {
+	for i, spec := range st.specs {
+		if err := updateAccumFast(&g.aggs[i], &batch.Columns[max(st.specCols[i].idx, 0)], st.specCols[i], spec, row); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (a *AggregateOp) aggregateBatchNoGroup(batch vector.Batch, specCols []aggCol) error {
-	g := &a.groups[0]
-	if a.allCountStar() {
+func (st *aggBuild) aggregateBatchNoGroup(batch vector.Batch) error {
+	g := &st.groups[0]
+	if st.allCountStar() {
 		n := int64(batch.Sel.PopCount())
-		for i := range a.specs {
+		for i := range st.specs {
 			g.aggs[i].count += n
 		}
 		return nil
@@ -275,7 +421,7 @@ func (a *AggregateOp) aggregateBatchNoGroup(batch vector.Batch, specCols []aggCo
 		if loopErr != nil {
 			return
 		}
-		if err := a.updateRow(g, batch, specCols, row); err != nil {
+		if err := st.updateRow(g, batch, row); err != nil {
 			loopErr = err
 		}
 	})
@@ -283,8 +429,8 @@ func (a *AggregateOp) aggregateBatchNoGroup(batch vector.Batch, specCols []aggCo
 }
 
 // allCountStar reports whether every spec is count(*) so the batch loop can sum PopCount directly.
-func (a *AggregateOp) allCountStar() bool {
-	for _, s := range a.specs {
+func (st *aggBuild) allCountStar() bool {
+	for _, s := range st.specs {
 		if s.Func != sql.AggregateCount || !s.Star {
 			return false
 		}
@@ -292,7 +438,7 @@ func (a *AggregateOp) allCountStar() bool {
 	return true
 }
 
-func (a *AggregateOp) aggregateBatchIntKey(batch vector.Batch, col *vector.Column, vk vector.VecKind, specCols []aggCol, idx map[int64]int) error {
+func (st *aggBuild) aggregateBatchIntKey(batch vector.Batch, col *vector.Column, vk vector.VecKind) error {
 	valid := col.V.Valid
 	var loopErr error
 	batch.Sel.IterSet(func(row int) {
@@ -311,13 +457,13 @@ func (a *AggregateOp) aggregateBatchIntKey(batch vector.Batch, col *vector.Colum
 		default:
 			key = col.V.I64()[row]
 		}
-		gIdx, ok := idx[key]
+		gIdx, ok := st.intIdx[key]
 		if !ok {
-			gIdx = len(a.groups)
-			idx[key] = gIdx
-			a.groups = append(a.groups, aggGroup{key: key, aggs: make([]aggAccum, len(a.specs))})
+			gIdx = len(st.groups)
+			st.intIdx[key] = gIdx
+			st.groups = append(st.groups, aggGroup{key: key, aggs: make([]aggAccum, len(st.specs))})
 		}
-		if err := a.updateRow(&a.groups[gIdx], batch, specCols, row); err != nil {
+		if err := st.updateRow(&st.groups[gIdx], batch, row); err != nil {
 			loopErr = err
 		}
 	})
@@ -326,9 +472,12 @@ func (a *AggregateOp) aggregateBatchIntKey(batch vector.Batch, col *vector.Colum
 
 // `idx[string(b)]` is the well-known compiler trick that avoids the per-lookup string
 // allocation. The miss branch materializes the key only when we record a new group.
-func (a *AggregateOp) aggregateBatchTextKey(batch vector.Batch, col *vector.Column, specCols []aggCol, idx map[string]int) error {
-	if a.canAggregateTextKeyCountSumInt64(specCols) {
-		a.aggregateBatchTextKeyCountSumInt64(batch, col, specCols, idx)
+func (st *aggBuild) aggregateBatchTextKey(batch vector.Batch, col *vector.Column) error {
+	if col.Dict != nil {
+		return st.aggregateBatchTextKeyDict(batch, col.Dict)
+	}
+	if st.canAggregateTextKeyCountSumInt64() {
+		st.aggregateBatchTextKeyCountSumInt64(batch, col)
 		return nil
 	}
 	valid := col.V.Valid
@@ -342,38 +491,116 @@ func (a *AggregateOp) aggregateBatchTextKey(batch vector.Batch, col *vector.Colu
 			return
 		}
 		b := vb.Bytes(row)
-		gIdx, ok := idx[string(b)]
+		gIdx, ok := st.strIdx[string(b)]
 		if !ok {
 			key := string(b)
-			gIdx = len(a.groups)
-			idx[key] = gIdx
-			a.groups = append(a.groups, aggGroup{key: key, aggs: make([]aggAccum, len(a.specs))})
+			gIdx = len(st.groups)
+			st.strIdx[key] = gIdx
+			st.groups = append(st.groups, aggGroup{key: key, aggs: make([]aggAccum, len(st.specs))})
 		}
-		if err := a.updateRow(&a.groups[gIdx], batch, specCols, row); err != nil {
+		if err := st.updateRow(&st.groups[gIdx], batch, row); err != nil {
 			loopErr = err
 		}
 	})
 	return loopErr
 }
 
-func (a *AggregateOp) canAggregateTextKeyCountSumInt64(specCols []aggCol) bool {
-	return len(a.specs) == 2 &&
-		len(specCols) == 2 &&
-		a.specs[0].Func == sql.AggregateCount &&
-		a.specs[1].Func == sql.AggregateSum &&
-		specCols[1].idx >= 0 &&
-		specCols[1].vk == vector.VecInt64
+// Dictionary pages resolve each distinct entry to a group slot at most once, then
+// rows accumulate through a code-indexed table with no per-row hashing. Entries are
+// resolved lazily so codes no selected row references never create phantom groups.
+func (st *aggBuild) aggregateBatchTextKeyDict(batch vector.Batch, d *vector.DictCol) error {
+	var lut [256]int32
+	for i := range d.Entries {
+		lut[i] = -1
+	}
+	resolve := func(c byte) int32 {
+		key := string(d.Entries[c])
+		gIdx, ok := st.strIdx[key]
+		if !ok {
+			gIdx = len(st.groups)
+			st.strIdx[key] = gIdx
+			st.groups = append(st.groups, aggGroup{key: key, aggs: make([]aggAccum, len(st.specs))})
+		}
+		lut[c] = int32(gIdx)
+		return int32(gIdx)
+	}
+	codes := d.Codes
+	if st.canAggregateTextKeyCountSumInt64() {
+		countStar := st.specCols[0].idx == -1
+		var countValid vector.Validity
+		if !countStar {
+			countValid = batch.Columns[st.specCols[0].idx].V.Valid
+		}
+		sumCol := &batch.Columns[st.specCols[1].idx]
+		sumValid := sumCol.V.Valid
+		sumVals := sumCol.V.I64()
+		if batch.Sel.IsAllSet() && countValid == nil && sumValid == nil {
+			for row, c := range codes {
+				gi := lut[c]
+				if gi < 0 {
+					gi = resolve(c)
+				}
+				g := &st.groups[gi]
+				g.aggs[0].count++
+				acc := &g.aggs[1]
+				acc.count++
+				acc.sum += sumVals[row]
+				acc.init = true
+			}
+			return nil
+		}
+		batch.Sel.IterSet(func(row int) {
+			gi := lut[codes[row]]
+			if gi < 0 {
+				gi = resolve(codes[row])
+			}
+			g := &st.groups[gi]
+			if countStar || countValid == nil || countValid.IsValid(row) {
+				g.aggs[0].count++
+			}
+			if sumValid == nil || sumValid.IsValid(row) {
+				acc := &g.aggs[1]
+				acc.count++
+				acc.sum += sumVals[row]
+				acc.init = true
+			}
+		})
+		return nil
+	}
+	var loopErr error
+	batch.Sel.IterSet(func(row int) {
+		if loopErr != nil {
+			return
+		}
+		gi := lut[codes[row]]
+		if gi < 0 {
+			gi = resolve(codes[row])
+		}
+		if err := st.updateRow(&st.groups[gi], batch, row); err != nil {
+			loopErr = err
+		}
+	})
+	return loopErr
 }
 
-func (a *AggregateOp) aggregateBatchTextKeyCountSumInt64(batch vector.Batch, col *vector.Column, specCols []aggCol, idx map[string]int) {
+func (st *aggBuild) canAggregateTextKeyCountSumInt64() bool {
+	return len(st.specs) == 2 &&
+		len(st.specCols) == 2 &&
+		st.specs[0].Func == sql.AggregateCount &&
+		st.specs[1].Func == sql.AggregateSum &&
+		st.specCols[1].idx >= 0 &&
+		st.specCols[1].vk == vector.VecInt64
+}
+
+func (st *aggBuild) aggregateBatchTextKeyCountSumInt64(batch vector.Batch, col *vector.Column) {
 	valid := col.V.Valid
 	vb := col.V.Var()
-	countStar := specCols[0].idx == -1
+	countStar := st.specCols[0].idx == -1
 	var countValid vector.Validity
 	if !countStar {
-		countValid = batch.Columns[specCols[0].idx].V.Valid
+		countValid = batch.Columns[st.specCols[0].idx].V.Valid
 	}
-	sumCol := &batch.Columns[specCols[1].idx]
+	sumCol := &batch.Columns[st.specCols[1].idx]
 	sumValid := sumCol.V.Valid
 	sumVals := sumCol.V.I64()
 	var shortKeys [16][2]uint64
@@ -394,12 +621,12 @@ func (a *AggregateOp) aggregateBatchTextKeyCountSumInt64(batch vector.Batch, col
 			if gIdx < 0 && shortN < len(shortKeys) {
 				b := vb.Bytes(row)
 				var ok bool
-				gIdx, ok = idx[string(b)]
+				gIdx, ok = st.strIdx[string(b)]
 				if !ok {
 					name := string(b)
-					gIdx = len(a.groups)
-					idx[name] = gIdx
-					a.groups = append(a.groups, aggGroup{key: name, aggs: make([]aggAccum, len(a.specs))})
+					gIdx = len(st.groups)
+					st.strIdx[name] = gIdx
+					st.groups = append(st.groups, aggGroup{key: name, aggs: make([]aggAccum, len(st.specs))})
 				}
 				shortKeys[shortN] = key
 				shortVals[shortN] = gIdx
@@ -409,15 +636,15 @@ func (a *AggregateOp) aggregateBatchTextKeyCountSumInt64(batch vector.Batch, col
 		if gIdx < 0 {
 			b := vb.Bytes(row)
 			var ok bool
-			gIdx, ok = idx[string(b)]
+			gIdx, ok = st.strIdx[string(b)]
 			if !ok {
 				key := string(b)
-				gIdx = len(a.groups)
-				idx[key] = gIdx
-				a.groups = append(a.groups, aggGroup{key: key, aggs: make([]aggAccum, len(a.specs))})
+				gIdx = len(st.groups)
+				st.strIdx[key] = gIdx
+				st.groups = append(st.groups, aggGroup{key: key, aggs: make([]aggAccum, len(st.specs))})
 			}
 		}
-		g := &a.groups[gIdx]
+		g := &st.groups[gIdx]
 		if countStar || countValid == nil || countValid.IsValid(row) {
 			g.aggs[0].count++
 		}
@@ -430,7 +657,7 @@ func (a *AggregateOp) aggregateBatchTextKeyCountSumInt64(batch vector.Batch, col
 	})
 }
 
-func (a *AggregateOp) aggregateBatchAnyKey(batch vector.Batch, col *vector.Column, vk vector.VecKind, specCols []aggCol, idx map[any]int) error {
+func (st *aggBuild) aggregateBatchAnyKey(batch vector.Batch, col *vector.Column, vk vector.VecKind) error {
 	var loopErr error
 	batch.Sel.IterSet(func(row int) {
 		if loopErr != nil {
@@ -443,13 +670,13 @@ func (a *AggregateOp) aggregateBatchAnyKey(batch vector.Batch, col *vector.Colum
 		if key == nil {
 			return
 		}
-		gIdx, ok := idx[key]
+		gIdx, ok := st.anyIdx[key]
 		if !ok {
-			gIdx = len(a.groups)
-			idx[key] = gIdx
-			a.groups = append(a.groups, aggGroup{key: key, aggs: make([]aggAccum, len(a.specs))})
+			gIdx = len(st.groups)
+			st.anyIdx[key] = gIdx
+			st.groups = append(st.groups, aggGroup{key: key, aggs: make([]aggAccum, len(st.specs))})
 		}
-		if err := a.updateRow(&a.groups[gIdx], batch, specCols, row); err != nil {
+		if err := st.updateRow(&st.groups[gIdx], batch, row); err != nil {
 			loopErr = err
 		}
 	})
@@ -564,7 +791,7 @@ func (a *AggregateOp) materializeChunk(start, end int) (vector.Batch, *vector.Se
 
 	if len(a.GroupBy) == 1 {
 		expr := a.GroupBy[0]
-		v, err := buildGroupKeyVec(expr.Type, chunk)
+		v, err := buildGroupKeyVec(expr.Type, rows, func(i int) any { return chunk[i].key })
 		if err != nil {
 			return vector.Batch{}, nil, err
 		}
@@ -574,7 +801,13 @@ func (a *AggregateOp) materializeChunk(start, end int) (vector.Batch, *vector.Se
 		// Composite-key groups store their per-column raw values as []any in group.key.
 		// Build one output vector per GROUP BY expression.
 		for keyIdx, expr := range a.GroupBy {
-			v, err := buildCompositeKeyColumnVec(expr.Type, chunk, keyIdx)
+			v, err := buildGroupKeyVec(expr.Type, rows, func(i int) any {
+				keys, ok := chunk[i].key.([]any)
+				if !ok || keyIdx >= len(keys) {
+					return nil
+				}
+				return keys[keyIdx]
+			})
 			if err != nil {
 				return vector.Batch{}, nil, err
 			}
@@ -640,64 +873,35 @@ func aggregateColumnName(spec sql.AggSpec) string {
 	}
 }
 
-func buildCompositeKeyColumnVec(t schema.Type, groups []aggGroup, keyIdx int) (vector.Vec, error) {
-	pickKey := func(g aggGroup) any {
-		keys, ok := g.key.([]any)
-		if !ok || keyIdx >= len(keys) {
-			return nil
-		}
-		return keys[keyIdx]
-	}
-	projected := make([]aggGroup, len(groups))
-	for i, g := range groups {
-		projected[i] = aggGroup{key: pickKey(g)}
-	}
-	return buildGroupKeyVec(t, projected)
-}
-
-func buildGroupKeyVec(t schema.Type, groups []aggGroup) (vector.Vec, error) {
-	rows := len(groups)
+func buildGroupKeyVec(t schema.Type, rows int, key func(int) any) (vector.Vec, error) {
 	vk, err := vector.VecKindOf(t)
 	if err != nil {
 		return vector.Vec{}, fmt.Errorf("aggregate: group key kind: %w", err)
 	}
 	switch vk {
-	case vector.VecInt16:
+	case vector.VecInt16, vector.VecInt32, vector.VecDate, vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		v := vector.NewVec(vk, rows)
-		for i, g := range groups {
-			x, ok := asInt64(g.key)
+		for i := range rows {
+			x, ok := asInt64(key(i))
 			if !ok {
-				return vector.Vec{}, fmt.Errorf("aggregate: group key %v not int", g.key)
+				return vector.Vec{}, fmt.Errorf("aggregate: group key %v not int", key(i))
 			}
-			v.I16()[i] = int16(x)
-		}
-		return v, nil
-	case vector.VecInt32, vector.VecDate:
-		v := vector.NewVec(vk, rows)
-		for i, g := range groups {
-			x, ok := asInt64(g.key)
-			if !ok {
-				return vector.Vec{}, fmt.Errorf("aggregate: group key %v not int", g.key)
+			switch vk {
+			case vector.VecInt16:
+				v.I16()[i] = int16(x)
+			case vector.VecInt32, vector.VecDate:
+				v.I32()[i] = int32(x)
+			default:
+				v.I64()[i] = x
 			}
-			v.I32()[i] = int32(x)
-		}
-		return v, nil
-	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-		v := vector.NewVec(vk, rows)
-		for i, g := range groups {
-			x, ok := asInt64(g.key)
-			if !ok {
-				return vector.Vec{}, fmt.Errorf("aggregate: group key %v not int", g.key)
-			}
-			v.I64()[i] = x
 		}
 		return v, nil
 	case vector.VecText, vector.VecBytes, vector.VecJSON:
 		v := vector.NewVarVec(vk, rows, 0)
-		for i, g := range groups {
-			s, ok := g.key.(string)
+		for i := range rows {
+			s, ok := key(i).(string)
 			if !ok {
-				return vector.Vec{}, fmt.Errorf("aggregate: group key %v not string", g.key)
+				return vector.Vec{}, fmt.Errorf("aggregate: group key %v not string", key(i))
 			}
 			v.Var().AppendString(i, s)
 		}
@@ -705,10 +909,10 @@ func buildGroupKeyVec(t schema.Type, groups []aggGroup) (vector.Vec, error) {
 	case vector.VecBool:
 		v := vector.NewVec(vector.VecBool, rows)
 		bits := v.BoolBits()
-		for i, g := range groups {
-			b, ok := g.key.(bool)
+		for i := range rows {
+			b, ok := key(i).(bool)
 			if !ok {
-				return vector.Vec{}, fmt.Errorf("aggregate: group key %v not bool", g.key)
+				return vector.Vec{}, fmt.Errorf("aggregate: group key %v not bool", key(i))
 			}
 			if b {
 				bits[i>>3] |= 1 << (i & 7)
@@ -732,101 +936,60 @@ func aggregateOutputType(spec sql.AggSpec, argKind vector.VecKind) schema.Type {
 	return schema.Int64
 }
 
+// count is always int64 output and never null, everything else outputs one vector
+// whose kind follows aggregateOutputType and goes null for groups that saw no values.
 func buildAggregateVec(spec sql.AggSpec, argKind vector.VecKind, groups []aggGroup, slot int) (vector.Vec, vector.Validity, error) {
 	rows := len(groups)
-	if spec.Func == sql.AggregateAvg {
-		v := vector.NewVec(vector.VecFloat64, rows)
-		data := v.F64()
-		var valid vector.Validity
-		setInvalid := func(i int) {
-			if valid == nil {
-				valid = vector.NewAllValid(rows)
-			}
-			valid.SetInvalid(i)
-		}
-		for i, g := range groups {
-			acc := g.aggs[slot]
-			if !acc.init || acc.count == 0 {
-				setInvalid(i)
-				continue
-			}
-			if argKind == vector.VecFloat32 || argKind == vector.VecFloat64 {
-				data[i] = acc.fsum / float64(acc.count)
-			} else {
-				data[i] = float64(acc.sum) / float64(acc.count)
-			}
-		}
-		return v, valid, nil
+	isFloat := argKind == vector.VecFloat32 || argKind == vector.VecFloat64
+	var i64 []int64
+	var f64 []float64
+	var v vector.Vec
+	if spec.Func == sql.AggregateAvg || (isFloat && spec.Func != sql.AggregateCount) {
+		v = vector.NewVec(vector.VecFloat64, rows)
+		f64 = v.F64()
+	} else {
+		v = vector.NewVec(vector.VecInt64, rows)
+		i64 = v.I64()
 	}
-	if argKind == vector.VecFloat32 || argKind == vector.VecFloat64 {
-		v := vector.NewVec(vector.VecFloat64, rows)
-		data := v.F64()
-		var valid vector.Validity
-		setInvalid := func(i int) {
-			if valid == nil {
-				valid = vector.NewAllValid(rows)
-			}
-			valid.SetInvalid(i)
-		}
-		for i, g := range groups {
-			acc := g.aggs[slot]
-			switch spec.Func {
-			case sql.AggregateSum:
-				if !acc.init {
-					setInvalid(i)
-					continue
-				}
-				data[i] = acc.fsum
-			case sql.AggregateMin:
-				if !acc.init {
-					setInvalid(i)
-					continue
-				}
-				data[i] = acc.fmin
-			case sql.AggregateMax:
-				if !acc.init {
-					setInvalid(i)
-					continue
-				}
-				data[i] = acc.fmax
-			default:
-				return vector.Vec{}, nil, fmt.Errorf("aggregate: unsupported func %v on float", spec.Func)
-			}
-		}
-		return v, valid, nil
-	}
-	v := vector.NewVec(vector.VecInt64, rows)
-	data := v.I64()
 	var valid vector.Validity
-	setInvalid := func(i int) {
-		if valid == nil {
-			valid = vector.NewAllValid(rows)
-		}
-		valid.SetInvalid(i)
-	}
 	for i, g := range groups {
 		acc := g.aggs[slot]
+		if spec.Func == sql.AggregateCount {
+			i64[i] = acc.count
+			continue
+		}
+		if !acc.init {
+			if valid == nil {
+				valid = vector.NewAllValid(rows)
+			}
+			valid.SetInvalid(i)
+			continue
+		}
 		switch spec.Func {
-		case sql.AggregateCount:
-			data[i] = acc.count
+		case sql.AggregateAvg:
+			if isFloat {
+				f64[i] = acc.fsum / float64(acc.count)
+			} else {
+				f64[i] = float64(acc.sum) / float64(acc.count)
+			}
 		case sql.AggregateSum:
-			if !acc.init {
-				setInvalid(i)
-				continue
+			if isFloat {
+				f64[i] = acc.fsum
+			} else {
+				i64[i] = acc.sum
 			}
-			data[i] = acc.sum
 		case sql.AggregateMin:
-			if !acc.init {
-				setInvalid(i)
-				continue
+			if isFloat {
+				f64[i] = acc.fmin
+			} else {
+				i64[i] = acc.min
 			}
-			data[i] = acc.min
 		case sql.AggregateMax:
-			if !acc.init {
-				setInvalid(i)
-				continue
+			if isFloat {
+				f64[i] = acc.fmax
+			} else {
+				i64[i] = acc.max
 			}
-			data[i] = acc.max
 		default:
 			return vector.Vec{}, nil, fmt.Errorf("aggregate: unsupported func %v", spec.Func)
 		}

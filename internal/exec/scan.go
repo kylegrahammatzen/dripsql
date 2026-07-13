@@ -18,12 +18,35 @@ type ScanOp struct {
 	ColumnAlias string
 	Parallelism int
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	out    chan vector.Batch
-	err    chan error
-	wg     sync.WaitGroup
-	state  operatorState
+	ctx     context.Context
+	cancel  context.CancelFunc
+	out     chan vector.Batch
+	err     chan error
+	wg      sync.WaitGroup
+	state   operatorState
+	workers int
+	pool    sync.Pool
+}
+
+// concurrentSource marks operators whose Next is safe to call from multiple
+// goroutines, reporting how many consumers the source can keep busy.
+type concurrentSource interface {
+	concurrentDrainWorkers() int
+}
+
+func (s *ScanOp) concurrentDrainWorkers() int { return s.workers }
+
+// batchRecycler lets a consumer that fully copies what it needs out of each batch
+// hand the buffers back, so the scan's clone step stops allocating per batch.
+type batchRecycler interface {
+	Recycle(vector.Batch)
+}
+
+func (s *ScanOp) Recycle(b vector.Batch) {
+	if len(b.Columns) == 0 {
+		return
+	}
+	s.pool.Put(&b)
 }
 
 func (s *ScanOp) Open(ctx context.Context) error {
@@ -42,8 +65,9 @@ func (s *ScanOp) Open(ctx context.Context) error {
 	if workers > len(s.Opts.Segments) {
 		workers = len(s.Opts.Segments)
 	}
+	s.workers = workers
 
-	s.out = make(chan vector.Batch, workers)
+	s.out = make(chan vector.Batch, workers*4)
 	s.err = make(chan error, workers)
 
 	if workers == 1 {
@@ -79,9 +103,9 @@ func (s *ScanOp) runScan(segs []*storage.Segment) {
 	opts := s.Opts
 	opts.Segments = segs
 	err := storage.Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error {
-		cloned := cloneBatch(batch, s.ColumnAlias)
-		clonedSel := sel.Clone()
-		if err := cloned.SetSel(&clonedSel); err != nil {
+		cloned, mask := s.cloneBatch(batch, s.ColumnAlias)
+		mask.CopyFrom(sel)
+		if err := cloned.SetSel(mask); err != nil {
 			return fmt.Errorf("scan: %w", err)
 		}
 		select {
@@ -108,21 +132,45 @@ func partitionSegments(segs []*storage.Segment, workers int) [][]*storage.Segmen
 	return out
 }
 
-func cloneBatch(b vector.Batch, alias string) vector.Batch {
-	cols := make([]vector.Column, len(b.Columns))
-	for i, c := range b.Columns {
+// cloneBatch copies the callback-scoped storage batch into buffers the consumer may
+// hold, drawing from the recycle pool so steady-state scans stop allocating per batch.
+func (s *ScanOp) cloneBatch(b vector.Batch, alias string) (vector.Batch, *vector.SelectionMask) {
+	out := vector.Batch{}
+	if p, _ := s.pool.Get().(*vector.Batch); p != nil && len(p.Columns) == len(b.Columns) {
+		out = *p
+	}
+	if out.Columns == nil {
+		out.Columns = make([]vector.Column, len(b.Columns))
+	}
+	out.Len = b.Len
+	for i := range b.Columns {
+		c := &b.Columns[i]
 		name := c.Name
 		if alias != "" {
 			name = alias + "." + c.Name
 		}
-		cols[i] = vector.Column{
-			Name:       name,
-			Type:       c.Type,
-			EnumLabels: c.EnumLabels,
-			V:          c.V.Clone(),
+		dst := &out.Columns[i]
+		dst.Name = name
+		dst.Type = c.Type
+		dst.EnumLabels = c.EnumLabels
+		if c.Dict != nil {
+			if dst.Dict == nil {
+				dst.Dict = &vector.DictCol{}
+			}
+			dst.Dict.CopyFrom(c.Dict)
+			dst.V = c.V
+		} else {
+			dst.Dict = nil
+			c.V.CloneInto(&dst.V)
 		}
 	}
-	return vector.Batch{Len: b.Len, Columns: cols}
+	mask := out.Sel
+	if mask == nil {
+		m := vector.NewSelectionMask(out.Len)
+		mask = &m
+	}
+	out.Sel = nil
+	return out, mask
 }
 
 func (s *ScanOp) Next() (vector.Batch, bool, error) {

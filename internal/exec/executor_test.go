@@ -394,3 +394,224 @@ func TestExec_GroupBy_PaginatesAboveStandardBatchRows(t *testing.T) {
 		t.Fatalf("got %d overlap groups (count=2), want 1000", overlap)
 	}
 }
+
+// Grouping by dictionary codes must produce exactly what string grouping produces,
+// including when some segments exceed the dict limit and fall back to decoded pages.
+func TestExec_GroupBy_DictCodesMatchDecoded(t *testing.T) {
+	dir := t.TempDir()
+	cats := []string{"alpha", "beta", "gamma"}
+	type exp struct{ count, sum, min int64 }
+	want := map[string]*exp{}
+	var segs []*storage.Segment
+	addSeg := func(fname string, rows int, makeKey func(i int) string) {
+		k := vector.NewVarVec(vector.VecText, rows, 0)
+		v := vector.NewVec(vector.VecInt64, rows)
+		for i := range rows {
+			key := makeKey(i)
+			k.Var().AppendString(i, key)
+			v.I64()[i] = int64(i)
+			e := want[key]
+			if e == nil {
+				e = &exp{min: int64(i)}
+				want[key] = e
+			}
+			e.count++
+			e.sum += int64(i)
+			e.min = min(e.min, int64(i))
+		}
+		b, err := vector.NewBatch([]vector.Column{
+			{Name: "k", Type: schema.Text, V: k},
+			{Name: "v", Type: schema.Int64, V: v},
+		})
+		if err != nil {
+			t.Fatalf("NewBatch: %v", err)
+		}
+		path := filepath.Join(dir, fname)
+		if _, err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
+			t.Fatalf("WriteSegment: %v", err)
+		}
+		seg, err := storage.OpenSegment(path)
+		if err != nil {
+			t.Fatalf("OpenSegment: %v", err)
+		}
+		segs = append(segs, seg)
+	}
+	for s := range 4 {
+		addSeg(fmt.Sprintf("dict%d.dsv4", s), 1500, func(i int) string { return cats[(i+s)%len(cats)] })
+	}
+	// 400 distinct keys defeat the 256-entry dict so these pages arrive decoded.
+	addSeg("wide.dsv4", 2000, func(i int) string { return fmt.Sprintf("wide%03d", i%400) })
+	defer func() {
+		for _, seg := range segs {
+			seg.Close()
+		}
+	}()
+
+	run := func(dictCodes bool, specs []sql.AggSpec, pred *storage.Pred) [][]any {
+		opts := storage.ScanOpts{Segments: segs, Columns: []string{"k", "v"}, Pred: pred}
+		if dictCodes {
+			opts.DictCodeColumns = []string{"k"}
+		}
+		agg := &AggregateOp{
+			Source:     &ScanOp{Opts: opts, Parallelism: 4},
+			GroupBy:    []sql.BoundExpr{{Op: sql.ExprColumn, Column: "k", Type: schema.Text}},
+			Aggregates: specs,
+		}
+		return runOperator(t, agg)
+	}
+	countSum := []sql.AggSpec{
+		{Func: sql.AggregateCount, Star: true, Alias: "c"},
+		{Func: sql.AggregateSum, ArgName: "v", Alias: "s"},
+	}
+	generic := []sql.AggSpec{
+		{Func: sql.AggregateCount, ArgName: "k", Alias: "c"},
+		{Func: sql.AggregateSum, ArgName: "v", Alias: "s"},
+		{Func: sql.AggregateMin, ArgName: "v", Alias: "m"},
+	}
+	for _, tc := range []struct {
+		name      string
+		dictCodes bool
+		specs     []sql.AggSpec
+		withMin   bool
+	}{
+		{"decoded count+sum", false, countSum, false},
+		{"dict count+sum", true, countSum, false},
+		{"decoded generic", false, generic, true},
+		{"dict generic", true, generic, true},
+	} {
+		rows := run(tc.dictCodes, tc.specs, nil)
+		if len(rows) != len(want) {
+			t.Fatalf("%s: got %d groups, want %d", tc.name, len(rows), len(want))
+		}
+		for _, r := range rows {
+			key := r[0].(string)
+			e := want[key]
+			if e == nil {
+				t.Fatalf("%s: unexpected group %q", tc.name, key)
+			}
+			if r[1].(int64) != e.count || r[2].(int64) != e.sum {
+				t.Fatalf("%s: group %q = %v, want count=%d sum=%d", tc.name, key, r[1:3], e.count, e.sum)
+			}
+			if tc.withMin && r[3].(int64) != e.min {
+				t.Fatalf("%s: group %q min = %v, want %d", tc.name, key, r[3], e.min)
+			}
+		}
+	}
+
+	// A predicate on v selects a strict row subset, so dict entries whose rows are
+	// all filtered out must not surface as phantom groups.
+	pred := storage.Pred{Op: storage.OpGt, Col: "v", Kind: vector.VecInt64, I64: 1399}
+	base := run(false, countSum, &pred)
+	head := run(true, countSum, &pred)
+	if len(base) != len(head) {
+		t.Fatalf("predicate: got %d dict groups, want %d", len(head), len(base))
+	}
+	baseByKey := map[string][2]int64{}
+	for _, r := range base {
+		baseByKey[r[0].(string)] = [2]int64{r[1].(int64), r[2].(int64)}
+	}
+	for _, r := range head {
+		if got, ok := baseByKey[r[0].(string)]; !ok || got != [2]int64{r[1].(int64), r[2].(int64)} {
+			t.Fatalf("predicate: dict group %q = %v, decoded run had %v (present=%v)", r[0], r[1:3], got, ok)
+		}
+	}
+}
+
+// A parallel scan drained by several aggregate workers and merged must produce
+// exactly the groups and values a single worker produces, for every aggregate
+// function over both int and float accumulators.
+func TestExec_GroupBy_ParallelMergeMatchesSerial(t *testing.T) {
+	const segCount = 8
+	const perCat = 5
+	cats := []string{"a", "b", "c"}
+	type expect struct {
+		count      int64
+		sum        int64
+		min, max   int64
+		fsum       float64
+		fmin, fmax float64
+	}
+	want := map[string]*expect{}
+	segs := make([]*storage.Segment, 0, segCount)
+	for s := range segCount {
+		rows := len(cats) * perCat
+		k := vector.NewVarVec(vector.VecText, rows, 0)
+		v := vector.NewVec(vector.VecInt64, rows)
+		f := vector.NewVec(vector.VecFloat64, rows)
+		r := 0
+		for ci, cat := range cats {
+			for j := range perCat {
+				val := int64(s*100 + ci*1000 + j)
+				fv := float64(val) * 0.5
+				k.Var().AppendString(r, cat)
+				v.I64()[r] = val
+				f.F64()[r] = fv
+				e, ok := want[cat]
+				if !ok {
+					e = &expect{min: val, max: val, fmin: fv, fmax: fv}
+					want[cat] = e
+				}
+				e.count++
+				e.sum += val
+				e.fsum += fv
+				e.min = min(e.min, val)
+				e.max = max(e.max, val)
+				e.fmin = min(e.fmin, fv)
+				e.fmax = max(e.fmax, fv)
+				r++
+			}
+		}
+		b, err := vector.NewBatch([]vector.Column{
+			{Name: "k", Type: schema.Text, V: k},
+			{Name: "v", Type: schema.Int64, V: v},
+			{Name: "f", Type: schema.Float64, V: f},
+		})
+		if err != nil {
+			t.Fatalf("NewBatch: %v", err)
+		}
+		path := filepath.Join(t.TempDir(), fmt.Sprintf("p%d.dsv4", s))
+		if _, err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
+			t.Fatalf("WriteSegment: %v", err)
+		}
+		seg, err := storage.OpenSegment(path)
+		if err != nil {
+			t.Fatalf("OpenSegment: %v", err)
+		}
+		defer seg.Close()
+		segs = append(segs, seg)
+	}
+
+	agg := &AggregateOp{
+		Source: &ScanOp{
+			Opts:        storage.ScanOpts{Segments: segs, Columns: []string{"k", "v", "f"}},
+			Parallelism: segCount,
+		},
+		GroupBy: []sql.BoundExpr{{Op: sql.ExprColumn, Column: "k", Type: schema.Text}},
+		Aggregates: []sql.AggSpec{
+			{Func: sql.AggregateCount, Star: true, Alias: "cnt"},
+			{Func: sql.AggregateSum, ArgName: "v", Alias: "sv"},
+			{Func: sql.AggregateMin, ArgName: "v", Alias: "mnv"},
+			{Func: sql.AggregateMax, ArgName: "v", Alias: "mxv"},
+			{Func: sql.AggregateAvg, ArgName: "f", Alias: "af"},
+			{Func: sql.AggregateMin, ArgName: "f", Alias: "mnf"},
+			{Func: sql.AggregateMax, ArgName: "f", Alias: "mxf"},
+		},
+	}
+	rows := runOperator(t, agg)
+	if len(rows) != len(cats) {
+		t.Fatalf("got %d groups, want %d: %v", len(rows), len(cats), rows)
+	}
+	for _, r := range rows {
+		key := r[0].(string)
+		e := want[key]
+		if e == nil {
+			t.Fatalf("unexpected group %q", key)
+		}
+		if r[1].(int64) != e.count || r[2].(int64) != e.sum || r[3].(int64) != e.min || r[4].(int64) != e.max {
+			t.Fatalf("group %q int aggs = %v, want count=%d sum=%d min=%d max=%d", key, r[1:5], e.count, e.sum, e.min, e.max)
+		}
+		if r[5].(float64) != e.fsum/float64(e.count) || r[6].(float64) != e.fmin || r[7].(float64) != e.fmax {
+			t.Fatalf("group %q float aggs = %v, want avg=%v min=%v max=%v", key, r[5:], e.fsum/float64(e.count), e.fmin, e.fmax)
+		}
+	}
+}

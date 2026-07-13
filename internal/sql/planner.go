@@ -1973,6 +1973,11 @@ func bindSelectAggregate(sel SelectExpr, columns map[string]BoundColumnDef) (Agg
 	if !ok {
 		return AggSpec{}, true, fmt.Errorf("missing aggregate column %q", key)
 	}
+	// count over a NOT NULL column counts every row, so drop the column reference
+	// and let the scan skip decoding it entirely.
+	if fn == AggregateCount && !def.Nullable {
+		return AggSpec{Func: fn, Star: true, Alias: sel.Alias}, true, nil
+	}
 	return AggSpec{Func: fn, ArgColumn: def.ID, ArgName: def.Name, Alias: sel.Alias}, true, nil
 }
 
