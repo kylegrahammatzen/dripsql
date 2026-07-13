@@ -97,15 +97,15 @@ Rows are ordered from codec decode to page read to scan to write so low level co
 | `Codec_Decode/Plain/Int64` | 170 ns | 0 | 0 |
 | `Codec_Decode/Dict/Text` | 7.4 us | 33 K | 5 |
 | `Codec_Decode/Plain/Text` | 39 us | 55 K | 3 |
-| `Storage_ReadPage/Int64` | 6.23 us | 16 K | 2 |
-| `Storage_ReadPage/Text` | 8.64 us | 33 K | 6 |
-| `Storage_Scan/One/Int64` | 23.4 us | 17 K | 12 |
-| `Storage_Scan/One/Text` | 40.6 us | 135 K | 31 |
-| `Storage_Scan/All` | 239 us | 369 K | 64 |
-| `Storage_Scan/Eq/Int64/Hit` | 274 us | 369 K | 66 |
-| `Storage_Scan/Eq/Int64/Miss` | 698 ns | 232 | 6 |
-| `Storage_Scan/Eq/Text/Hit` | 375 us | 367 K | 65 |
-| `Storage_Scan/Lt/Int64/AllByMeta` | 40.8 us | 132 K | 27 |
+| `Storage_ReadPage/Int64` | 6.92 us | 16 K | 2 |
+| `Storage_ReadPage/Text` | 9.29 us | 33 K | 6 |
+| `Storage_Scan/One/Int64` | 15.7 us | 17 K | 15 |
+| `Storage_Scan/One/Text` | 37.3 us | 143 K | 34 |
+| `Storage_Scan/All` | 149 us | 382 K | 68 |
+| `Storage_Scan/Eq/Int64/Hit` | 196 us | 382 K | 75 |
+| `Storage_Scan/Eq/Int64/Miss` | 1.09 us | 304 | 10 |
+| `Storage_Scan/Eq/Text/Hit` | 175 us | 383 K | 79 |
+| `Storage_Scan/Lt/Int64/AllByMeta` | 33.9 us | 133 K | 34 |
 | `Storage_Write/Int64/Random` | 1.99 ms | 290 K | 91 |
 | `Storage_Write/Int64/Constant` | 1.91 ms | 116 K | 68 |
 | `Storage_Write/Int64/Sequence` | 1.77 ms | 240 K | 82 |
