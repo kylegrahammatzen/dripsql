@@ -239,6 +239,92 @@ func (b boundGtInt64) PrunePage(seg *Segment, pageIdx int) bool {
 	return max <= b.value
 }
 
+type boundLeInt64 struct {
+	column string
+	colID  uint64
+	value  int64
+}
+
+func (b boundLeInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
+	ensureMaskSize(sel, batch.Len)
+	col, ok := batch.ColumnByName(b.column)
+	if !ok {
+		return
+	}
+	sel.FillAll()
+	vector.FilterOrdered(col.V.I64(), col.V.Valid, b.value, vector.FilterLessEqual, *sel, sel)
+}
+
+func (b boundLeInt64) PruneSegment(seg *Segment) bool {
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
+	if !ok {
+		return false
+	}
+	stats, present := numericStatsFromCol(c)
+	if !present {
+		return true
+	}
+	if !stats.HasNonNull {
+		return false
+	}
+	return stats.Min > b.value
+}
+
+func (b boundLeInt64) PrunePage(seg *Segment, pageIdx int) bool {
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
+	if !ok {
+		return false
+	}
+	min, _, ok := pageMinMaxInt(c, pageIdx)
+	if !ok {
+		return false
+	}
+	return min > b.value
+}
+
+type boundGeInt64 struct {
+	column string
+	colID  uint64
+	value  int64
+}
+
+func (b boundGeInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
+	ensureMaskSize(sel, batch.Len)
+	col, ok := batch.ColumnByName(b.column)
+	if !ok {
+		return
+	}
+	sel.FillAll()
+	vector.FilterOrdered(col.V.I64(), col.V.Valid, b.value, vector.FilterGreaterEqual, *sel, sel)
+}
+
+func (b boundGeInt64) PruneSegment(seg *Segment) bool {
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
+	if !ok {
+		return false
+	}
+	stats, present := numericStatsFromCol(c)
+	if !present {
+		return true
+	}
+	if !stats.HasNonNull {
+		return false
+	}
+	return stats.Max < b.value
+}
+
+func (b boundGeInt64) PrunePage(seg *Segment, pageIdx int) bool {
+	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
+	if !ok {
+		return false
+	}
+	_, max, ok := pageMinMaxInt(c, pageIdx)
+	if !ok {
+		return false
+	}
+	return max < b.value
+}
+
 type boundEqFloat64 struct {
 	column string
 	colID  uint64
@@ -906,7 +992,7 @@ func evalEncodedFSSTEq(seg pageSource, colIdx, pageIdx int, sel *vector.Selectio
 		pos += encLen
 	}
 	if valid != nil {
-		applyValidity(valid, sel, rows)
+		applyValidity(valid, sel)
 	}
 	return true, newScratch, nil
 }
@@ -985,7 +1071,7 @@ func narrowDictByMask(indices []byte, accept [4]uint64, valid vector.Validity, s
 		}
 	}
 	if valid != nil {
-		applyValidity(valid, sel, rows)
+		applyValidity(valid, sel)
 	}
 }
 
@@ -1085,7 +1171,7 @@ func narrowDeltaEq(first, base int64, residuals []uint64, target int64, valid ve
 		}
 	}
 	if valid != nil {
-		applyValidity(valid, sel, len(residuals)+1)
+		applyValidity(valid, sel)
 	}
 }
 
@@ -1097,7 +1183,7 @@ func narrowFOREq(residuals []uint64, target uint64, valid vector.Validity, sel *
 		}
 	}
 	if valid != nil {
-		applyValidity(valid, sel, len(residuals))
+		applyValidity(valid, sel)
 	}
 }
 
@@ -1160,7 +1246,7 @@ func evalEncodedFORRange(seg pageSource, pageIdx int, sel *vector.SelectionMask,
 		if uint64(threshold) > maxResidual {
 			sel.FillAll()
 			if valid != nil {
-				applyValidity(valid, sel, rows)
+				applyValidity(valid, sel)
 			}
 			return true, newScratch, nil
 		}
@@ -1172,7 +1258,7 @@ func evalEncodedFORRange(seg pageSource, pageIdx int, sel *vector.SelectionMask,
 		if threshold < 0 {
 			sel.FillAll()
 			if valid != nil {
-				applyValidity(valid, sel, rows)
+				applyValidity(valid, sel)
 			}
 			return true, newScratch, nil
 		}
@@ -1196,7 +1282,7 @@ func narrowFORLT(residuals []uint64, threshold uint64, valid vector.Validity, se
 		}
 	}
 	if valid != nil {
-		applyValidity(valid, sel, len(residuals))
+		applyValidity(valid, sel)
 	}
 }
 
@@ -1208,7 +1294,7 @@ func narrowFORGT(residuals []uint64, threshold uint64, valid vector.Validity, se
 		}
 	}
 	if valid != nil {
-		applyValidity(valid, sel, len(residuals))
+		applyValidity(valid, sel)
 	}
 }
 
@@ -1283,14 +1369,10 @@ func narrowDictEq(indices []byte, code uint8, valid vector.Validity, sel *vector
 		}
 	}
 	if valid != nil {
-		applyValidity(valid, sel, rows)
+		applyValidity(valid, sel)
 	}
 }
 
-func applyValidity(valid vector.Validity, sel *vector.SelectionMask, rows int) {
-	for i := range rows {
-		if !valid.IsValid(i) {
-			sel.Unset(i)
-		}
-	}
+func applyValidity(valid vector.Validity, sel *vector.SelectionMask) {
+	sel.AndValidity(valid)
 }

@@ -168,6 +168,18 @@ func (s *SelectionMask) AndCount(other SelectionMask) int {
 	return count
 }
 
+// AndValidity masks s by a Validity bitmap using word-level AND.
+// A nil validity means all rows are valid and is a no-op.
+func (s *SelectionMask) AndValidity(v Validity) {
+	if v == nil {
+		return
+	}
+	for i := range s.words {
+		s.words[i] &= v[i]
+	}
+	s.allSet = false
+}
+
 // OrCount requires equal-shape inputs from the caller.
 func (s *SelectionMask) OrCount(other SelectionMask) int {
 	count := 0
