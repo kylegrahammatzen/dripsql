@@ -53,11 +53,19 @@ func TestBoundEqInt64_PruneSegment_UsesIntFilterWhenInRange(t *testing.T) {
 	}
 
 	p := Pred{Op: OpEq, Col: "id", Kind: vector.VecInt64, I64: 50}
-	if !p.Skips(seg) {
+	cp, err := CompilePred(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cp.Skips(seg) {
 		t.Fatalf("Skips(id=50) should have pruned via Binary Fuse (50 in [0, 9900] but not in segment)")
 	}
 	p = Pred{Op: OpEq, Col: "id", Kind: vector.VecInt64, I64: 100}
-	if p.Skips(seg) {
+	cp, err = CompilePred(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cp.Skips(seg) {
 		t.Fatalf("Skips(id=100) must not prune a key present in segment")
 	}
 }

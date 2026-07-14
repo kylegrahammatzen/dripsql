@@ -339,9 +339,6 @@ func (f *FilterOp) Close() error {
 // EvalPredicate routes DELETE/UPDATE through the same vectorized path. Honors batch.Sel so
 // already-deleted rows are excluded from evaluation.
 func EvalPredicate(batch vector.Batch, where sql.BoundExpr) (vector.SelectionMask, error) {
-	if err := checkExecExpr(where); err != nil {
-		return vector.SelectionMask{}, err
-	}
 	in := selectionForBatch(batch)
 	res, err := filterPredicate(batch, in, where, nil, nil, nil)
 	if err != nil {

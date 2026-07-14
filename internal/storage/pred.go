@@ -261,47 +261,6 @@ func (c CompiledPred) ApplyEncoded(src pageSource, pageIdx int, sel *vector.Sele
 	return c.ee.EvalEncoded(src, pageIdx, sel, scratch)
 }
 
-// Skips reports whether no row in seg can satisfy p.
-func (p Pred) Skips(seg *Segment) bool {
-	bp, err := p.toBound()
-	if err != nil {
-		return false
-	}
-	return bp.PruneSegment(seg)
-}
-
-// SkipsPage reports whether no row in seg[pageIdx] can satisfy p.
-func (p Pred) SkipsPage(seg *Segment, pageIdx int) bool {
-	bp, err := p.toBound()
-	if err != nil {
-		return false
-	}
-	return bp.PrunePage(seg, pageIdx)
-}
-
-// Apply narrows sel to rows satisfying p on the decoded batch.
-func (p Pred) Apply(batch vector.Batch, sel *vector.SelectionMask) {
-	bp, err := p.toBound()
-	if err != nil {
-		return
-	}
-	bp.Eval(batch, sel)
-}
-
-// ApplyEncoded runs p against raw codec bytes for one page.
-// ok=true means p is fully applied, ok=false means caller decodes and runs Apply.
-func (p Pred) ApplyEncoded(seg *Segment, pageIdx int, sel *vector.SelectionMask, scratch []byte) (ok bool, _ []byte, _ error) {
-	bp, err := p.toBound()
-	if err != nil {
-		return false, scratch, err
-	}
-	ee, ok := bp.(EncodedEvaluator)
-	if !ok {
-		return false, scratch, nil
-	}
-	return ee.EvalEncoded(pageSource{Segment: seg}, pageIdx, sel, scratch)
-}
-
 // toBound maps a Pred to the equivalent bound predicate so eval and prune reuse the proven legacy code.
 func (p Pred) toBound() (BoundPredicate, error) {
 	switch p.Op {
@@ -325,6 +284,8 @@ func (p Pred) toBound() (BoundPredicate, error) {
 		}
 	case OpLe:
 		switch p.Kind {
+		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
+			return boundLeInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
 		case vector.VecFloat64:
 			return boundLeFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
@@ -341,6 +302,8 @@ func (p Pred) toBound() (BoundPredicate, error) {
 		}
 	case OpGe:
 		switch p.Kind {
+		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
+			return boundGeInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
 		case vector.VecFloat64:
 			return boundGeFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
