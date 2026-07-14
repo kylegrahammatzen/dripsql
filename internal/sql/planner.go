@@ -561,7 +561,7 @@ func (p *Planner) resolveTable(name string) (BoundTableDef, error) {
 // caller wraps it in a *Plan with Kind=PlanQuery.
 func planQuery(stmt *SelectStmt, src *Rel, sc *scope) (*Rel, error) {
 	if stmt.Where != nil {
-		where, err := bindWhereExpr(sc.columns, stmt.Where)
+		where, err := bindWhereLogicalExpr(sc.columns, stmt.Where)
 		if err != nil {
 			return nil, err
 		}
@@ -1317,7 +1317,7 @@ func BindDelete(stmt *DeleteStmt, def BoundTableDef) (*Plan, error) {
 	plan := &Plan{Kind: PlanDelete, Table: def}
 	if stmt.Where != nil {
 		columns := buildColumnIndexQualified(def.Columns, def.Name)
-		where, err := bindWhereExpr(columns, stmt.Where)
+		where, err := bindWhereLogicalExpr(columns, stmt.Where)
 		if err != nil {
 			return nil, err
 		}
@@ -1373,7 +1373,7 @@ func BindUpdate(stmt *UpdateStmt, def BoundTableDef) (*Plan, error) {
 	plan := &Plan{Kind: PlanUpdate, Table: def, Assignments: assignments}
 	if stmt.Where != nil {
 		index := buildColumnIndexQualified(def.Columns, def.Name)
-		where, err := bindWhereExpr(index, stmt.Where)
+		where, err := bindWhereLogicalExpr(index, stmt.Where)
 		if err != nil {
 			return nil, err
 		}
@@ -1571,11 +1571,6 @@ func bindScanOutputExpr(columns map[string]BoundColumnDef, sel SelectExpr) (Boun
 		return BoundOutput{}, fmt.Errorf("scan SELECT computed expressions require an alias")
 	}
 	return BoundOutput{Alias: sel.Alias, Expr: bound}, nil
-}
-
-func bindWhereExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
-	bound, err := bindWhereLogicalExpr(columns, expr)
-	return bound, err
 }
 
 func bindWhereLogicalExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
