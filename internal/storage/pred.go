@@ -309,6 +309,8 @@ func (p Pred) toBound() (BoundPredicate, error) {
 		switch p.Kind {
 		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 			return boundEqInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
+		case vector.VecFloat64:
+			return boundEqFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
 			return boundEqBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
 		}
@@ -316,11 +318,15 @@ func (p Pred) toBound() (BoundPredicate, error) {
 		switch p.Kind {
 		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 			return boundLtInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
+		case vector.VecFloat64:
+			return boundLtFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
 			return boundLtBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
 		}
 	case OpLe:
 		switch p.Kind {
+		case vector.VecFloat64:
+			return boundLeFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
 			return boundLtBytes{column: p.Col, colID: p.ColID, value: p.Bytes, inclusive: true}, nil
 		}
@@ -328,11 +334,15 @@ func (p Pred) toBound() (BoundPredicate, error) {
 		switch p.Kind {
 		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 			return boundGtInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
+		case vector.VecFloat64:
+			return boundGtFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
 			return boundGtBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
 		}
 	case OpGe:
 		switch p.Kind {
+		case vector.VecFloat64:
+			return boundGeFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
 			return boundGtBytes{column: p.Col, colID: p.ColID, value: p.Bytes, inclusive: true}, nil
 		}

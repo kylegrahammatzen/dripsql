@@ -464,10 +464,18 @@ func orderingCompare(left, right any) (int, error) {
 		if ri, rok := asInt64(right); rok {
 			return vector.CmpOrdered(li, ri), nil
 		}
+		// int64 vs float64: promote int to float
+		if rf, rok := asFloat64(right); rok {
+			return vector.CmpOrdered(float64(li), rf), nil
+		}
 	}
 	if lf, lok := asFloat64(left); lok {
 		if rf, rok := asFloat64(right); rok {
 			return vector.CmpOrdered(lf, rf), nil
+		}
+		// float64 vs int64: promote int to float
+		if ri, rok := asInt64(right); rok {
+			return vector.CmpOrdered(lf, float64(ri)), nil
 		}
 	}
 	if ls, lok := left.(string); lok {

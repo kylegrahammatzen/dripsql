@@ -198,18 +198,27 @@ func applyLeaf(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr,
 		}
 		return out, vector.FilterOrdered(col.V.I32(), col.V.Valid, int32(lo), leaf.op, sel, &out), true, nil
 	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-		lo, lok := leaf.lo.(int64)
+		lo, lok := asFloat64(leaf.lo)
 		if !lok {
 			return vector.SelectionMask{}, 0, false, nil
 		}
 		if leaf.between {
-			hi, hok := leaf.hi.(int64)
+			hi, hok := asFloat64(leaf.hi)
 			if !hok {
 				return vector.SelectionMask{}, 0, false, nil
 			}
-			return out, vector.BetweenOrdered(col.V.I64(), col.V.Valid, lo, hi, sel, &out), true, nil
+			// Compare int64 column with float64 literal by promoting to float64
+			var f64s []float64
+			for _, v := range col.V.I64() {
+				f64s = append(f64s, float64(v))
+			}
+			return out, vector.BetweenOrdered(f64s, col.V.Valid, lo, hi, sel, &out), true, nil
 		}
-		return out, vector.FilterOrdered(col.V.I64(), col.V.Valid, lo, leaf.op, sel, &out), true, nil
+		var f64s []float64
+		for _, v := range col.V.I64() {
+			f64s = append(f64s, float64(v))
+		}
+		return out, vector.FilterOrdered(f64s, col.V.Valid, lo, leaf.op, sel, &out), true, nil
 	case vector.VecFloat32:
 		lo, lok := asFloat64(leaf.lo)
 		if !lok {

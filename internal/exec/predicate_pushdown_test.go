@@ -62,7 +62,7 @@ func TestLoweredPredicate_IntComparisons(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := loweredPredicate(cmp(tc.op, "x", 10))
+			got, ok := loweredComparison(cmp(tc.op, "x", 10))
 			if !ok {
 				t.Fatalf("expected lowering for %v", tc.op)
 			}
@@ -76,10 +76,10 @@ func TestLoweredPredicate_IntComparisons(t *testing.T) {
 func TestLoweredPredicate_OverflowGuards(t *testing.T) {
 	const maxI64 = int64(^uint64(0) >> 1)
 	const minI64 = -maxI64 - 1
-	if _, ok := loweredPredicate(cmp(sql.ExprLessEqual, "x", maxI64)); ok {
+	if _, ok := loweredComparison(cmp(sql.ExprLessEqual, "x", maxI64)); ok {
 		t.Errorf("x <= MaxInt64 must not lower because +1 overflows")
 	}
-	if _, ok := loweredPredicate(cmp(sql.ExprGreaterEqual, "x", minI64)); ok {
+	if _, ok := loweredComparison(cmp(sql.ExprGreaterEqual, "x", minI64)); ok {
 		t.Errorf("x >= MinInt64 must not lower because -1 underflows")
 	}
 }
@@ -93,7 +93,7 @@ func TestLoweredPredicate_Between(t *testing.T) {
 			{Op: sql.ExprLiteral, Literal: int64(20)},
 		},
 	}
-	got, ok := loweredPredicate(expr)
+	got, ok := loweredComparison(expr)
 	if !ok {
 		t.Fatal("expected lowering for BETWEEN")
 	}
@@ -116,7 +116,7 @@ func TestLoweredPredicate_In(t *testing.T) {
 			{Op: sql.ExprLiteral, Literal: int64(3)},
 		},
 	}
-	got, ok := loweredPredicate(expr)
+	got, ok := loweredComparison(expr)
 	if !ok {
 		t.Fatal("expected lowering for IN")
 	}
@@ -141,7 +141,7 @@ func TestLoweredPredicate_NotIn(t *testing.T) {
 			{Op: sql.ExprLiteral, Literal: int64(2)},
 		},
 	}
-	got, ok := loweredPredicate(expr)
+	got, ok := loweredComparison(expr)
 	if !ok {
 		t.Fatal("expected lowering for NOT IN")
 	}
@@ -161,7 +161,7 @@ func TestLoweredPredicate_InSingleton(t *testing.T) {
 			{Op: sql.ExprLiteral, Literal: int64(42)},
 		},
 	}
-	got, ok := loweredPredicate(expr)
+	got, ok := loweredComparison(expr)
 	if !ok {
 		t.Fatal("expected lowering for singleton IN")
 	}
@@ -231,7 +231,7 @@ func TestLoweredPredicate_ReversedOperands(t *testing.T) {
 			{Op: sql.ExprColumn, Column: "x"},
 		},
 	}
-	got, ok := loweredPredicate(expr)
+	got, ok := loweredComparison(expr)
 	if !ok {
 		t.Fatal("expected lowering for reversed operands")
 	}
