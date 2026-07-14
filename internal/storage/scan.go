@@ -107,16 +107,17 @@ func Scan(opts ScanOpts, fn ScanFn) error {
 			}
 		}
 	}
+	var predIDs []uint64
+	if opts.Pred != nil {
+		predIDs = opts.Pred.ColumnIDs()
+	}
+	synthKinds, synthDefaults := decodeSynthMeta(decode, opts.Columns, opts.ColumnKinds, opts.ColumnDefaults)
+	decodedIDs := decodeIDs(decode, opts.Columns, opts.ColumnIDs, predCols, predIDs)
 	for si, seg := range opts.Segments {
 		if opts.ReadTs != 0 && seg.CommitTs > opts.ReadTs {
 			continue
 		}
-		var predIDs []uint64
-		if opts.Pred != nil {
-			predIDs = opts.Pred.ColumnIDs()
-		}
-		synthKinds, synthDefaults := decodeSynthMeta(decode, opts.Columns, opts.ColumnKinds, opts.ColumnDefaults)
-		decodeIdx, projIdx, err := resolveSegmentColumns(seg, decode, projection, decodeIDs(decode, opts.Columns, opts.ColumnIDs, predCols, predIDs), synthKinds)
+		decodeIdx, projIdx, err := resolveSegmentColumns(seg, decode, projection, decodedIDs, synthKinds)
 		if err != nil {
 			return fmt.Errorf("Scan: %w", err)
 		}
