@@ -1,5 +1,4 @@
 // Insert path. Bind the statement, materialize one Batch per call, write a fresh segment, append manifest.
-// BulkInsert seals N batches into one multi-page segment to amortize file IO and manifest entries.
 package engine
 
 import (
@@ -22,17 +21,13 @@ func (db *DB) BulkInsert(ctx context.Context, statements []string) (int64, error
 	}
 	ctx = ctxOrBackground(ctx)
 
-	if err := db.lockOpen(); err != nil {
-		return 0, err
-	}
-	defer db.mu.Unlock()
-
 	var (
 		def     sql.BoundTableDef
 		defSet  bool
 		batches []vector.Batch
 		total   int64
 	)
+
 	for i, text := range statements {
 		if err := ctx.Err(); err != nil {
 			return total, err
@@ -66,22 +61,35 @@ func (db *DB) BulkInsert(ctx context.Context, statements []string) (int64, error
 			total += int64(plan.Values.RowCount)
 		}
 	}
+
 	if len(batches) == 0 {
 		return 0, nil
 	}
 
-	root := storage.NewSpan("BulkInsert " + def.Name)
-	add, cleanup, err := db.writeSegmentAdd(def, batches, uint32(total), root)
-	root.End()
-	db.publishWriteSpan(root)
-	if err != nil {
-		return total, err
+	const bulkPagesPerSegment = 128
+
+	// Process in chunks of bulkPagesPerSegment to create multi-page segments.
+	for i := 0; i < len(batches); i += bulkPagesPerSegment {
+		end := i + bulkPagesPerSegment
+		if end > len(batches) {
+			end = len(batches)
+		}
+		chunk := batches[i:end]
+
+		var rows uint32
+		for _, b := range chunk {
+			rows += uint32(b.Len)
+		}
+
+		cfg := IngestConfig{
+			Table:   def.Name,
+			Batches: chunk,
+		}
+		if _, err := db.Ingest(ctx, cfg); err != nil {
+			return total, err
+		}
 	}
-	defer func() { cleanup() }()
-	if err := db.commitManifestTxn(def.Name, []storage.ManifestSegmentAdd{add}, nil); err != nil {
-		return total, err
-	}
-	cleanup = func() {}
+
 	return total, nil
 }
 
@@ -200,9 +208,6 @@ func buildInsertVec(ic sql.InsertColumn, def sql.BoundColumnDef, rows int) (vect
 	return v, nil
 }
 
-// newInsertValueWriter returns a per-column closure. The kind switch runs once per column,
-// the typed destination slice is hoisted once, and the row loop in buildInsertVec only does
-// the per-row work (null check, validity bit, typed store). Enum lookup is built once.
 func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, error) {
 	switch vk {
 	case vector.VecBool:

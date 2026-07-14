@@ -6,9 +6,9 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
-	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/engine"
+	"github.com/kylegrahammatzen/dripsql/internal/ingest"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
@@ -57,7 +57,7 @@ var queries = map[string]query{
 	}},
 }
 
-// Each segment is built from up to bulkPagesPerSegment INSERTs of segmentRows rows each and sealed via BulkInsert into one multi-page file.
+// Each segment is built from up to bulkPagesPerSegment pages of segmentRows rows each and sealed via Ingest into one multi-page file.
 // 128 pages of 2048 rows seals ~262k-row segments so scans amortize per-segment open and sidecar cost.
 const bulkPagesPerSegment = 128
 
@@ -68,15 +68,22 @@ func setupUsers(ctx context.Context, db *engine.DB, rows int, segmentRows int) e
 	if segmentRows <= 0 || segmentRows > vector.StandardBatchRows {
 		segmentRows = vector.StandardBatchRows
 	}
+
+	def, err := db.BoundTableByName("users")
+	if err != nil {
+		return err
+	}
+	builder := ingest.NewBatchBuilder(def)
+
 	cats := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
 	r := rand.New(rand.NewPCG(1, 2))
 	id := 0
-	pending := make([]string, 0, bulkPagesPerSegment)
+	pending := make([]vector.Batch, 0, bulkPagesPerSegment)
 	flush := func() error {
 		if len(pending) == 0 {
 			return nil
 		}
-		if _, err := db.BulkInsert(ctx, pending); err != nil {
+		if _, err := db.Ingest(ctx, engine.IngestConfig{Table: "users", Batches: pending}); err != nil {
 			return err
 		}
 		pending = pending[:0]
@@ -84,16 +91,28 @@ func setupUsers(ctx context.Context, db *engine.DB, rows int, segmentRows int) e
 	}
 	for id < rows {
 		end := min(id+segmentRows, rows)
-		var b strings.Builder
-		b.WriteString("INSERT INTO users (id, name, age, category, price) VALUES ")
-		for i := id; i < end; i++ {
-			if i > id {
-				b.WriteByte(',')
-			}
+		n := end - id
+		builder.Reset(n)
+		ids := make([]int64, n)
+		names := make([]string, n)
+		ages := make([]int64, n)
+		catsSlice := make([]string, n)
+		prices := make([]float64, n)
+		for i := 0; i < n; i++ {
+			row := id + i
 			cents := r.IntN(100000)
-			fmt.Fprintf(&b, "(%d, 'user%d', %d, '%s', %d.%02d)", i, i, r.IntN(100), cats[r.IntN(len(cats))], cents/100, cents%100)
+			ids[i] = int64(row)
+			names[i] = fmt.Sprintf("user%d", row)
+			ages[i] = int64(r.IntN(100))
+			catsSlice[i] = cats[r.IntN(len(cats))]
+			prices[i] = float64(cents) / 100.0
 		}
-		pending = append(pending, b.String())
+		builder.Int64("id", ids).Text("name", names).Int64("age", ages).Text("category", catsSlice).Float64("price", prices)
+		batch, err := builder.Build()
+		if err != nil {
+			return err
+		}
+		pending = append(pending, batch)
 		if len(pending) >= bulkPagesPerSegment {
 			if err := flush(); err != nil {
 				return fmt.Errorf("seed flush ending at row %d: %w", end, err)
@@ -128,16 +147,23 @@ func setupLineitem(ctx context.Context, db *engine.DB, rows int, segmentRows int
 	if segmentRows <= 0 || segmentRows > vector.StandardBatchRows {
 		segmentRows = vector.StandardBatchRows
 	}
+
+	def, err := db.BoundTableByName("lineitem")
+	if err != nil {
+		return err
+	}
+	builder := ingest.NewBatchBuilder(def)
+
 	flags := []string{"A", "N", "R"}
 	stats := []string{"F", "O"}
 	r := rand.New(rand.NewPCG(42, 7))
 	id := 0
-	pending := make([]string, 0, bulkPagesPerSegment)
+	pending := make([]vector.Batch, 0, bulkPagesPerSegment)
 	flush := func() error {
 		if len(pending) == 0 {
 			return nil
 		}
-		if _, err := db.BulkInsert(ctx, pending); err != nil {
+		if _, err := db.Ingest(ctx, engine.IngestConfig{Table: "lineitem", Batches: pending}); err != nil {
 			return err
 		}
 		pending = pending[:0]
@@ -145,12 +171,19 @@ func setupLineitem(ctx context.Context, db *engine.DB, rows int, segmentRows int
 	}
 	for id < rows {
 		end := min(id+segmentRows, rows)
-		var b strings.Builder
-		b.WriteString("INSERT INTO lineitem (l_orderkey, l_quantity, l_extprice, l_discount, l_disc_rev, l_disc_price, l_returnflag, l_linestatus, l_shipdate) VALUES ")
-		for i := id; i < end; i++ {
-			if i > id {
-				b.WriteByte(',')
-			}
+		n := end - id
+		builder.Reset(n)
+		orderkeys := make([]int64, n)
+		quantities := make([]int64, n)
+		extprices := make([]float64, n)
+		discounts := make([]float64, n)
+		discRevs := make([]float64, n)
+		discPrices := make([]float64, n)
+		returnFlags := make([]string, n)
+		lineStatuses := make([]string, n)
+		shipdates := make([]int64, n)
+		for i := 0; i < n; i++ {
+			row := id + i
 			qty := int64(r.IntN(50) + 1)
 			priceCents := int64(r.IntN(10_000_000) + 100)
 			ext := float64(priceCents) / 100.0
@@ -160,10 +193,30 @@ func setupLineitem(ctx context.Context, db *engine.DB, rows int, segmentRows int
 			rf := flags[r.IntN(len(flags))]
 			ls := stats[r.IntN(len(stats))]
 			ship := int64(r.IntN(2557))
-			fmt.Fprintf(&b, "(%d, %d, %.2f, %.2f, %.4f, %.4f, '%s', '%s', %d)",
-				int64(i), qty, ext, disc, discRev, discPrice, rf, ls, ship)
+			orderkeys[i] = int64(row)
+			quantities[i] = qty
+			extprices[i] = ext
+			discounts[i] = disc
+			discRevs[i] = discRev
+			discPrices[i] = discPrice
+			returnFlags[i] = rf
+			lineStatuses[i] = ls
+			shipdates[i] = ship
 		}
-		pending = append(pending, b.String())
+		builder.Int64("l_orderkey", orderkeys).
+			Int64("l_quantity", quantities).
+			Float64("l_extprice", extprices).
+			Float64("l_discount", discounts).
+			Float64("l_disc_rev", discRevs).
+			Float64("l_disc_price", discPrices).
+			Text("l_returnflag", returnFlags).
+			Text("l_linestatus", lineStatuses).
+			Int64("l_shipdate", shipdates)
+		batch, err := builder.Build()
+		if err != nil {
+			return err
+		}
+		pending = append(pending, batch)
 		if len(pending) >= bulkPagesPerSegment {
 			if err := flush(); err != nil {
 				return fmt.Errorf("seed flush ending at row %d: %w", end, err)
@@ -191,16 +244,23 @@ func setupHits(ctx context.Context, db *engine.DB, rows int, segmentRows int) er
 	if segmentRows <= 0 || segmentRows > vector.StandardBatchRows {
 		segmentRows = vector.StandardBatchRows
 	}
+
+	def, err := db.BoundTableByName("hits")
+	if err != nil {
+		return err
+	}
+	builder := ingest.NewBatchBuilder(def)
+
 	urls := []string{"/", "/index", "/home", "/search", "/cart", "/product", "/about", "/contact"}
 	phrases := []string{"", "buy", "sale", "review", "best", "cheap", "near me", "tutorial"}
 	r := rand.New(rand.NewPCG(11, 13))
 	id := 0
-	pending := make([]string, 0, bulkPagesPerSegment)
+	pending := make([]vector.Batch, 0, bulkPagesPerSegment)
 	flush := func() error {
 		if len(pending) == 0 {
 			return nil
 		}
-		if _, err := db.BulkInsert(ctx, pending); err != nil {
+		if _, err := db.Ingest(ctx, engine.IngestConfig{Table: "hits", Batches: pending}); err != nil {
 			return err
 		}
 		pending = pending[:0]
@@ -208,13 +268,20 @@ func setupHits(ctx context.Context, db *engine.DB, rows int, segmentRows int) er
 	}
 	for id < rows {
 		end := min(id+segmentRows, rows)
-		var b strings.Builder
-		b.WriteString("INSERT INTO hits (WatchID, UserID, EventTime, URL, Title, RegionID, SearchEngineID, AdvEngineID, SearchPhrase) VALUES ")
-		for i := id; i < end; i++ {
-			if i > id {
-				b.WriteByte(',')
-			}
-			watch := int64(i)
+		n := end - id
+		builder.Reset(n)
+		watchIDs := make([]int64, n)
+		userIDs := make([]int64, n)
+		eventTimes := make([]int64, n)
+		urlSlice := make([]string, n)
+		titleSlice := make([]string, n)
+		regionIDs := make([]int64, n)
+		searchEngineIDs := make([]int64, n)
+		advEngineIDs := make([]int64, n)
+		searchPhrases := make([]string, n)
+		for i := 0; i < n; i++ {
+			row := id + i
+			watch := int64(row)
 			user := int64(r.IntN(1_000_000))
 			event := int64(1_500_000_000 + r.IntN(86400*365))
 			url := urls[r.IntN(len(urls))]
@@ -223,10 +290,30 @@ func setupHits(ctx context.Context, db *engine.DB, rows int, segmentRows int) er
 			seid := int64(r.IntN(10))
 			adv := int64(r.IntN(5))
 			ph := phrases[r.IntN(len(phrases))]
-			fmt.Fprintf(&b, "(%d, %d, %d, '%s', '%s', %d, %d, %d, '%s')",
-				watch, user, event, url, title, region, seid, adv, ph)
+			watchIDs[i] = watch
+			userIDs[i] = user
+			eventTimes[i] = event
+			urlSlice[i] = url
+			titleSlice[i] = title
+			regionIDs[i] = region
+			searchEngineIDs[i] = seid
+			advEngineIDs[i] = adv
+			searchPhrases[i] = ph
 		}
-		pending = append(pending, b.String())
+		builder.Int64("WatchID", watchIDs).
+			Int64("UserID", userIDs).
+			Int64("EventTime", eventTimes).
+			Text("URL", urlSlice).
+			Text("Title", titleSlice).
+			Int64("RegionID", regionIDs).
+			Int64("SearchEngineID", searchEngineIDs).
+			Int64("AdvEngineID", advEngineIDs).
+			Text("SearchPhrase", searchPhrases)
+		batch, err := builder.Build()
+		if err != nil {
+			return err
+		}
+		pending = append(pending, batch)
 		if len(pending) >= bulkPagesPerSegment {
 			if err := flush(); err != nil {
 				return fmt.Errorf("seed flush ending at row %d: %w", end, err)

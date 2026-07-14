@@ -112,6 +112,17 @@ func (db *DB) lockOpen() error {
 	return nil
 }
 
+// ReadOnly returns whether the DB is in read-only mode.
+func (db *DB) ReadOnly() bool { return db.readOnly.Load() }
+
+// Planner returns a new planner bound to this DB's catalog.
+func (db *DB) Planner() *sql.Planner { return sql.NewPlanner(db.boundTableByName) }
+
+// BoundTableByName returns the bound table definition for the given table name.
+func (db *DB) BoundTableByName(name string) (sql.BoundTableDef, error) {
+	return db.boundTableByName(name)
+}
+
 func ctxOrBackground(ctx context.Context) context.Context {
 	if ctx == nil {
 		return context.Background()
