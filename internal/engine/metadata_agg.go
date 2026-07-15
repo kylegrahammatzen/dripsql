@@ -174,15 +174,42 @@ func (db *DB) tryGroupByDictHistogram(plan *sql.Plan, rel, agg, scan *sql.Rel, s
 	if agg.GroupBy[0].Op != sql.ExprColumn {
 		return nil, false, nil
 	}
+	type sumSpec struct {
+		alias string
+		col   string
+	}
+	var sumSpecs []sumSpec
+	countAliases := make(map[string]struct{}, len(agg.Aggregates))
 	for _, a := range agg.Aggregates {
-		if a.Func != sql.AggregateCount {
-			return nil, false, nil
+		alias := a.Alias
+		if alias == "" {
+			alias = defaultAggOutputName(a.Func)
 		}
-		if !a.Star {
+		switch a.Func {
+		case sql.AggregateCount:
+			if !a.Star {
+				argCol, ok := scanColumnDefByID(scan, a.ArgColumn)
+				if !ok || argCol.Nullable {
+					return nil, false, nil
+				}
+			}
+			countAliases[alias] = struct{}{}
+		case sql.AggregateSum:
+			if a.ArgExpr != nil {
+				return nil, false, nil
+			}
 			argCol, ok := scanColumnDefByID(scan, a.ArgColumn)
 			if !ok || argCol.Nullable {
 				return nil, false, nil
 			}
+			switch argCol.Type.Kind {
+			case schema.KindInt16, schema.KindInt32, schema.KindInt64, schema.KindDate, schema.KindTimestamp, schema.KindTime, schema.KindDecimal:
+			default:
+				return nil, false, nil
+			}
+			sumSpecs = append(sumSpecs, sumSpec{alias: alias, col: schema.NormalizeName(argCol.Name)})
+		default:
+			return nil, false, nil
 		}
 	}
 	keyName := schema.NormalizeName(agg.GroupBy[0].Column)
@@ -209,18 +236,45 @@ func (db *DB) tryGroupByDictHistogram(plan *sql.Plan, rel, agg, scan *sql.Rel, s
 			merged[k] += v
 		}
 	}
+	// Sums merge from the group sums sidecar, every segment must carry the pair.
+	sumByAlias := make(map[string]storage.DictSums, len(sumSpecs))
+	if len(sumSpecs) > 0 {
+		mergedSums := make(map[string]storage.DictSums, len(sumSpecs))
+		for _, seg := range segs {
+			gs, err := seg.GroupSums()
+			if err != nil {
+				return nil, false, err
+			}
+			gc, ok := gs[keyName]
+			if !ok {
+				return nil, false, nil
+			}
+			for _, ss := range sumSpecs {
+				sums, ok := gc[ss.col]
+				if !ok {
+					return nil, false, nil
+				}
+				dst := mergedSums[ss.col]
+				if dst == nil {
+					dst = storage.DictSums{}
+					mergedSums[ss.col] = dst
+				}
+				for k, v := range sums {
+					if addOverflows(dst[k], v) {
+						return nil, false, nil
+					}
+					dst[k] += v
+				}
+			}
+		}
+		for _, ss := range sumSpecs {
+			sumByAlias[ss.alias] = mergedSums[ss.col]
+		}
+	}
 	if len(merged) == 0 {
 		return &Rows{Columns: planOutputNames(plan)}, true, nil
 	}
 	rows := &Rows{Columns: planOutputNames(plan), Values: make([][]any, 0, len(merged))}
-	countNames := make(map[string]struct{}, len(agg.Aggregates))
-	for _, a := range agg.Aggregates {
-		alias := a.Alias
-		if alias == "" {
-			alias = defaultAggOutputName(a.Func)
-		}
-		countNames[alias] = struct{}{}
-	}
 	for value, count := range merged {
 		row := make([]any, len(rel.Outputs))
 		ok := true
@@ -233,8 +287,16 @@ func (db *DB) tryGroupByDictHistogram(plan *sql.Plan, rel, agg, scan *sql.Rel, s
 				row[i] = value
 				continue
 			}
-			if _, isCount := countNames[o.Expr.Column]; isCount {
+			if _, isCount := countAliases[o.Expr.Column]; isCount {
 				row[i] = int64(count)
+				continue
+			}
+			if sums, isSum := sumByAlias[o.Expr.Column]; isSum {
+				s, present := sums[value]
+				if !present {
+					return nil, false, nil
+				}
+				row[i] = s
 				continue
 			}
 			ok = false
@@ -249,6 +311,10 @@ func (db *DB) tryGroupByDictHistogram(plan *sql.Plan, rel, agg, scan *sql.Rel, s
 }
 
 func computeMetadataAggregate(a sql.AggSpec, scan *sql.Rel, segs []*storage.Segment) (any, bool, error) {
+	// Computed arguments have no ArgColumn so manifest stats cannot answer them.
+	if a.ArgExpr != nil {
+		return nil, false, nil
+	}
 	switch a.Func {
 	case sql.AggregateCount:
 		if a.Star {

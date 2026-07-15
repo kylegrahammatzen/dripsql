@@ -759,3 +759,113 @@ func TestAutoRetention_DefaultDoesNotRetire(t *testing.T) {
 		t.Fatalf("default Vacuum should not retire (entries=%d, n=%d)", len(view.Entries), n)
 	}
 }
+
+func TestEngine_PushedNotExcludesNulls(t *testing.T) {
+	db := openTestDB(t)
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, v int64)")
+	mustExec(t, db, "INSERT INTO t (id, v) VALUES (1, 5), (2, 7), (3, NULL)")
+
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE v != 5 ORDER BY id"), [][]any{{int64(2)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE NOT (v = 5) ORDER BY id"), [][]any{{int64(2)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE v NOT IN (5, 9) ORDER BY id"), [][]any{{int64(2)}})
+}
+
+func TestEngine_Int16BoundaryPushdown(t *testing.T) {
+	db := openTestDB(t)
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, s int16 NOT NULL)")
+	mustExec(t, db, "INSERT INTO t (id, s) VALUES (1, -32768), (2, 0), (3, 32767)")
+
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE s <= 32767 ORDER BY id"), [][]any{{int64(1)}, {int64(2)}, {int64(3)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE s >= -32768 ORDER BY id"), [][]any{{int64(1)}, {int64(2)}, {int64(3)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE s < 40000 ORDER BY id"), [][]any{{int64(1)}, {int64(2)}, {int64(3)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE s = 40000 ORDER BY id"), [][]any{})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE s > -40000 ORDER BY id"), [][]any{{int64(1)}, {int64(2)}, {int64(3)}})
+}
+
+func TestEngine_FloatLiteralOnIntColumn(t *testing.T) {
+	db := openTestDB(t)
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, v int64 NOT NULL)")
+	mustExec(t, db, "INSERT INTO t (id, v) VALUES (1, 3), (2, 4), (3, 5)")
+
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE v > 3.5 ORDER BY id"), [][]any{{int64(2)}, {int64(3)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE v <= 4.5 ORDER BY id"), [][]any{{int64(1)}, {int64(2)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE v = 4.0 ORDER BY id"), [][]any{{int64(2)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE v = 4.5 ORDER BY id"), [][]any{})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE v != 4.5 ORDER BY id"), [][]any{{int64(1)}, {int64(2)}, {int64(3)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE v BETWEEN 3.5 AND 4.5 ORDER BY id"), [][]any{{int64(2)}})
+}
+
+func TestEngine_AggregateExpressionArgs(t *testing.T) {
+	db := openTestDB(t)
+	mustExec(t, db, "CREATE TABLE t (cat text NOT NULL, price float64 NOT NULL, disc float64 NOT NULL, qty int64 NOT NULL, opt int64)")
+	mustExec(t, db, "INSERT INTO t (cat, price, disc, qty, opt) VALUES ('a', 10.0, 0.1, 2, 5), ('a', 20.0, 0.25, 3, NULL), ('b', 30.0, 0.0, 4, 7)")
+
+	rows := mustValues(t, db, "SELECT sum(price * (1.0 - disc)) AS rev FROM t")
+	if got := rows[0][0].(float64); got != 54.0 {
+		t.Errorf("sum(price*(1-disc)) = %v, want 54", got)
+	}
+	rows = mustValues(t, db, "SELECT sum(qty * 2) AS dq FROM t")
+	if got := rows[0][0].(int64); got != 18 {
+		t.Errorf("sum(qty*2) = %v, want 18", got)
+	}
+	wantRows(t, mustValues(t, db, "SELECT cat, sum(price * (1.0 - disc)) AS rev, count(*) AS c FROM t GROUP BY cat ORDER BY cat"), [][]any{
+		{"a", 24.0, int64(2)},
+		{"b", 30.0, int64(3 - 2)},
+	})
+	rows = mustValues(t, db, "SELECT max(qty * qty) AS mq, min(qty - 5) AS mn FROM t")
+	if got := rows[0][0].(int64); got != 16 {
+		t.Errorf("max(qty*qty) = %v, want 16", got)
+	}
+	if got := rows[0][1].(int64); got != -3 {
+		t.Errorf("min(qty-5) = %v, want -3", got)
+	}
+	rows = mustValues(t, db, "SELECT sum(opt + 1) AS so FROM t")
+	if got := rows[0][0].(int64); got != 14 {
+		t.Errorf("sum(opt+1) with null = %v, want 14", got)
+	}
+}
+
+func TestEngine_AggregateExpressionWithDictGroupKey(t *testing.T) {
+	db := openTestDB(t)
+	mustExec(t, db, "CREATE TABLE t (cat text NOT NULL, price int64 NOT NULL, qty int64 NOT NULL)")
+	var stmts []string
+	for i := range 300 {
+		cat := []string{"x", "y", "z"}[i%3]
+		stmts = append(stmts, fmt.Sprintf("INSERT INTO t (cat, price, qty) VALUES ('%s', %d, %d)", cat, i, i%7))
+	}
+	if _, err := db.BulkInsert(context.Background(), stmts); err != nil {
+		t.Fatalf("BulkInsert: %v", err)
+	}
+
+	got := mustValues(t, db, "SELECT cat, sum(price * qty) AS pq, count(*) AS c FROM t GROUP BY cat ORDER BY cat")
+	var wantX, wantY, wantZ int64
+	for i := range 300 {
+		v := int64(i) * int64(i%7)
+		switch i % 3 {
+		case 0:
+			wantX += v
+		case 1:
+			wantY += v
+		case 2:
+			wantZ += v
+		}
+	}
+	wantRows(t, got, [][]any{
+		{"x", wantX, int64(100)},
+		{"y", wantY, int64(100)},
+		{"z", wantZ, int64(100)},
+	})
+}
+
+func TestEngine_Int32PushdownMatchesDecoded(t *testing.T) {
+	db := openTestDB(t)
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, d int32 NOT NULL, s int16)")
+	mustExec(t, db, "INSERT INTO t (id, d, s) VALUES (1, 100, 5), (2, 200, NULL), (3, 300, -5), (4, 400, 32767)")
+
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE d < 250 ORDER BY id"), [][]any{{int64(1)}, {int64(2)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE d >= 200 ORDER BY id"), [][]any{{int64(2)}, {int64(3)}, {int64(4)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE d BETWEEN 150 AND 350 ORDER BY id"), [][]any{{int64(2)}, {int64(3)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE s = 32767 ORDER BY id"), [][]any{{int64(4)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE s != 5 ORDER BY id"), [][]any{{int64(3)}, {int64(4)}})
+	wantRows(t, mustValues(t, db, "SELECT id FROM t WHERE s <= 0 ORDER BY id"), [][]any{{int64(3)}})
+}
