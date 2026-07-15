@@ -66,30 +66,14 @@ func (db *DB) BulkInsert(ctx context.Context, statements []string) (int64, error
 		return 0, nil
 	}
 
+	// Each bulkPagesPerSegment chunk seals one multi-page segment through the shared ingest path.
 	const bulkPagesPerSegment = 128
-
-	// Process in chunks of bulkPagesPerSegment to create multi-page segments.
 	for i := 0; i < len(batches); i += bulkPagesPerSegment {
-		end := i + bulkPagesPerSegment
-		if end > len(batches) {
-			end = len(batches)
-		}
-		chunk := batches[i:end]
-
-		var rows uint32
-		for _, b := range chunk {
-			rows += uint32(b.Len)
-		}
-
-		cfg := IngestConfig{
-			Table:   def.Name,
-			Batches: chunk,
-		}
-		if _, err := db.Ingest(ctx, cfg); err != nil {
+		chunk := batches[i:min(i+bulkPagesPerSegment, len(batches))]
+		if _, err := db.Ingest(ctx, IngestConfig{Table: def.Name, Batches: chunk}); err != nil {
 			return total, err
 		}
 	}
-
 	return total, nil
 }
 

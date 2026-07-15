@@ -49,9 +49,12 @@ func (db *DB) Ingest(ctx context.Context, cfg IngestConfig) (int64, error) {
 		return 0, err
 	}
 
-	total := uint64(0)
+	var total uint64
 	for _, b := range cfg.Batches {
 		total += uint64(b.Len)
+	}
+	if total > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("ingest: %d rows exceeds single segment capacity", total)
 	}
 
 	root := storage.NewSpan("Ingest " + def.Name)
@@ -59,59 +62,38 @@ func (db *DB) Ingest(ctx context.Context, cfg IngestConfig) (int64, error) {
 	root.End()
 	db.publishWriteSpan(root)
 	if err != nil {
-		return int64(total), err
+		return 0, err
 	}
 	defer func() { cleanup() }()
 	if err := db.commitManifestTxn(def.Name, []storage.ManifestSegmentAdd{add}, nil); err != nil {
-		return int64(total), err
+		return 0, err
 	}
 	cleanup = func() {}
 	return int64(total), nil
 }
 
 func validateIngestBatches(def sql.BoundTableDef, batches []vector.Batch) error {
-	if len(batches) == 0 {
-		return nil
-	}
-	first := batches[0]
-	if len(first.Columns) != len(def.Columns) {
-		return fmt.Errorf("ingest: batch has %d columns, table %q has %d", len(first.Columns), def.Name, len(def.Columns))
-	}
-	for i, col := range first.Columns {
-		expect := def.Columns[i]
-		if schema.NormalizeName(col.Name) != schema.NormalizeName(expect.Name) {
-			return fmt.Errorf("ingest: column %d name %q != expected %q", i, col.Name, expect.Name)
+	for bi, batch := range batches {
+		if batch.Len > vector.StandardBatchRows {
+			return fmt.Errorf("ingest: batch %d len %d exceeds StandardBatchRows %d", bi, batch.Len, vector.StandardBatchRows)
 		}
-		if col.Type != expect.Type {
-			return fmt.Errorf("ingest: column %q type %v != expected %v", col.Name, col.Type, expect.Type)
-		}
-		if int(col.V.Len) != first.Len {
-			return fmt.Errorf("ingest: column %q vec len %d != batch len %d", col.Name, col.V.Len, first.Len)
-		}
-		if first.Len > vector.StandardBatchRows {
-			return fmt.Errorf("ingest: batch len %d exceeds StandardBatchRows %d", first.Len, vector.StandardBatchRows)
-		}
-	}
-	// Subsequent batches: same shape check (column count, names, types).
-	// Row counts can vary per batch (up to StandardBatchRows).
-	for bi, batch := range batches[1:] {
-		if len(batch.Columns) != len(first.Columns) {
-			return fmt.Errorf("ingest: batch %d has %d columns, want %d", bi+1, len(batch.Columns), len(first.Columns))
+		if len(batch.Columns) != len(def.Columns) {
+			return fmt.Errorf("ingest: batch %d has %d columns, table %q has %d", bi, len(batch.Columns), def.Name, len(def.Columns))
 		}
 		for ci, col := range batch.Columns {
-			expect := first.Columns[ci]
+			expect := def.Columns[ci]
 			if schema.NormalizeName(col.Name) != schema.NormalizeName(expect.Name) {
-				return fmt.Errorf("ingest: batch %d column %d name %q != %q", bi+1, ci, col.Name, expect.Name)
+				return fmt.Errorf("ingest: batch %d column %d name %q, want %q", bi, ci, col.Name, expect.Name)
 			}
 			if col.Type != expect.Type {
-				return fmt.Errorf("ingest: batch %d column %q type %v != %v", bi+1, col.Name, col.Type, expect.Type)
+				return fmt.Errorf("ingest: batch %d column %q type %v, want %v", bi, col.Name, col.Type, expect.Type)
 			}
 			if int(col.V.Len) != batch.Len {
-				return fmt.Errorf("ingest: batch %d column %q vec len %d != batch len %d", bi+1, col.Name, col.V.Len, batch.Len)
+				return fmt.Errorf("ingest: batch %d column %q vec len %d, batch len %d", bi, col.Name, col.V.Len, batch.Len)
 			}
-		}
-		if batch.Len > vector.StandardBatchRows {
-			return fmt.Errorf("ingest: batch %d len %d exceeds StandardBatchRows %d", bi+1, batch.Len, vector.StandardBatchRows)
+			if !expect.Nullable && col.V.Valid != nil && col.V.Valid.NullCount(batch.Len) > 0 {
+				return fmt.Errorf("ingest: batch %d column %q carries NULLs into a NOT NULL column", bi, col.Name)
+			}
 		}
 	}
 	return nil
