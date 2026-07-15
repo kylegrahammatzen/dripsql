@@ -5,6 +5,7 @@ package exec
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
@@ -160,6 +161,147 @@ func makeFilterLeaf(pred sql.BoundExpr) (filterLeaf, bool) {
 	return filterLeaf{}, false
 }
 
+type intBoundVerdict int
+
+const (
+	boundExact intBoundVerdict = iota
+	boundAll
+	boundNone
+	boundUnsupported
+)
+
+// intCompareBound converts a float literal comparison on an int64 column into an exact integer
+// threshold so the typed kernel runs without promoting the column. 2^63 marks the int64 range edge.
+func intCompareBound(f float64, op vector.FilterOp) (int64, vector.FilterOp, intBoundVerdict) {
+	const edge = 9223372036854775808.0
+	if math.IsNaN(f) {
+		return 0, op, boundNone
+	}
+	switch op {
+	case vector.FilterEqual:
+		if f != math.Trunc(f) || f < -edge || f >= edge {
+			return 0, op, boundNone
+		}
+		return int64(f), op, boundExact
+	case vector.FilterNotEqual:
+		if f != math.Trunc(f) || f < -edge || f >= edge {
+			return 0, op, boundAll
+		}
+		return int64(f), op, boundExact
+	case vector.FilterLess:
+		c := math.Ceil(f)
+		if c >= edge {
+			return 0, op, boundAll
+		}
+		if c < -edge {
+			return 0, op, boundNone
+		}
+		return int64(c), vector.FilterLess, boundExact
+	case vector.FilterLessEqual:
+		fl := math.Floor(f)
+		if fl >= edge {
+			return 0, op, boundAll
+		}
+		if fl < -edge {
+			return 0, op, boundNone
+		}
+		return int64(fl), vector.FilterLessEqual, boundExact
+	case vector.FilterGreater:
+		fl := math.Floor(f)
+		if fl >= edge {
+			return 0, op, boundNone
+		}
+		if fl < -edge {
+			return 0, op, boundAll
+		}
+		return int64(fl), vector.FilterGreater, boundExact
+	case vector.FilterGreaterEqual:
+		c := math.Ceil(f)
+		if c >= edge {
+			return 0, op, boundNone
+		}
+		if c < -edge {
+			return 0, op, boundAll
+		}
+		return int64(c), vector.FilterGreaterEqual, boundExact
+	}
+	return 0, op, boundUnsupported
+}
+
+// filterNarrowInt runs one narrow int leaf with kind range clamping shared between int16 and int32.
+func filterNarrowInt[T int16 | int32](vals []T, valid vector.Validity, leaf filterLeaf, kmin, kmax int64, sel vector.SelectionMask, out *vector.SelectionMask) (int, bool) {
+	lo, lok := leaf.lo.(int64)
+	if !lok {
+		return 0, false
+	}
+	if leaf.between {
+		hi, hok := leaf.hi.(int64)
+		if !hok {
+			return 0, false
+		}
+		if lo > kmax || hi < kmin || lo > hi {
+			out.Clear()
+			return 0, true
+		}
+		lo, hi = max(lo, kmin), min(hi, kmax)
+		return vector.BetweenOrdered(vals, valid, T(lo), T(hi), sel, out), true
+	}
+	switch clampVerdict(lo, kmin, kmax, leaf.op) {
+	case boundNone:
+		out.Clear()
+		return 0, true
+	case boundAll:
+		out.CopyFrom(&sel)
+		out.AndValidity(valid)
+		return out.PopCount(), true
+	}
+	return vector.FilterOrdered(vals, valid, T(lo), leaf.op, sel, out), true
+}
+
+// clampVerdict decides how a literal outside a narrow int kind's range resolves for the given op.
+func clampVerdict(v, lo, hi int64, op vector.FilterOp) intBoundVerdict {
+	if v >= lo && v <= hi {
+		return boundExact
+	}
+	high := v > hi
+	switch op {
+	case vector.FilterEqual:
+		return boundNone
+	case vector.FilterNotEqual:
+		return boundAll
+	case vector.FilterLess, vector.FilterLessEqual:
+		if high {
+			return boundAll
+		}
+		return boundNone
+	case vector.FilterGreater, vector.FilterGreaterEqual:
+		if high {
+			return boundNone
+		}
+		return boundAll
+	}
+	return boundUnsupported
+}
+
+// intBetweenBound resolves one BETWEEN endpoint to an inclusive int64 bound, clamping an always-true side to the range edge.
+func intBetweenBound(v any, op vector.FilterOp) (int64, intBoundVerdict) {
+	if i, ok := v.(int64); ok {
+		return i, boundExact
+	}
+	f, ok := asFloat64(v)
+	if !ok {
+		return 0, boundUnsupported
+	}
+	t, _, verdict := intCompareBound(f, op)
+	if verdict == boundAll {
+		if op == vector.FilterGreaterEqual {
+			return math.MinInt64, boundExact
+		}
+		return math.MaxInt64, boundExact
+	}
+	return t, verdict
+}
+
 func applyLeaf(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, scratch *vector.SelectionMask) (vector.SelectionMask, int, bool, error) {
 	leaf, ok := makeFilterLeaf(pred)
 	if !ok || leaf.lo == nil {
@@ -172,53 +314,48 @@ func applyLeaf(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr,
 	out := ensureOutMask(scratch, batch.Len)
 	switch col.V.Kind {
 	case vector.VecInt16:
-		lo, lok := leaf.lo.(int64)
-		if !lok {
+		count, handled := filterNarrowInt(col.V.I16(), col.V.Valid, leaf, math.MinInt16, math.MaxInt16, sel, &out)
+		if !handled {
 			return vector.SelectionMask{}, 0, false, nil
 		}
-		if leaf.between {
-			hi, hok := leaf.hi.(int64)
-			if !hok {
-				return vector.SelectionMask{}, 0, false, nil
-			}
-			return out, vector.BetweenOrdered(col.V.I16(), col.V.Valid, int16(lo), int16(hi), sel, &out), true, nil
-		}
-		return out, vector.FilterOrdered(col.V.I16(), col.V.Valid, int16(lo), leaf.op, sel, &out), true, nil
+		return out, count, true, nil
 	case vector.VecInt32, vector.VecDate:
-		lo, lok := leaf.lo.(int64)
-		if !lok {
+		count, handled := filterNarrowInt(col.V.I32(), col.V.Valid, leaf, math.MinInt32, math.MaxInt32, sel, &out)
+		if !handled {
 			return vector.SelectionMask{}, 0, false, nil
 		}
-		if leaf.between {
-			hi, hok := leaf.hi.(int64)
-			if !hok {
-				return vector.SelectionMask{}, 0, false, nil
-			}
-			return out, vector.BetweenOrdered(col.V.I32(), col.V.Valid, int32(lo), int32(hi), sel, &out), true, nil
-		}
-		return out, vector.FilterOrdered(col.V.I32(), col.V.Valid, int32(lo), leaf.op, sel, &out), true, nil
+		return out, count, true, nil
 	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-		lo, lok := asFloat64(leaf.lo)
-		if !lok {
-			return vector.SelectionMask{}, 0, false, nil
-		}
 		if leaf.between {
-			hi, hok := asFloat64(leaf.hi)
-			if !hok {
+			lo, lok := intBetweenBound(leaf.lo, vector.FilterGreaterEqual)
+			hi, hok := intBetweenBound(leaf.hi, vector.FilterLessEqual)
+			if lok == boundUnsupported || hok == boundUnsupported {
 				return vector.SelectionMask{}, 0, false, nil
 			}
-			// Compare int64 column with float64 literal by promoting to float64
-			var f64s []float64
-			for _, v := range col.V.I64() {
-				f64s = append(f64s, float64(v))
+			if lok == boundNone || hok == boundNone || lo > hi {
+				out.Clear()
+				return out, 0, true, nil
 			}
-			return out, vector.BetweenOrdered(f64s, col.V.Valid, lo, hi, sel, &out), true, nil
+			return out, vector.BetweenOrdered(col.V.I64(), col.V.Valid, lo, hi, sel, &out), true, nil
 		}
-		var f64s []float64
-		for _, v := range col.V.I64() {
-			f64s = append(f64s, float64(v))
+		if lo, ok := leaf.lo.(int64); ok {
+			return out, vector.FilterOrdered(col.V.I64(), col.V.Valid, lo, leaf.op, sel, &out), true, nil
 		}
-		return out, vector.FilterOrdered(f64s, col.V.Valid, lo, leaf.op, sel, &out), true, nil
+		f, fok := asFloat64(leaf.lo)
+		if !fok {
+			return vector.SelectionMask{}, 0, false, nil
+		}
+		t, op, verdict := intCompareBound(f, leaf.op)
+		switch verdict {
+		case boundNone:
+			out.Clear()
+			return out, 0, true, nil
+		case boundAll:
+			out.CopyFrom(&sel)
+			out.AndValidity(col.V.Valid)
+			return out, out.PopCount(), true, nil
+		}
+		return out, vector.FilterOrdered(col.V.I64(), col.V.Valid, t, op, sel, &out), true, nil
 	case vector.VecFloat32:
 		lo, lok := asFloat64(leaf.lo)
 		if !lok {

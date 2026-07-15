@@ -1,4 +1,4 @@
-// Lowered predicate: lowers a sql.BoundExpr WHERE into a storage.Pred so the scan layer skips and applies before decode.
+// Lowers a sql.BoundExpr WHERE into a storage.Pred so the scan layer skips and applies before decode.
 // Returns ok=false on any unsupported node so the caller keeps the decoded FilterOp path as a fallback.
 package exec
 
@@ -11,100 +11,82 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-// loweredComparison lowers a single comparison expression to a storage.Pred.
-// Returns ok=false on any unsupported node so the caller keeps the decoded FilterOp path as a fallback.
 func loweredComparison(expr sql.BoundExpr) (storage.Pred, bool) {
-	// Handle special cases first
 	switch expr.Op {
+	case sql.ExprAnd, sql.ExprOr:
+		if len(expr.Args) != 2 {
+			return storage.Pred{}, false
+		}
+		l, ok := loweredComparison(expr.Args[0])
+		if !ok {
+			return storage.Pred{}, false
+		}
+		r, ok := loweredComparison(expr.Args[1])
+		if !ok {
+			return storage.Pred{}, false
+		}
+		op := storage.OpAnd
+		if expr.Op == sql.ExprOr {
+			op = storage.OpOr
+		}
+		return storage.Pred{Op: op, Children: []storage.Pred{l, r}}, true
+
 	case sql.ExprBetween:
 		if len(expr.Args) != 3 {
 			return storage.Pred{}, false
 		}
-		col := expr.Args[0]
-		if col.Op != sql.ExprColumn {
+		ge, ok := loweredComparison(sql.BoundExpr{Op: sql.ExprGreaterEqual, Args: []sql.BoundExpr{expr.Args[0], expr.Args[1]}})
+		if !ok {
 			return storage.Pred{}, false
 		}
-		lo := expr.Args[1]
-		hi := expr.Args[2]
-		if lo.Op != sql.ExprLiteral || hi.Op != sql.ExprLiteral {
+		le, ok := loweredComparison(sql.BoundExpr{Op: sql.ExprLessEqual, Args: []sql.BoundExpr{expr.Args[0], expr.Args[2]}})
+		if !ok {
 			return storage.Pred{}, false
 		}
-		p1, ok1 := loweredComparison(sql.BoundExpr{
-			Op:   sql.ExprGreaterEqual,
-			Args: []sql.BoundExpr{expr.Args[0], expr.Args[1]},
-		})
-		p2, ok2 := loweredComparison(sql.BoundExpr{
-			Op:   sql.ExprLessEqual,
-			Args: []sql.BoundExpr{expr.Args[0], expr.Args[2]},
-		})
-		if !ok1 || !ok2 {
-			return storage.Pred{}, false
-		}
-		return storage.Pred{Op: storage.OpAnd, Children: []storage.Pred{p1, p2}}, true
+		return storage.Pred{Op: storage.OpAnd, Children: []storage.Pred{ge, le}}, true
 
 	case sql.ExprIn:
-		if len(expr.Args) < 2 {
+		if len(expr.Args) < 2 || expr.Args[0].Op != sql.ExprColumn {
 			return storage.Pred{}, false
 		}
-		if expr.Args[0].Op != sql.ExprColumn {
-			return storage.Pred{}, false
-		}
-		var children []storage.Pred
-		for i := 1; i < len(expr.Args); i++ {
-			if expr.Args[i].Op != sql.ExprLiteral {
-				return storage.Pred{}, false
-			}
-			p, ok := loweredComparison(sql.BoundExpr{
-				Op:   sql.ExprEqual,
-				Args: []sql.BoundExpr{expr.Args[0], expr.Args[i]},
-			})
+		children := make([]storage.Pred, 0, len(expr.Args)-1)
+		for _, arg := range expr.Args[1:] {
+			p, ok := loweredComparison(sql.BoundExpr{Op: sql.ExprEqual, Args: []sql.BoundExpr{expr.Args[0], arg}})
 			if !ok {
 				return storage.Pred{}, false
 			}
 			children = append(children, p)
 		}
-		if len(children) == 1 {
-			if expr.Not {
-				return storage.Pred{Op: storage.OpNot, Children: []storage.Pred{children[0]}}, true
-			}
-			return children[0], true
+		p := children[0]
+		if len(children) > 1 {
+			p = storage.Pred{Op: storage.OpOr, Children: children}
 		}
-		or := storage.Pred{Op: storage.OpOr, Children: children}
 		if expr.Not {
-			return storage.Pred{Op: storage.OpNot, Children: []storage.Pred{or}}, true
+			p = storage.Pred{Op: storage.OpNot, Children: []storage.Pred{p}}
 		}
-		return or, true
+		return p, true
 
 	case sql.ExprNotEqual:
 		if len(expr.Args) != 2 {
 			return storage.Pred{}, false
 		}
-		col, lit := expr.Args[0], expr.Args[1]
-		if col.Op != sql.ExprColumn || lit.Op != sql.ExprLiteral {
-			return storage.Pred{}, false
-		}
-		// != is rewritten as NOT (=)
-		p, ok := loweredComparison(sql.BoundExpr{
-			Op:   sql.ExprEqual,
-			Args: []sql.BoundExpr{col, lit},
-		})
+		eq, ok := loweredComparison(sql.BoundExpr{Op: sql.ExprEqual, Args: expr.Args})
 		if !ok {
 			return storage.Pred{}, false
 		}
-		return storage.Pred{Op: storage.OpNot, Children: []storage.Pred{p}}, true
+		return storage.Pred{Op: storage.OpNot, Children: []storage.Pred{eq}}, true
 
 	case sql.ExprNot:
 		if len(expr.Args) != 1 {
 			return storage.Pred{}, false
 		}
 		child, ok := loweredComparison(expr.Args[0])
-		if !ok {
+		if !ok || predContainsAnd(child) {
 			return storage.Pred{}, false
 		}
 		return storage.Pred{Op: storage.OpNot, Children: []storage.Pred{child}}, true
 	}
 
-	// Binary comparisons (len == 2)
 	if len(expr.Args) != 2 {
 		return storage.Pred{}, false
 	}
@@ -127,13 +109,11 @@ func loweredComparison(expr sql.BoundExpr) (storage.Pred, bool) {
 		return storage.Pred{}, false
 	}
 
-	// Determine column type from column's Type field, or infer from literal
 	colKind := vector.VecInvalid
 	if col.Type.Valid() {
 		colKind, _ = vector.VecKindOf(col.Type)
 	}
 	if colKind == vector.VecInvalid {
-		// Fall back to literal's type
 		switch lit.Literal.(type) {
 		case int64:
 			colKind = vector.VecInt64
@@ -141,63 +121,54 @@ func loweredComparison(expr sql.BoundExpr) (storage.Pred, bool) {
 			colKind = vector.VecFloat64
 		case string:
 			colKind = vector.VecText
+		}
+	}
+
+	base := storage.Pred{Col: col.Column, ColID: uint64(col.ColumnID), Kind: colKind}
+	// Only kinds with storage evaluators lower. float32 stays on the decoded filter path.
+	switch colKind {
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
+		v, ok := lit.Literal.(int64)
+		if !ok {
+			return storage.Pred{}, false
+		}
+		// LE and GE rewrite to strict ops so encoded FOR range evaluation applies. Extremes cannot shift.
+		switch op {
+		case sql.ExprLessEqual:
+			if v == math.MaxInt64 {
+				return storage.Pred{}, false
+			}
+			v, op = v+1, sql.ExprLess
+		case sql.ExprGreaterEqual:
+			if v == math.MinInt64 {
+				return storage.Pred{}, false
+			}
+			v, op = v-1, sql.ExprGreater
+		}
+		base.I64 = v
+	case vector.VecInt16, vector.VecInt32, vector.VecDate:
+		v, ok := lit.Literal.(int64)
+		if !ok {
+			return storage.Pred{}, false
+		}
+		// Out of range literals stay on the decoded path where clampVerdict resolves them.
+		lo, hi := int64(math.MinInt32), int64(math.MaxInt32)
+		if colKind == vector.VecInt16 {
+			lo, hi = math.MinInt16, math.MaxInt16
+		}
+		if v < lo || v > hi {
+			return storage.Pred{}, false
+		}
+		base.I64 = v
+	case vector.VecFloat64:
+		switch x := lit.Literal.(type) {
+		case float64:
+			base.F64 = x
+		case int64:
+			base.F64 = float64(x)
 		default:
 			return storage.Pred{}, false
 		}
-	}
-
-	// Check for overflow before adjusting values for LessEqual/GreaterEqual
-	isIntKind := colKind == vector.VecInt16 || colKind == vector.VecInt32 || colKind == vector.VecDate ||
-		colKind == vector.VecInt64 || colKind == vector.VecTimestamp || colKind == vector.VecTime || colKind == vector.VecDecimal64
-	if isIntKind {
-		v, _ := asInt64(lit.Literal)
-		if op == sql.ExprLessEqual && v == int64(^uint64(0)>>1) {
-			return storage.Pred{}, false
-		}
-		if op == sql.ExprGreaterEqual && v == -int64(^uint64(0)>>1)-1 {
-			return storage.Pred{}, false
-		}
-	}
-
-	// Convert literal value to int64 based on column kind
-	v, ok := convertLiteral(lit.Literal, colKind)
-	if !ok {
-		return storage.Pred{}, false
-	}
-
-	// Determine if integer kind
-	isIntKind = colKind == vector.VecInt16 || colKind == vector.VecInt32 || colKind == vector.VecDate ||
-		colKind == vector.VecInt64 || colKind == vector.VecTimestamp || colKind == vector.VecTime || colKind == vector.VecDecimal64
-
-	// For integer types, adjust value and operator for LessEqual/GreaterEqual (use post-reversal op)
-	if isIntKind {
-		switch op {
-		case sql.ExprLessEqual:
-			v += 1
-			op = sql.ExprLess
-		case sql.ExprGreaterEqual:
-			v -= 1
-			op = sql.ExprGreater
-		}
-	}
-
-	predOp := opToStorage(op)
-	if predOp == storage.OpInvalid {
-		return storage.Pred{}, false
-	}
-
-	base := storage.Pred{Op: predOp, Col: col.Column, ColID: uint64(col.ColumnID), Kind: colKind}
-	switch colKind {
-	case vector.VecInt16:
-		base.I64 = int64(int16(v))
-	case vector.VecInt32, vector.VecDate:
-		base.I64 = int64(int32(v))
-	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-		base.I64 = v
-	case vector.VecFloat32:
-		base.F64 = float64(math.Float32frombits(uint32(v)))
-	case vector.VecFloat64:
-		base.F64 = math.Float64frombits(uint64(v))
 	case vector.VecText, vector.VecBytes, vector.VecJSON:
 		s, ok := lit.Literal.(string)
 		if !ok {
@@ -207,64 +178,39 @@ func loweredComparison(expr sql.BoundExpr) (storage.Pred, bool) {
 	default:
 		return storage.Pred{}, false
 	}
+
+	switch op {
+	case sql.ExprEqual:
+		base.Op = storage.OpEq
+	case sql.ExprLess:
+		base.Op = storage.OpLt
+	case sql.ExprLessEqual:
+		base.Op = storage.OpLe
+	case sql.ExprGreater:
+		base.Op = storage.OpGt
+	case sql.ExprGreaterEqual:
+		base.Op = storage.OpGe
+	default:
+		return storage.Pred{}, false
+	}
 	return base, true
 }
 
-func opToStorage(op sql.ExprOp) storage.PredOp {
-	switch op {
-	case sql.ExprEqual:
-		return storage.OpEq
-	case sql.ExprNotEqual:
-		return storage.OpNe
-	case sql.ExprLess:
-		return storage.OpLt
-	case sql.ExprLessEqual:
-		return storage.OpLe
-	case sql.ExprGreater:
-		return storage.OpGt
-	case sql.ExprGreaterEqual:
-		return storage.OpGe
-	case sql.ExprNot:
-		return storage.OpNot
-	case sql.ExprAnd:
-		return storage.OpAnd
-	case sql.ExprOr:
-		return storage.OpOr
-	case sql.ExprIn:
-		return storage.OpIn
+// predContainsAnd guards NOT lowering because boundNot's validity re-mask is only sound over leaves and OR trees.
+func predContainsAnd(p storage.Pred) bool {
+	if p.Op == storage.OpAnd {
+		return true
 	}
-	return storage.OpInvalid
-}
-
-func convertLiteral(v any, kind vector.VecKind) (int64, bool) {
-	switch x := v.(type) {
-	case int64:
-		switch kind {
-		case vector.VecInt16:
-			return int64(int16(x)), true
-		case vector.VecInt32, vector.VecDate:
-			return int64(int32(x)), true
-		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-			return x, true
-		}
-	case float64:
-		switch kind {
-	case vector.VecFloat32:
-		return int64(math.Float32bits(float32(x))), true
-		case vector.VecFloat64:
-			return int64(math.Float64bits(x)), true
-		}
-	case string:
-		if kind == vector.VecText || kind == vector.VecBytes || kind == vector.VecJSON {
-			return 0, true // value stored in Bytes field
+	for _, c := range p.Children {
+		if predContainsAnd(c) {
+			return true
 		}
 	}
-	return 0, false
+	return false
 }
 
-// loweredPredicate lowers a whole WHERE expression into pushable and residual parts.
-// Returns (pushable predicate, residual expression). Either can be nil.
-func loweredPredicate(expr sql.BoundExpr) (*storage.Pred, *sql.BoundExpr) {
+// splitWhere separates a WHERE tree into a pushable storage predicate and a residual expression where either may be nil.
+func splitWhere(expr sql.BoundExpr) (*storage.Pred, *sql.BoundExpr) {
 	var pushable []storage.Pred
 	var residual []sql.BoundExpr
 	var walk func(sql.BoundExpr)
@@ -286,18 +232,15 @@ func loweredPredicate(expr sql.BoundExpr) (*storage.Pred, *sql.BoundExpr) {
 	switch len(pushable) {
 	case 0:
 	case 1:
-		p := pushable[0]
-		push = &p
+		push = &pushable[0]
 	default:
-		p := storage.Pred{Op: storage.OpAnd, Children: pushable}
-		push = &p
+		push = &storage.Pred{Op: storage.OpAnd, Children: pushable}
 	}
 	var res *sql.BoundExpr
 	switch len(residual) {
 	case 0:
 	case 1:
-		r := residual[0]
-		res = &r
+		res = &residual[0]
 	default:
 		r := residual[0]
 		for i := 1; i < len(residual); i++ {
@@ -306,9 +249,4 @@ func loweredPredicate(expr sql.BoundExpr) (*storage.Pred, *sql.BoundExpr) {
 		res = &r
 	}
 	return push, res
-}
-
-// splitWhere is the engine entry point: splits a WHERE expression into pushable storage predicate and residual.
-func splitWhere(expr sql.BoundExpr) (*storage.Pred, *sql.BoundExpr) {
-	return loweredPredicate(expr)
 }

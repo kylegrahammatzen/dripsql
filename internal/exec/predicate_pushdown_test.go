@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
@@ -238,5 +239,63 @@ func TestLoweredPredicate_ReversedOperands(t *testing.T) {
 	want := intLeaf(storage.OpGt, "x", 9)
 	if !predEq(got, want) {
 		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+func TestLoweredPredicate_Or(t *testing.T) {
+	expr := sql.BoundExpr{Op: sql.ExprOr, Args: []sql.BoundExpr{
+		cmp(sql.ExprEqual, "x", 1),
+		cmp(sql.ExprEqual, "x", 2),
+	}}
+	got, ok := loweredComparison(expr)
+	if !ok {
+		t.Fatal("expected lowering for OR")
+	}
+	want := storage.Pred{Op: storage.OpOr, Children: []storage.Pred{
+		intLeaf(storage.OpEq, "x", 1),
+		intLeaf(storage.OpEq, "x", 2),
+	}}
+	if !predEq(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+// NOT over an AND subtree must stay on the decoded path because boundNot's validity re-mask is unsound there.
+func TestLoweredPredicate_NotOverAndUnpushable(t *testing.T) {
+	between := sql.BoundExpr{Op: sql.ExprBetween, Args: []sql.BoundExpr{
+		{Op: sql.ExprColumn, Column: "x"},
+		{Op: sql.ExprLiteral, Literal: int64(1)},
+		{Op: sql.ExprLiteral, Literal: int64(5)},
+	}}
+	expr := sql.BoundExpr{Op: sql.ExprNot, Args: []sql.BoundExpr{between}}
+	if _, ok := loweredComparison(expr); ok {
+		t.Error("NOT(BETWEEN) must not lower")
+	}
+}
+
+// In range narrow int literals push, out of range ones stay decoded where clampVerdict resolves them.
+func TestLoweredPredicate_NarrowIntRange(t *testing.T) {
+	narrowCmp := func(lit int64) sql.BoundExpr {
+		return sql.BoundExpr{Op: sql.ExprLess, Args: []sql.BoundExpr{
+			{Op: sql.ExprColumn, Column: "s", Type: schema.Int16},
+			{Op: sql.ExprLiteral, Literal: lit},
+		}}
+	}
+	got, ok := loweredComparison(narrowCmp(100))
+	if !ok {
+		t.Fatal("in range int16 comparison must lower")
+	}
+	if got.Op != storage.OpLt || got.Kind != vector.VecInt16 || got.I64 != 100 {
+		t.Errorf("got %#v", got)
+	}
+	if _, ok := loweredComparison(narrowCmp(40000)); ok {
+		t.Error("out of range int16 literal must not lower")
+	}
+	le := sql.BoundExpr{Op: sql.ExprLessEqual, Args: []sql.BoundExpr{
+		{Op: sql.ExprColumn, Column: "s", Type: schema.Int16},
+		{Op: sql.ExprLiteral, Literal: int64(32767)},
+	}}
+	got, ok = loweredComparison(le)
+	if !ok || got.Op != storage.OpLe || got.I64 != 32767 {
+		t.Errorf("int16 boundary LE must push unrewritten, got ok=%v %#v", ok, got)
 	}
 }
