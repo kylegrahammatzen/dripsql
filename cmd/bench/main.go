@@ -77,6 +77,7 @@ func runBench(args []string) {
 	cpuProfile := fs.String("cpuprofile", "", "write a CPU profile to this path (captures the timed runs only)")
 	mode := fs.String("mode", "hot", "hot or cold-soft, cold-soft closes and reopens the DB between runs")
 	reuse := fs.Bool("reuse", false, "reuse the existing bench-db when its manifest matches dataset, rows, and segment rows")
+	columnar := fs.Bool("columnar", false, "drain results through QueryBatches instead of Query to measure the columnar path")
 	fs.Parse(args)
 
 	q, ok := queries[*queryName]
@@ -178,15 +179,29 @@ func runBench(args []string) {
 			}
 		}
 		start := time.Now()
-		result, err := db.Query(ctx, sqlText)
+		var gotRows int
+		var runErr error
+		if *columnar {
+			var result *engine.BatchRows
+			result, runErr = db.QueryBatches(ctx, sqlText)
+			if runErr == nil {
+				gotRows = result.Rows
+			}
+		} else {
+			var result *engine.Rows
+			result, runErr = db.Query(ctx, sqlText)
+			if runErr == nil {
+				gotRows = len(result.Values)
+			}
+		}
 		elapsed := time.Since(start)
-		if err != nil {
+		if runErr != nil {
 			db.Close()
-			fmt.Fprintln(os.Stderr, "bench: run", i, "failed:", err)
+			fmt.Fprintln(os.Stderr, "bench: run", i, "failed:", runErr)
 			os.Exit(1)
 		}
 		durations = append(durations, elapsed)
-		lastRows = len(result.Values)
+		lastRows = gotRows
 		if i == 0 && *mode == "cold-soft" {
 			storage.ResetTimings()
 		}

@@ -43,6 +43,9 @@ var queries = map[string]query{
 	"tpch_q1": {name: "tpch_q1", dataset: "lineitem", sql: func(int) string {
 		return fmt.Sprintf("SELECT l_returnflag, l_linestatus, sum(l_quantity) AS s_qty, sum(l_extprice) AS s_ext, sum(l_disc_rev) AS s_rev, count(*) AS c FROM lineitem WHERE l_shipdate <= %d GROUP BY l_returnflag, l_linestatus", tpchDayQ1Cutoff)
 	}},
+	"tpch_q1_expr": {name: "tpch_q1_expr", dataset: "lineitem", sql: func(int) string {
+		return fmt.Sprintf("SELECT l_returnflag, l_linestatus, sum(l_quantity) AS s_qty, sum(l_extprice * (1.0 - l_discount)) AS s_rev, count(*) AS c FROM lineitem WHERE l_shipdate <= %d GROUP BY l_returnflag, l_linestatus", tpchDayQ1Cutoff)
+	}},
 	"tpch_q6": {name: "tpch_q6", dataset: "lineitem", sql: func(int) string {
 		return fmt.Sprintf("SELECT sum(l_disc_price) FROM lineitem WHERE l_shipdate >= %d AND l_shipdate < %d AND l_discount >= 0.05 AND l_discount <= 0.07 AND l_quantity < 24", tpchDayQ6Lo, tpchDayQ6Hi)
 	}},

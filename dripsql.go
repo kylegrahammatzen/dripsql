@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/kylegrahammatzen/dripsql/internal/engine"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 // MemoryPath is reserved for a future in-memory backend and currently returns an error from Open.
@@ -65,6 +66,86 @@ func (db *DB) QueryAt(ctx context.Context, sql string, readTs uint64, args ...an
 		return nil, err
 	}
 	return newRows(rs), nil
+}
+
+// QueryChunks runs a SELECT and returns dense columnar chunks so large results avoid per-cell boxing.
+// Chunk data is query-owned and stays valid after the call.
+func (db *DB) QueryChunks(ctx context.Context, sql string, args ...any) ([]Chunk, error) {
+	br, err := db.e.QueryBatches(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	chunks := make([]Chunk, len(br.Batches))
+	for i := range br.Batches {
+		chunks[i] = Chunk{batch: br.Batches[i]}
+	}
+	return chunks, nil
+}
+
+// Chunk is one dense columnar result block with typed column accessors.
+type Chunk struct {
+	batch vector.Batch
+}
+
+func (c Chunk) Len() int { return c.batch.Len }
+
+// Columns returns the chunk's column names in select order; the returned slice is owned by the caller.
+func (c Chunk) Columns() []string {
+	out := make([]string, len(c.batch.Columns))
+	for i := range c.batch.Columns {
+		out[i] = c.batch.Columns[i].Name
+	}
+	return out
+}
+
+// Int64s returns the raw int64 column slice or nil when the column is absent or not int64 shaped.
+func (c Chunk) Int64s(col string) []int64 {
+	v, ok := c.batch.ColumnByName(col)
+	if !ok {
+		return nil
+	}
+	switch v.V.Kind {
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
+		return v.V.I64()
+	}
+	return nil
+}
+
+// Float64s returns the raw float64 column slice or nil when the column is absent or not float64.
+func (c Chunk) Float64s(col string) []float64 {
+	v, ok := c.batch.ColumnByName(col)
+	if !ok || v.V.Kind != vector.VecFloat64 {
+		return nil
+	}
+	return v.V.F64()
+}
+
+// Strings materializes a text column into fresh strings or nil when the column is absent or not text shaped.
+func (c Chunk) Strings(col string) []string {
+	v, ok := c.batch.ColumnByName(col)
+	if !ok {
+		return nil
+	}
+	switch v.V.Kind {
+	case vector.VecText, vector.VecBytes, vector.VecJSON:
+	default:
+		return nil
+	}
+	vb := v.V.Var()
+	out := make([]string, c.batch.Len)
+	for i := range out {
+		out[i] = vb.String(i)
+	}
+	return out
+}
+
+// IsNull reports whether the cell at row in col is NULL.
+func (c Chunk) IsNull(col string, row int) bool {
+	v, ok := c.batch.ColumnByName(col)
+	if !ok {
+		return true
+	}
+	return v.V.Valid != nil && !v.V.Valid.IsValid(row)
 }
 
 // BeginTx starts a multi-statement transaction that holds the writer lock until Commit or Rollback.

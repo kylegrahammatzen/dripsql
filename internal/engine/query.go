@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/exec"
@@ -151,17 +152,69 @@ func cachedSegmentResolver(base func(sql.BoundTableDef) ([]*storage.Segment, err
 	}
 }
 
+// appendBatchRows fills one arena per batch through per-column typed loops so wide
+// results skip the per-cell kind switch and the per-row slice allocation.
 func appendBatchRows(rows *Rows, batch vector.Batch) error {
-	return vector.ForVisible(batch, func(row int) error {
-		vals := make([]any, len(batch.Columns))
-		for i, c := range batch.Columns {
-			v, err := c.ValueAt(row)
-			if err != nil {
-				return err
-			}
-			vals[i] = v
+	n := batch.Len
+	if batch.Sel != nil {
+		n = batch.Sel.PopCount()
+	}
+	if n == 0 {
+		return nil
+	}
+	stride := len(batch.Columns)
+	arena := make([]any, n*stride)
+	for ci := range batch.Columns {
+		if err := fillColumnValues(&batch.Columns[ci], batch, arena, ci, stride); err != nil {
+			return err
 		}
-		rows.Values = append(rows.Values, vals)
+	}
+	rows.Values = slices.Grow(rows.Values, n)
+	for r := range n {
+		rows.Values = append(rows.Values, arena[r*stride:(r+1)*stride:(r+1)*stride])
+	}
+	return nil
+}
+
+func fillColumnValues(c *vector.Column, batch vector.Batch, arena []any, offset, stride int) error {
+	valid := c.V.Valid
+	idx := offset
+	switch c.V.Kind {
+	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
+		src := c.V.I64()
+		return vector.ForVisible(batch, func(row int) error {
+			if valid == nil || valid.IsValid(row) {
+				arena[idx] = src[row]
+			}
+			idx += stride
+			return nil
+		})
+	case vector.VecFloat64:
+		src := c.V.F64()
+		return vector.ForVisible(batch, func(row int) error {
+			if valid == nil || valid.IsValid(row) {
+				arena[idx] = src[row]
+			}
+			idx += stride
+			return nil
+		})
+	case vector.VecText, vector.VecBytes, vector.VecJSON:
+		src := c.V.Var()
+		return vector.ForVisible(batch, func(row int) error {
+			if valid == nil || valid.IsValid(row) {
+				arena[idx] = src.String(row)
+			}
+			idx += stride
+			return nil
+		})
+	}
+	return vector.ForVisible(batch, func(row int) error {
+		v, err := c.ValueAt(row)
+		if err != nil {
+			return err
+		}
+		arena[idx] = v
+		idx += stride
 		return nil
 	})
 }
