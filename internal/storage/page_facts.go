@@ -26,6 +26,9 @@ type colSink struct {
 	varMaxLen    uint32
 	varTotal     uint64
 	varPageKeys  [][]uint64
+	// sawMixedPage means at least one page skipped analysis, so any segment wide
+	// artifact built from this sink would silently miss that page's live values.
+	sawMixedPage bool
 }
 
 // rowsHint sizes the int-dedup map and key slice up front so the typical
@@ -207,6 +210,9 @@ func analyzeIntPage(v vector.Vec, facts *codec.PageFacts, sink *colSink) {
 // Writes col stats from sink data for kinds the analyzer summarizes.
 // Returns false when the sink does not cover the kind; caller falls back to scan.
 func marshalColumnStatsFromSink(kind vector.VecKind, sink *colSink, dst []byte) bool {
+	if sink.sawMixedPage {
+		return false
+	}
 	switch kind {
 	case vector.VecInt16:
 		s := NumericStats[int32]{HasNonNull: sink.intRangeSeen}

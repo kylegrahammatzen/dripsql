@@ -115,11 +115,13 @@ func (s Sidecar[T]) Read(segPath string) (map[string]T, error) {
 
 const sidecarContainerMagic = "DSCV1"
 
+// Tag 5 is the identity sidecar declared in segment_read.go.
 const (
 	sidecarSectionDictHist  uint8 = 1
 	sidecarSectionIntFilter uint8 = 2
 	sidecarSectionNumSum    uint8 = 3
 	sidecarSectionVarBloom  uint8 = 4
+	sidecarSectionGroupSums uint8 = 6
 )
 
 const sidecarSectionHeaderSize = 1 + 4
@@ -219,6 +221,143 @@ var dictHistSidecar = Sidecar[DictHistogram]{
 		}
 		return hist, nil
 	},
+}
+
+// DictSums maps one group value's raw bytes to the accumulated sum of a numeric column.
+type DictSums map[string]int64
+
+// GroupSumsCol carries the per numeric column sums for one group column.
+type GroupSumsCol map[string]DictSums
+
+// GroupSumsMap is keyed by normalized group column name.
+type GroupSumsMap map[string]GroupSumsCol
+
+var groupSumsSidecar = Sidecar[GroupSumsCol]{
+	Magic:   "GSV1",
+	Suffix:  ".gs",
+	BufHint: 64,
+	EncodeBody: func(_ string, gc GroupSumsCol, w *wireBuffer) error {
+		w.U32(uint32(len(gc)))
+		for numName, sums := range gc {
+			w.LenPrefixedString(numName)
+			w.U32(uint32(len(sums)))
+			for value, sum := range sums {
+				w.U64(uint64(sum))
+				w.U32(uint32(len(value)))
+				w.Raw([]byte(value))
+			}
+		}
+		return nil
+	},
+	DecodeBody: func(_ string, r *wireReader) (GroupSumsCol, error) {
+		numCols := int(r.U32())
+		gc := make(GroupSumsCol, numCols)
+		for range numCols {
+			numName := r.LenPrefixedString()
+			entries := int(r.U32())
+			sums := make(DictSums, entries)
+			for range entries {
+				sum := int64(r.U64())
+				vlen := int(r.U32())
+				val := r.Raw(vlen)
+				sums[string(val)] = sum
+			}
+			gc[schema.NormalizeName(numName)] = sums
+		}
+		return gc, nil
+	},
+}
+
+// maxGroupSumPairs caps the write cost of the pair pass, chosen pairs follow schema order.
+const maxGroupSumPairs = 8
+
+// buildGroupSums pairs histogram eligible group columns with all valid int columns and
+// accumulates per group value sums so grouped sum queries can answer from metadata.
+// Runs after writePayloads because sink flags gate eligibility.
+func buildGroupSums(pages []vector.Batch, cols []writerColumn, sinks []*colSink) GroupSumsMap {
+	if len(pages) == 0 {
+		return nil
+	}
+	var groupIdx, numIdx []int
+	for ci := range cols {
+		s := sinks[ci]
+		if s == nil {
+			continue
+		}
+		switch {
+		case cols[ci].Kind.IsVarBytes():
+			if !s.varHistSkip && !s.sawMixedPage && len(s.varHist) > 0 {
+				groupIdx = append(groupIdx, ci)
+			}
+		case kindEligibleForIntFilter(cols[ci].Kind):
+			if cols[ci].NullCount == 0 {
+				numIdx = append(numIdx, ci)
+			}
+		}
+	}
+	if len(groupIdx) == 0 || len(numIdx) == 0 {
+		return nil
+	}
+	out := GroupSumsMap{}
+	pairs := 0
+	for _, gi := range groupIdx {
+		if pairs >= maxGroupSumPairs {
+			break
+		}
+		take := min(len(numIdx), maxGroupSumPairs-pairs)
+		nums := numIdx[:take]
+		pairs += take
+		if gc := accumulateGroupSums(pages, gi, nums, cols); len(gc) > 0 {
+			out[schema.NormalizeName(cols[gi].Schema.Name)] = gc
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func accumulateGroupSums(pages []vector.Batch, gi int, nums []int, cols []writerColumn) GroupSumsCol {
+	type groupAccum struct{ sums []int64 }
+	acc := make(map[string]*groupAccum)
+	dead := make([]bool, len(nums))
+	for _, page := range pages {
+		gv := page.Columns[gi].V.Var()
+		for r := range page.Len {
+			key := gv.Bytes(r)
+			a := acc[string(key)]
+			if a == nil {
+				if len(acc) >= dictHistMaxDistinct {
+					return nil
+				}
+				a = &groupAccum{sums: make([]int64, len(nums))}
+				acc[string(key)] = a
+			}
+			for k, ni := range nums {
+				if dead[k] {
+					continue
+				}
+				v := readInt64Key(page.Columns[ni].V, r)
+				if addOverflowsInt64(a.sums[k], v) {
+					dead[k] = true
+					continue
+				}
+				a.sums[k] += v
+			}
+		}
+	}
+	gc := GroupSumsCol{}
+	for k, ni := range nums {
+		if dead[k] {
+			continue
+		}
+		sums := make(DictSums, len(acc))
+		for val, a := range acc {
+			sums[val] = a.sums[k]
+		}
+		gc[schema.NormalizeName(cols[ni].Schema.Name)] = sums
+	}
+	return gc
 }
 
 const (
@@ -393,7 +532,10 @@ func materializeSidecarsFromSinks(cols []writerColumn, sinks []*colSink) (DictHi
 		name := schema.NormalizeName(c.Schema.Name)
 		switch {
 		case c.Kind.IsVarBytes():
-			if !s.varHistSkip && len(s.varHist) > 0 {
+			// Mixed page values never reach the sink, so a histogram or a segment wide
+			// filter built from it would lie by omission. Per page var blooms stay safe
+			// because unanalyzed pages keep a nil bloom which the reader treats as no prune.
+			if !s.varHistSkip && !s.sawMixedPage && len(s.varHist) > 0 {
 				dictHists[name] = s.varHist
 			}
 			if len(s.varPageKeys) > 1 {
@@ -413,6 +555,9 @@ func materializeSidecarsFromSinks(cols []writerColumn, sinks []*colSink) (DictHi
 				}
 			}
 		case kindEligibleForIntFilter(c.Kind):
+			if s.sawMixedPage {
+				continue
+			}
 			if s.intAny && !s.intOverflow {
 				numSums[name] = NumericSum{Sum: s.intSum}
 			}

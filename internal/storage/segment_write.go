@@ -117,15 +117,22 @@ func writeSegmentImpl(path string, pages []vector.Batch, codecs map[string]schem
 // materializeSidecarBytes builds the sidecar container body to be appended inside the
 // segment file. Returns nil when there's nothing to write. All work is done now so the
 // segment write streams it in one bufio path with the column data and footer.
-func materializeSidecarBytes(root *Span, cols []writerColumn, sinks []*colSink, id SegmentIdentity) []byte {
+func materializeSidecarBytes(root *Span, cols []writerColumn, sinks []*colSink, id SegmentIdentity, groupSums GroupSumsMap) []byte {
 	hists, filters, sums, varBlooms := materializeSidecarsFromSinks(cols, sinks)
 	identityBytes := encodeIdentitySidecar(id)
-	if hists == nil && filters == nil && sums == nil && varBlooms == nil && identityBytes == nil {
+	if hists == nil && filters == nil && sums == nil && varBlooms == nil && identityBytes == nil && groupSums == nil {
 		return nil
 	}
 	sc := root.Child("sidecars")
 	defer sc.End()
-	sections := make(map[uint8][]byte, 5)
+	sections := make(map[uint8][]byte, 6)
+	if groupSums != nil {
+		gs := sc.Child("groupsums")
+		if b, err := groupSumsSidecar.Encode(map[string]GroupSumsCol(groupSums)); err == nil && b != nil {
+			sections[sidecarSectionGroupSums] = b
+		}
+		gs.End()
+	}
 	if identityBytes != nil {
 		sections[sidecarSectionIdentity] = identityBytes
 	}
@@ -198,7 +205,7 @@ func writeSegmentStream(bw *bufio.Writer, pages []vector.Batch, cols []writerCol
 	}
 	// Sidecars must materialize AFTER writePayloads since the colSinks are filled
 	// during the analyzer pass that walks each page during body encoding.
-	sidecarBytes := materializeSidecarBytes(root, cols, sinks, id)
+	sidecarBytes := materializeSidecarBytes(root, cols, sinks, id, buildGroupSums(pages, cols, sinks))
 	if len(sidecarBytes) > 0 {
 		if _, err := bw.Write(sidecarBytes); err != nil {
 			return err
@@ -505,7 +512,9 @@ func writePayloads(w io.Writer, pages []vector.Batch, cols []writerColumn, codec
 				page.Flags = PageFlagAllValid
 				bodyOff += uint64(len(payload))
 			default:
-				// Mixed page (some nulls, some values). Facts path skipped here.
+				// Mixed page (some nulls, some values). Facts skip here, so the sink
+				// loses authority over segment wide stats and sidecars for this column.
+				sinks[ci].sawMixedPage = true
 				marshalPageStats(col.V.Kind, col.V, cols[ci].PageStats[pageIdx][:])
 				// Mixed page layout is <validity bytes><plain payload>.
 				// Plain ignores null slot values. Reader strips validity

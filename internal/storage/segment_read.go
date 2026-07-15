@@ -125,6 +125,10 @@ type Segment struct {
 	numSums     NumericSums
 	numSumsErr  error
 
+	groupSumsOnce sync.Once
+	groupSums     GroupSumsMap
+	groupSumsErr  error
+
 	varBloomsOnce sync.Once
 	varBlooms     VarBlooms
 	varBloomsErr  error
@@ -201,6 +205,23 @@ func (s *Segment) NumericSums() (NumericSums, error) {
 		s.numSums = NumericSums(m)
 	})
 	return s.numSums, s.numSumsErr
+}
+
+func (s *Segment) GroupSums() (GroupSumsMap, error) {
+	s.groupSumsOnce.Do(func() {
+		body, err := s.sidecarSection(sidecarSectionGroupSums)
+		if err != nil {
+			s.groupSumsErr = err
+			return
+		}
+		m, err := groupSumsSidecar.Decode(body)
+		if err != nil {
+			s.groupSumsErr = err
+			return
+		}
+		s.groupSums = GroupSumsMap(m)
+	})
+	return s.groupSums, s.groupSumsErr
 }
 
 func (s *Segment) VarBlooms() (VarBlooms, error) {
