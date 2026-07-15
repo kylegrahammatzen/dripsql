@@ -150,6 +150,11 @@ func projectColumn(batch vector.Batch, sel *vector.SelectionMask, output sql.Bou
 // lazily on the first null and starts AllValid for rows already selected, so a nullless
 // computed projection skips the validity slice entirely.
 func materializeVec(ctx *evalCtx, expr sql.BoundExpr, sel *vector.SelectionMask, rows int, vk vector.VecKind) (vector.Vec, vector.Validity, error) {
+	if v, valid, ok, err := vecEvalArith(ctx.batch, expr, sel, rows, vk); err != nil {
+		return vector.Vec{}, nil, err
+	} else if ok {
+		return v, valid, nil
+	}
 	var valid vector.Validity
 	var loopErr error
 	v := newComputedVec(vk, rows)

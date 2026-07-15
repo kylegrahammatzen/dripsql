@@ -136,14 +136,12 @@ func (t *TopKScanOp) collect(capN int) ([]topKRowItem, error) {
 			}
 			if noNullNoDV && page.NullCount == 0 {
 				if vals, ok := topKInt64Values(pageVec); ok {
-					for row, key := range vals[:int(page.Rows)] {
-						item := topKRowItem{key: key, seq: seq, seg: uint32(si), page: uint32(pi), row: uint32(row)}
-						seq++
+					base := seq
+					seq += uint32(page.Rows)
+					insert := func(key int64, row int) {
+						item := topKRowItem{key: key, seq: base + uint32(row), seg: uint32(si), page: uint32(pi), row: uint32(row)}
 						if useInsert {
 							n := len(data)
-							if n == capN && !topKNoNullBefore(item.key, item.seq, data[n-1].key, data[n-1].seq, t.Desc) {
-								continue
-							}
 							lo, hi := 0, n
 							for lo < hi {
 								mid := int(uint(lo+hi) >> 1)
@@ -160,16 +158,50 @@ func (t *TopKScanOp) collect(capN int) ([]topKRowItem, error) {
 								copy(data[lo+1:], data[lo:n-1])
 							}
 							data[lo] = item
-							continue
+							return
 						}
 						if len(h.data) < capN {
 							h.data = append(h.data, item)
 							h.siftUp(len(h.data) - 1)
-							continue
+							return
 						}
 						if h.beats(item, h.data[0]) {
 							h.data[0] = item
 							h.siftDown(0)
+						}
+					}
+					// Rows arrive in seq order so every kept item precedes the current row and ties always lose.
+					// That reduces rejection to one key compare against the cached worst, the hot case for K << rows.
+					full := false
+					var worst int64
+					syncWorst := func() {
+						if useInsert {
+							if full = len(data) == capN; full {
+								worst = data[capN-1].key
+							}
+							return
+						}
+						if full = len(h.data) == capN; full {
+							worst = h.data[0].key
+						}
+					}
+					syncWorst()
+					vals = vals[:int(page.Rows)]
+					if t.Desc {
+						for row, key := range vals {
+							if full && key <= worst {
+								continue
+							}
+							insert(key, row)
+							syncWorst()
+						}
+					} else {
+						for row, key := range vals {
+							if full && key >= worst {
+								continue
+							}
+							insert(key, row)
+							syncWorst()
 						}
 					}
 					continue

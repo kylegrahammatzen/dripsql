@@ -1,5 +1,5 @@
 // Per-operator wall-time and row-count counters for EXPLAIN ANALYZE.
-// BuildOperatorAnalyzed wraps each Operator and returns a tree-rooted TimingStats.
+// BuildOperatorAnalyzed wraps the real operator tree post build so ANALYZE always measures the plan that actually runs.
 package exec
 
 import (
@@ -60,142 +60,72 @@ func (t *timingOperator) Next() (vector.Batch, bool, error) {
 	return batch, ok, err
 }
 
-// BuildOperatorAnalyzed wraps each constructed Operator with a timingOperator and
-// returns the root of the parent-child stats tree mirroring the Rel tree.
+// BuildOperatorAnalyzed builds the normal operator tree, then wraps every node with
+// a timingOperator so the measured plan is identical to the executed plan.
 func BuildOperatorAnalyzed(plan *sql.Plan, segments SegmentsFn) (Operator, *TimingStats, error) {
-	if plan == nil {
-		return nil, nil, fmt.Errorf("BuildOperatorAnalyzed: nil plan")
+	op, err := BuildOperator(plan, segments)
+	if err != nil {
+		return nil, nil, err
 	}
-	if segments == nil {
-		return nil, nil, fmt.Errorf("BuildOperatorAnalyzed: nil SegmentsFn")
+	if plan.Kind != sql.PlanQuery {
+		return op, nil, nil
 	}
-	if plan.Kind != sql.PlanQuery || plan.Rel == nil {
-		op, err := BuildOperator(plan, segments)
-		return op, nil, err
-	}
-	return buildRelAnalyzed(plan.Rel, segments)
+	wrapped, stats := wrapTimings(op)
+	return wrapped, stats, nil
 }
 
-func buildRelAnalyzed(rel *sql.Rel, segments SegmentsFn) (Operator, *TimingStats, error) {
-	if rel == nil {
-		return nil, nil, fmt.Errorf("buildRelAnalyzed: nil rel")
+func wrapTimings(op Operator) (Operator, *TimingStats) {
+	st := &TimingStats{Label: operatorLabel(op)}
+	wrapChild := func(child Operator) Operator {
+		wrapped, cs := wrapTimings(child)
+		st.Children = append(st.Children, cs)
+		return wrapped
 	}
-	st := &TimingStats{Label: relTimingLabel(rel)}
-	switch rel.Op {
-	case sql.RelScan:
-		op, err := buildScan(rel, segments, nil, nil)
-		if err != nil {
-			return nil, nil, err
-		}
-		return &timingOperator{inner: op, stats: st}, st, nil
-	case sql.RelProject:
-		if err := checkProjectionOps(rel.Projection); err != nil {
-			return nil, nil, err
-		}
-		source, child, err := buildRelAnalyzed(rel.Inputs[0], segments)
-		if err != nil {
-			return nil, nil, err
-		}
-		st.Children = append(st.Children, child)
-		return &timingOperator{inner: &ProjectOp{Source: source, Outputs: rel.Projection}, stats: st}, st, nil
-	case sql.RelLimit:
-		source, child, err := buildRelAnalyzed(rel.Inputs[0], segments)
-		if err != nil {
-			return nil, nil, err
-		}
-		st.Children = append(st.Children, child)
-		n := rel.Limit
-		if n < 0 {
-			n = -1
-		}
-		return &timingOperator{inner: &LimitOp{Source: source, N: n, Offset: rel.Offset}, stats: st}, st, nil
-	case sql.RelAggregate:
-		for _, expr := range rel.GroupBy {
-			if err := checkExecExpr(expr); err != nil {
-				return nil, nil, err
-			}
-		}
-		if rel.Having != nil {
-			if err := checkExecExpr(*rel.Having); err != nil {
-				return nil, nil, err
-			}
-		}
-		source, child, err := buildRelAnalyzed(rel.Inputs[0], segments)
-		if err != nil {
-			return nil, nil, err
-		}
-		st.Children = append(st.Children, child)
-		return &timingOperator{inner: &AggregateOp{
-			Source:     source,
-			GroupBy:    rel.GroupBy,
-			Aggregates: rel.Aggregates,
-			Hidden:     rel.Hidden,
-			Having:     rel.Having,
-		}, stats: st}, st, nil
-	case sql.RelFilter:
-		if err := checkExecExpr(rel.Predicate); err != nil {
-			return nil, nil, err
-		}
-		source, child, err := buildRelAnalyzed(rel.Inputs[0], segments)
-		if err != nil {
-			return nil, nil, err
-		}
-		st.Children = append(st.Children, child)
-		return &timingOperator{inner: &FilterOp{Source: source, Predicate: rel.Predicate}, stats: st}, st, nil
-	case sql.RelSort:
-		for _, key := range rel.SortKeys {
-			if err := checkExecExpr(key.Expr); err != nil {
-				return nil, nil, err
-			}
-		}
-		source, err := buildSortInput(rel, segments, nil)
-		if err != nil {
-			return nil, nil, err
-		}
-		return &timingOperator{inner: &SortOp{Source: source, Keys: rel.SortKeys, K: rel.K, Offset: rel.Offset}, stats: st}, st, nil
-	case sql.RelJoin:
-		op, err := buildRel(rel, segments)
-		if err != nil {
-			return nil, nil, err
-		}
-		return &timingOperator{inner: op, stats: st}, st, nil
-	case sql.RelUnion:
-		if len(rel.Inputs) != 2 {
-			return nil, nil, fmt.Errorf("buildRelAnalyzed: RelUnion needs two inputs")
-		}
-		left, lc, err := buildRelAnalyzed(rel.Inputs[0], segments)
-		if err != nil {
-			return nil, nil, err
-		}
-		right, rc, err := buildRelAnalyzed(rel.Inputs[1], segments)
-		if err != nil {
-			_ = left.Close()
-			return nil, nil, err
-		}
-		st.Children = append(st.Children, lc, rc)
-		return &timingOperator{inner: &UnionOp{Left: left, Right: right}, stats: st}, st, nil
+	switch o := op.(type) {
+	case *ProjectOp:
+		o.Source = wrapChild(o.Source)
+	case *LimitOp:
+		o.Source = wrapChild(o.Source)
+	case *AggregateOp:
+		o.Source = wrapChild(o.Source)
+	case *FilterOp:
+		o.Source = wrapChild(o.Source)
+	case *SortOp:
+		o.Source = wrapChild(o.Source)
+	case *WindowOp:
+		o.Source = wrapChild(o.Source)
+	case *UnionOp:
+		o.Left = wrapChild(o.Left)
+		o.Right = wrapChild(o.Right)
+	case *HashJoinOp:
+		o.Left = wrapChild(o.Left)
+		o.Right = wrapChild(o.Right)
 	}
-	return nil, nil, fmt.Errorf("buildRelAnalyzed: unsupported rel op %v", rel.Op)
+	return &timingOperator{inner: op, stats: st}, st
 }
 
-func relTimingLabel(rel *sql.Rel) string {
-	switch rel.Op {
-	case sql.RelScan:
-		return "Scan " + rel.Table.Name
-	case sql.RelProject:
+func operatorLabel(op Operator) string {
+	switch o := op.(type) {
+	case *ScanOp:
+		return "Scan"
+	case *TopKScanOp:
+		return "TopKScan"
+	case *ProjectOp:
 		return "Project"
-	case sql.RelLimit:
+	case *LimitOp:
 		return "Limit"
-	case sql.RelAggregate:
+	case *AggregateOp:
 		return "Aggregate"
-	case sql.RelFilter:
+	case *FilterOp:
 		return "Filter"
-	case sql.RelSort:
+	case *SortOp:
 		return "Sort"
-	case sql.RelJoin:
-		return rel.JoinKind.String() + "Join"
-	case sql.RelUnion:
+	case *WindowOp:
+		return "Window"
+	case *UnionOp:
 		return "Union"
+	case *HashJoinOp:
+		return o.Kind.String() + "Join"
 	}
-	return fmt.Sprintf("Rel(%v)", rel.Op)
+	return fmt.Sprintf("%T", op)
 }

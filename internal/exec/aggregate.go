@@ -148,6 +148,8 @@ func (a *AggregateOp) build() error {
 type aggBuild struct {
 	groupBy    []sql.BoundExpr
 	specs      []sql.AggSpec
+	argSpecs   []int
+	argKinds   []vector.VecKind
 	specCols   []aggCol
 	specKind   []vector.VecKind
 	groupCols  []int
@@ -168,10 +170,49 @@ func newAggBuild(groupBy []sql.BoundExpr, specs []sql.AggSpec) *aggBuild {
 		anyIdx:  map[any]int{},
 		compIdx: map[string]int{},
 	}
+	for i := range specs {
+		if specs[i].ArgExpr != nil {
+			vk, err := vector.VecKindOf(specs[i].ArgExpr.Type)
+			if err != nil {
+				vk = vector.VecInvalid
+			}
+			st.argSpecs = append(st.argSpecs, i)
+			st.argKinds = append(st.argKinds, vk)
+		}
+	}
 	if len(groupBy) == 0 {
 		st.groups = append(st.groups, aggGroup{aggs: make([]aggAccum, len(specs))})
 	}
 	return st
+}
+
+// extendArgs appends computed argument columns to a copied column set so the rest of
+// the build consumes plain named columns and the source batch stays untouched for recycling.
+func (st *aggBuild) extendArgs(batch vector.Batch) (vector.Batch, error) {
+	if len(st.argSpecs) == 0 {
+		return batch, nil
+	}
+	cols := append(make([]vector.Column, 0, len(batch.Columns)+len(st.argSpecs)), batch.Columns...)
+	for k, si := range st.argSpecs {
+		spec := &st.specs[si]
+		vk := st.argKinds[k]
+		if vk == vector.VecInvalid {
+			return vector.Batch{}, fmt.Errorf("aggregate: argument %q has no physical kind", spec.ArgName)
+		}
+		v, valid, ok, err := vecEvalArith(batch, *spec.ArgExpr, batch.Sel, batch.Len, vk)
+		if err != nil {
+			return vector.Batch{}, err
+		}
+		if !ok {
+			v, valid, err = materializeVec(newEvalCtx(batch), *spec.ArgExpr, batch.Sel, batch.Len, vk)
+			if err != nil {
+				return vector.Batch{}, err
+			}
+		}
+		v.Valid = valid
+		cols = append(cols, vector.Column{Name: spec.ArgName, Type: spec.ArgExpr.Type, V: v})
+	}
+	return vector.Batch{Len: batch.Len, Columns: cols, Sel: batch.Sel}, nil
 }
 
 // Group keys are always copied into the lookup maps, so consumed batches can go
@@ -196,6 +237,10 @@ func (st *aggBuild) drain(source Operator) error {
 }
 
 func (st *aggBuild) consume(batch vector.Batch) error {
+	batch, err := st.extendArgs(batch)
+	if err != nil {
+		return err
+	}
 	if st.specCols == nil {
 		st.groupCols = make([]int, len(st.groupBy))
 		st.groupKinds = make([]vector.VecKind, len(st.groupBy))
