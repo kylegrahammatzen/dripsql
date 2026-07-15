@@ -24,6 +24,7 @@ go run ./cmd/bench -query <name> -rows <N> -runs <R> -mode hot -json
 | `-mode` | `hot` or `cold-soft` (close and reopen DB between runs) |
 | `-json` | Emit results as JSON for downstream tooling |
 | `-reuse` | Skip reseeding when `bench-db.manifest.json` matches dataset, rows, and segment rows |
+| `-columnar` | Drain results through `QueryBatches` instead of `Query` to measure the columnar path |
 
 Seeding dominates wall time at 1M+ rows, so pass `-reuse` while iterating and drop it only when the write path itself changed.
 
@@ -41,16 +42,21 @@ Use fresh JSON or JSONL artifacts because `compare` reports median deltas agains
 | Query | Rows | Runs | Median | io | decode | exec |
 | --- | --- | --- | --- | --- | --- | --- |
 | `count` | 100k | 200 | <1 us | <1 us | <1 us | <1 us |
-| `id_lookup` | 100k | 200 | <1 us | 18.9 us | 70.6 us | <1 us |
-| `category_groupby` | 100k | 100 | 548 us | 115 us | 701 us | <1 us |
-| `category_groupby` | 10M | 30 | 20.77 ms | 22.81 ms | 114.95 ms | <1 us |
-| `top_age` | 100k | 200 | 1.04 ms | 290 us | 388 us | 357 us |
-| `top_age` | 1M | 50 | 10.58 ms | 2.42 ms | 3.58 ms | 4.58 ms |
-| `top_age` | 10M | 15 | 76.13 ms | 14.95 ms | 26.90 ms | 34.29 ms |
-| `cat_eq` | 1M | 30 | 21.64 ms | 2.08 ms | 2.08 ms | 17.48 ms |
-| `tpch_q1` | 1M | 25 | 16.16 ms | 10.69 ms | 114.96 ms | <1 us |
+| `id_lookup` | 100k | 200 | <1 us | 21 us | 65 us | <1 us |
+| `category_groupby` | 100k | 100 | <1 us | <1 us | <1 us | <1 us |
+| `category_groupby` | 10M | 30 | <1 us | <1 us | <1 us | <1 us |
+| `top_age` | 100k | 200 | 1.00 ms | 498 us | 283 us | 218 us |
+| `top_age` | 1M | 50 | 7.02 ms | 3.71 ms | 2.52 ms | 786 us |
+| `top_age` | 10M | 15 | 72.30 ms | 35.84 ms | 26.72 ms | 9.73 ms |
+| `cat_eq` | 1M | 30 | 12.53 ms | 569 us | 884 us | 11.07 ms |
+| `cat_eq` `-columnar` | 1M | 30 | 2.80 ms | 67 us | 610 us | 2.12 ms |
+| `tpch_q1` | 1M | 25 | 19.45 ms | 5.96 ms | 53.04 ms | <1 us |
+| `tpch_q1_expr` | 1M | 25 | 16.93 ms | 2.96 ms | 32.39 ms | <1 us |
 
 - `count` and `id_lookup` short-circuit via the `.sm` numsum and Binary Fuse 8 sidecars.
+- `category_groupby` answers grouped count plus sum entirely from the dict-histogram and group-sums sidecars, so its rows read below the measurement floor by design. Any `WHERE`, a deletion vector, or a nullable sum argument falls back to the scan path.
+- `tpch_q1_expr` computes `sum(l_extprice * (1.0 - l_discount))` in SQL and runs level with the precomputed-column `tpch_q1` since expression aggregates evaluate inside the parallel aggregate build.
+- `cat_eq` `-columnar` drains the same 200k result rows through `QueryBatches`, avoiding per-cell boxing.
 - `count(*)` stays on the metadata-only path even after `DELETE` by popcounting the segment's deletion vector instead of scanning pages.
 - `category_count` reads from the dict-histogram sidecar when no `WHERE` is present.
 - TPC-H Q1 and Q6 run against a synthetic `lineitem` with dates as int64 days since 1992-01-01.
