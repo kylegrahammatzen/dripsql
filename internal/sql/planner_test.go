@@ -407,9 +407,39 @@ func TestBindSelect_RejectsMixedSelectWithoutGroupBy(t *testing.T) {
 	}
 }
 
-func TestBindSelect_RejectsAggregateOverExpression(t *testing.T) {
-	if _, err := bindSelect(t, "SELECT sum(price * qty) FROM sales"); err == nil {
-		t.Fatal("aggregate over expression must error (column-only for now)")
+// Expression aggregate arguments keep the Aggregate over Scan shape so the parallel
+// drain and dict group wiring stay active, AggregateOp evaluates ArgExpr itself.
+func TestBindSelect_AggregateOverExpression(t *testing.T) {
+	plan, err := bindSelect(t, "SELECT sum(price * qty) AS rev FROM sales")
+	if err != nil {
+		t.Fatalf("BindSelect: %v", err)
+	}
+	agg := queryRoot(t, plan).Inputs[0]
+	if agg.Op != RelAggregate || len(agg.Aggregates) != 1 {
+		t.Fatalf("aggregate = %+v", agg)
+	}
+	spec := agg.Aggregates[0]
+	if spec.Func != AggregateSum || spec.ArgExpr == nil || spec.ArgName == "" {
+		t.Fatalf("spec = %+v", spec)
+	}
+	if agg.Inputs[0].Op != RelScan {
+		t.Fatalf("aggregate input = %v, want RelScan", agg.Inputs[0].Op)
+	}
+	ids := agg.Inputs[0].Columns
+	if len(ids) != 2 {
+		t.Fatalf("scan should decode exactly price and qty, got %v", ids)
+	}
+}
+
+func TestBindSelect_RejectsSubqueryInAggregateExpression(t *testing.T) {
+	if _, err := bindSelect(t, "SELECT sum(price + (SELECT max(qty) FROM sales)) FROM sales"); err == nil {
+		t.Fatal("subquery inside aggregate expression must error")
+	}
+}
+
+func TestBindSelect_RejectsNonNumericAggregateExpression(t *testing.T) {
+	if _, err := bindSelect(t, "SELECT sum(category || 'x') FROM sales"); err == nil {
+		t.Fatal("sum over text expression must error")
 	}
 }
 

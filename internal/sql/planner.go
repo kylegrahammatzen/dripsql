@@ -638,6 +638,18 @@ func planAggregateTail(stmt *SelectStmt, src *Rel, sc *scope, groupExprs []Bound
 	if src.Op == RelScan && !sc.joined {
 		src.Columns = aggregateScanColumnIDs(group, aggregates, hidden, src.Where)
 	}
+	// AggregateOp evaluates computed arguments itself, the names only exist for column resolution.
+	n := 0
+	for i := range aggregates {
+		if aggregates[i].ArgExpr == nil {
+			continue
+		}
+		if sc.joined {
+			return nil, fmt.Errorf("aggregate expressions are not supported in joined SELECT")
+		}
+		aggregates[i].ArgName = fmt.Sprintf("__agg_arg_%d", n)
+		n++
+	}
 	aggRel := &Rel{Op: RelAggregate, Outputs: outputs, Inputs: []*Rel{src}, GroupBy: group, Aggregates: aggregates, Hidden: hidden, Having: having}
 	return applyOrderLimit(aggRel, stmt, outputs, sc.columns)
 }
@@ -1485,6 +1497,10 @@ func aggregateScanColumnIDs(group []BoundExpr, aggregates, hidden []AggSpec, whe
 		s.walk(g)
 	}
 	for _, spec := range aggregates {
+		if spec.ArgExpr != nil {
+			s.walk(*spec.ArgExpr)
+			continue
+		}
 		if !spec.Star {
 			s.add(spec.ArgColumn)
 		}
@@ -1961,7 +1977,21 @@ func bindSelectAggregate(sel SelectExpr, columns map[string]BoundColumnDef) (Agg
 	}
 	colRef, ok := call.Args[0].(*ColumnRef)
 	if !ok {
-		return AggSpec{}, true, fmt.Errorf("aggregate argument must be a column")
+		bound, err := bindExpr(columns, call.Args[0])
+		if err != nil {
+			return AggSpec{}, true, err
+		}
+		if fn != AggregateCount {
+			switch bound.Type.Kind {
+			case schema.KindInt32, schema.KindInt64, schema.KindFloat32, schema.KindFloat64:
+			default:
+				return AggSpec{}, true, fmt.Errorf("%s expression is %s, want int32/int64/float32/float64", strings.ToUpper(defaultAggregateName(fn)), bound.Type)
+			}
+		}
+		if exprContainsSubquery(bound) {
+			return AggSpec{}, true, fmt.Errorf("aggregate expressions cannot contain subqueries")
+		}
+		return AggSpec{Func: fn, ArgExpr: &bound, Alias: sel.Alias}, true, nil
 	}
 	key := columnRefKey(colRef)
 	def, ok := findColumn(columns, key)
@@ -1974,6 +2004,20 @@ func bindSelectAggregate(sel SelectExpr, columns map[string]BoundColumnDef) (Agg
 		return AggSpec{Func: fn, Star: true, Alias: sel.Alias}, true, nil
 	}
 	return AggSpec{Func: fn, ArgColumn: def.ID, ArgName: def.Name, Alias: sel.Alias}, true, nil
+}
+
+// exprContainsSubquery guards aggregate arguments because AggregateOp has no subquery eval plumbing.
+func exprContainsSubquery(e BoundExpr) bool {
+	switch e.Op {
+	case ExprSubquery, ExprInSubquery, ExprExists:
+		return true
+	}
+	for _, a := range e.Args {
+		if exprContainsSubquery(a) {
+			return true
+		}
+	}
+	return false
 }
 
 func columnRefKey(c *ColumnRef) string {

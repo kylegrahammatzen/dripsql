@@ -291,8 +291,10 @@ type AggSpec struct {
 	Func      AggregateFunc
 	ArgColumn ColumnID
 	ArgName   string
-	Star      bool
-	Alias     string
+	// ArgExpr carries a computed argument, the planner projects it as a hidden column and fills ArgName.
+	ArgExpr *BoundExpr
+	Star    bool
+	Alias   string
 }
 
 type SortKey struct {
