@@ -100,23 +100,60 @@ func pageMinMaxInt(c *SegmentColumn, pageIdx int) (min, max int64, ok bool) {
 	return 0, 0, false
 }
 
-type boundEqInt64 struct {
+// rangeSkips reports whether no value in [min, max] can satisfy op against value.
+func rangeSkips[T int64 | float64](min, max, value T, op vector.FilterOp) bool {
+	switch op {
+	case vector.FilterEqual:
+		return value < min || value > max
+	case vector.FilterLess:
+		return min >= value
+	case vector.FilterLessEqual:
+		return min > value
+	case vector.FilterGreater:
+		return max <= value
+	case vector.FilterGreaterEqual:
+		return max < value
+	}
+	return false
+}
+
+// rangeAlways reports whether every value in [min, max] satisfies op against value.
+func rangeAlways[T int64 | float64](min, max, value T, op vector.FilterOp) bool {
+	switch op {
+	case vector.FilterEqual:
+		return min == value && max == value
+	case vector.FilterLess:
+		return max < value
+	case vector.FilterLessEqual:
+		return max <= value
+	case vector.FilterGreater:
+		return min > value
+	case vector.FilterGreaterEqual:
+		return min >= value
+	}
+	return false
+}
+
+// boundCmpInt64 evaluates one ordered comparison against an int64 family column.
+// Op dispatch runs per page and per segment, never per row, so one type replaces the five per-op variants.
+type boundCmpInt64 struct {
 	column string
 	colID  uint64
 	value  int64
+	op     vector.FilterOp
 }
 
-func (b boundEqInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
+func (b boundCmpInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	ensureMaskSize(sel, batch.Len)
 	col, ok := batch.ColumnByName(b.column)
 	if !ok {
 		return
 	}
 	sel.FillAll()
-	vector.FilterOrdered(col.V.I64(), col.V.Valid, b.value, vector.FilterEqual, *sel, sel)
+	vector.FilterOrdered(col.V.I64(), col.V.Valid, b.value, b.op, *sel, sel)
 }
 
-func (b boundEqInt64) PruneSegment(seg *Segment) bool {
+func (b boundCmpInt64) PruneSegment(seg *Segment) bool {
 	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
@@ -128,8 +165,11 @@ func (b boundEqInt64) PruneSegment(seg *Segment) bool {
 	if !stats.HasNonNull {
 		return false
 	}
-	if b.value < stats.Min || b.value > stats.Max {
+	if rangeSkips(stats.Min, stats.Max, b.value, b.op) {
 		return true
+	}
+	if b.op != vector.FilterEqual {
+		return false
 	}
 	filters, err := seg.IntFilterSet()
 	if err != nil {
@@ -141,7 +181,7 @@ func (b boundEqInt64) PruneSegment(seg *Segment) bool {
 	return false
 }
 
-func (b boundEqInt64) PrunePage(seg *Segment, pageIdx int) bool {
+func (b boundCmpInt64) PrunePage(seg *Segment, pageIdx int) bool {
 	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
@@ -150,198 +190,99 @@ func (b boundEqInt64) PrunePage(seg *Segment, pageIdx int) bool {
 	if !ok {
 		return false
 	}
-	return b.value < min || b.value > max
+	return rangeSkips(min, max, b.value, b.op)
 }
 
-type boundLtInt64 struct {
+func narrowStatsFromCol(c *SegmentColumn) (NumericStats[int32], bool) {
+	if c.Rows == 0 {
+		return NumericStats[int32]{}, false
+	}
+	return UnmarshalNumericStats[int32](c.Stats[:], true), true
+}
+
+// boundCmpNarrowInt covers int16 int32 and date columns whose stats live in the int32 wire shape.
+// The binder guarantees value fits the column kind so the Eval casts cannot wrap.
+type boundCmpNarrowInt struct {
 	column string
 	colID  uint64
 	value  int64
+	op     vector.FilterOp
 }
 
-func (b boundLtInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
+func (b boundCmpNarrowInt) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	ensureMaskSize(sel, batch.Len)
 	col, ok := batch.ColumnByName(b.column)
 	if !ok {
 		return
 	}
 	sel.FillAll()
-	vector.FilterOrdered(col.V.I64(), col.V.Valid, b.value, vector.FilterLess, *sel, sel)
+	switch col.V.Kind {
+	case vector.VecInt16:
+		vector.FilterOrdered(col.V.I16(), col.V.Valid, int16(b.value), b.op, *sel, sel)
+	case vector.VecInt32, vector.VecDate:
+		vector.FilterOrdered(col.V.I32(), col.V.Valid, int32(b.value), b.op, *sel, sel)
+	}
 }
 
-func (b boundLtInt64) PruneSegment(seg *Segment) bool {
+func (b boundCmpNarrowInt) PruneSegment(seg *Segment) bool {
 	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
-	stats, present := numericStatsFromCol(c)
+	stats, present := narrowStatsFromCol(c)
 	if !present {
 		return true
 	}
 	if !stats.HasNonNull {
 		return false
 	}
-	return stats.Min >= b.value
-}
-
-func (b boundLtInt64) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	min, _, ok := pageMinMaxInt(c, pageIdx)
-	if !ok {
-		return false
-	}
-	return min >= b.value
-}
-
-type boundGtInt64 struct {
-	column string
-	colID  uint64
-	value  int64
-}
-
-func (b boundGtInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
-	ensureMaskSize(sel, batch.Len)
-	col, ok := batch.ColumnByName(b.column)
-	if !ok {
-		return
-	}
-	sel.FillAll()
-	vector.FilterOrdered(col.V.I64(), col.V.Valid, b.value, vector.FilterGreater, *sel, sel)
-}
-
-func (b boundGtInt64) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	stats, present := numericStatsFromCol(c)
-	if !present {
+	if rangeSkips(int64(stats.Min), int64(stats.Max), b.value, b.op) {
 		return true
 	}
-	if !stats.HasNonNull {
+	if b.op != vector.FilterEqual {
 		return false
 	}
-	return stats.Max <= b.value
-}
-
-func (b boundGtInt64) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
+	filters, err := seg.IntFilterSet()
+	if err != nil {
 		return false
 	}
-	_, max, ok := pageMinMaxInt(c, pageIdx)
-	if !ok {
-		return false
-	}
-	return max <= b.value
-}
-
-type boundLeInt64 struct {
-	column string
-	colID  uint64
-	value  int64
-}
-
-func (b boundLeInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
-	ensureMaskSize(sel, batch.Len)
-	col, ok := batch.ColumnByName(b.column)
-	if !ok {
-		return
-	}
-	sel.FillAll()
-	vector.FilterOrdered(col.V.I64(), col.V.Valid, b.value, vector.FilterLessEqual, *sel, sel)
-}
-
-func (b boundLeInt64) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	stats, present := numericStatsFromCol(c)
-	if !present {
+	if f, ok := filters[schema.NormalizeName(c.Name)]; ok && !f.Contains(b.value) {
 		return true
 	}
-	if !stats.HasNonNull {
-		return false
-	}
-	return stats.Min > b.value
+	return false
 }
 
-func (b boundLeInt64) PrunePage(seg *Segment, pageIdx int) bool {
+func (b boundCmpNarrowInt) PrunePage(seg *Segment, pageIdx int) bool {
 	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
 	}
-	min, _, ok := pageMinMaxInt(c, pageIdx)
+	min, max, ok := pageMinMaxInt(c, pageIdx)
 	if !ok {
 		return false
 	}
-	return min > b.value
+	return rangeSkips(min, max, b.value, b.op)
 }
 
-type boundGeInt64 struct {
-	column string
-	colID  uint64
-	value  int64
-}
-
-func (b boundGeInt64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
-	ensureMaskSize(sel, batch.Len)
-	col, ok := batch.ColumnByName(b.column)
-	if !ok {
-		return
-	}
-	sel.FillAll()
-	vector.FilterOrdered(col.V.I64(), col.V.Valid, b.value, vector.FilterGreaterEqual, *sel, sel)
-}
-
-func (b boundGeInt64) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	stats, present := numericStatsFromCol(c)
-	if !present {
-		return true
-	}
-	if !stats.HasNonNull {
-		return false
-	}
-	return stats.Max < b.value
-}
-
-func (b boundGeInt64) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	_, max, ok := pageMinMaxInt(c, pageIdx)
-	if !ok {
-		return false
-	}
-	return max < b.value
-}
-
-type boundEqFloat64 struct {
+// boundCmpFloat64 mirrors boundCmpInt64 over float64 stats without an encoded path.
+type boundCmpFloat64 struct {
 	column string
 	colID  uint64
 	value  float64
+	op     vector.FilterOp
 }
 
-func (b boundEqFloat64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
+func (b boundCmpFloat64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	ensureMaskSize(sel, batch.Len)
 	col, ok := batch.ColumnByName(b.column)
 	if !ok {
 		return
 	}
 	sel.FillAll()
-	vector.FilterOrdered(col.V.F64(), col.V.Valid, b.value, vector.FilterEqual, *sel, sel)
+	vector.FilterOrdered(col.V.F64(), col.V.Valid, b.value, b.op, *sel, sel)
 }
 
-func (b boundEqFloat64) PruneSegment(seg *Segment) bool {
+func (b boundCmpFloat64) PruneSegment(seg *Segment) bool {
 	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
@@ -353,13 +294,10 @@ func (b boundEqFloat64) PruneSegment(seg *Segment) bool {
 	if !stats.HasFinite {
 		return false
 	}
-	if b.value < stats.Min || b.value > stats.Max {
-		return true
-	}
-	return false
+	return rangeSkips(stats.Min, stats.Max, b.value, b.op)
 }
 
-func (b boundEqFloat64) PrunePage(seg *Segment, pageIdx int) bool {
+func (b boundCmpFloat64) PrunePage(seg *Segment, pageIdx int) bool {
 	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
 	if !ok {
 		return false
@@ -368,180 +306,9 @@ func (b boundEqFloat64) PrunePage(seg *Segment, pageIdx int) bool {
 	if !ok {
 		return false
 	}
-	return b.value < min || b.value > max
+	return rangeSkips(min, max, b.value, b.op)
 }
 
-type boundLtFloat64 struct {
-	column string
-	colID  uint64
-	value  float64
-}
-
-func (b boundLtFloat64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
-	ensureMaskSize(sel, batch.Len)
-	col, ok := batch.ColumnByName(b.column)
-	if !ok {
-		return
-	}
-	sel.FillAll()
-	vector.FilterOrdered(col.V.F64(), col.V.Valid, b.value, vector.FilterLess, *sel, sel)
-}
-
-func (b boundLtFloat64) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	stats, present := floatStatsFromCol(c)
-	if !present {
-		return true
-	}
-	if !stats.HasFinite {
-		return false
-	}
-	return stats.Min >= b.value
-}
-
-func (b boundLtFloat64) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	min, _, ok := pageMinMaxFloat(c, pageIdx)
-	if !ok {
-		return false
-	}
-	return min >= b.value
-}
-
-type boundGtFloat64 struct {
-	column string
-	colID  uint64
-	value  float64
-}
-
-func (b boundGtFloat64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
-	ensureMaskSize(sel, batch.Len)
-	col, ok := batch.ColumnByName(b.column)
-	if !ok {
-		return
-	}
-	sel.FillAll()
-	vector.FilterOrdered(col.V.F64(), col.V.Valid, b.value, vector.FilterGreater, *sel, sel)
-}
-
-func (b boundGtFloat64) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	stats, present := floatStatsFromCol(c)
-	if !present {
-		return true
-	}
-	if !stats.HasFinite {
-		return false
-	}
-	return stats.Max <= b.value
-}
-
-func (b boundGtFloat64) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	_, max, ok := pageMinMaxFloat(c, pageIdx)
-	if !ok {
-		return false
-	}
-	return max <= b.value
-}
-
-type boundLeFloat64 struct {
-	column string
-	colID  uint64
-	value  float64
-}
-
-func (b boundLeFloat64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
-	ensureMaskSize(sel, batch.Len)
-	col, ok := batch.ColumnByName(b.column)
-	if !ok {
-		return
-	}
-	sel.FillAll()
-	vector.FilterOrdered(col.V.F64(), col.V.Valid, b.value, vector.FilterLessEqual, *sel, sel)
-}
-
-func (b boundLeFloat64) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	stats, present := floatStatsFromCol(c)
-	if !present {
-		return true
-	}
-	if !stats.HasFinite {
-		return false
-	}
-	return stats.Min > b.value
-}
-
-func (b boundLeFloat64) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	min, _, ok := pageMinMaxFloat(c, pageIdx)
-	if !ok {
-		return false
-	}
-	return min > b.value
-}
-
-type boundGeFloat64 struct {
-	column string
-	colID  uint64
-	value  float64
-}
-
-func (b boundGeFloat64) Eval(batch vector.Batch, sel *vector.SelectionMask) {
-	ensureMaskSize(sel, batch.Len)
-	col, ok := batch.ColumnByName(b.column)
-	if !ok {
-		return
-	}
-	sel.FillAll()
-	vector.FilterOrdered(col.V.F64(), col.V.Valid, b.value, vector.FilterGreaterEqual, *sel, sel)
-}
-
-func (b boundGeFloat64) PruneSegment(seg *Segment) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	stats, present := floatStatsFromCol(c)
-	if !present {
-		return true
-	}
-	if !stats.HasFinite {
-		return false
-	}
-	return stats.Max < b.value
-}
-
-func (b boundGeFloat64) PrunePage(seg *Segment, pageIdx int) bool {
-	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
-		return false
-	}
-	_, max, ok := pageMinMaxFloat(c, pageIdx)
-	if !ok {
-		return false
-	}
-	return max < b.value
-}
 
 type boundEqBytes struct {
 	column string
@@ -766,11 +533,21 @@ func (b boundOr) PrunePage(seg *Segment, pageIdx int) bool {
 	return true
 }
 
-type boundNot struct{ child BoundPredicate }
+type boundNot struct {
+	child BoundPredicate
+	cols  []string
+}
 
+// Eval re-masks validity after the complement because SQL NOT of an unknown comparison stays unknown.
+// Rows with a NULL in any referenced column must stay excluded, so the flip cannot resurrect them.
 func (b boundNot) Eval(batch vector.Batch, sel *vector.SelectionMask) {
 	b.child.Eval(batch, sel)
 	sel.NotCount()
+	for _, name := range b.cols {
+		if col, ok := batch.ColumnByName(name); ok {
+			sel.AndValidity(col.V.Valid)
+		}
+	}
 }
 
 func (b boundNot) PruneSegment(seg *Segment) bool {
@@ -792,7 +569,7 @@ func childAlwaysMatchesSegment(child BoundPredicate, seg *Segment) bool {
 			return false
 		}
 		return col.NullCount == col.Rows
-	case boundEqInt64:
+	case boundCmpInt64:
 		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || col.NullCount != 0 {
 			return false
@@ -801,27 +578,17 @@ func childAlwaysMatchesSegment(child BoundPredicate, seg *Segment) bool {
 		if !present || !stats.HasNonNull {
 			return false
 		}
-		return stats.Min == c.value && stats.Max == c.value
-	case boundLtInt64:
+		return rangeAlways(stats.Min, stats.Max, c.value, c.op)
+	case boundCmpNarrowInt:
 		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || col.NullCount != 0 {
 			return false
 		}
-		stats, present := numericStatsFromCol(col)
+		stats, present := narrowStatsFromCol(col)
 		if !present || !stats.HasNonNull {
 			return false
 		}
-		return stats.Max < c.value
-	case boundGtInt64:
-		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
-		if !ok || col.NullCount != 0 {
-			return false
-		}
-		stats, present := numericStatsFromCol(col)
-		if !present || !stats.HasNonNull {
-			return false
-		}
-		return stats.Min > c.value
+		return rangeAlways(int64(stats.Min), int64(stats.Max), c.value, c.op)
 	}
 	return false
 }
@@ -860,7 +627,7 @@ func childAlwaysMatchesPage(child BoundPredicate, seg *Segment, pageIdx int) boo
 		}
 		p := col.Pages[pageIdx]
 		return p.Rows > 0 && p.Flags&PageFlagAllNull != 0
-	case boundEqInt64:
+	case boundCmpInt64:
 		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || pageIdx < 0 || pageIdx >= len(col.Pages) {
 			return false
@@ -872,8 +639,8 @@ func childAlwaysMatchesPage(child BoundPredicate, seg *Segment, pageIdx int) boo
 		if !ok {
 			return false
 		}
-		return min == c.value && max == c.value
-	case boundLtInt64:
+		return rangeAlways(min, max, c.value, c.op)
+	case boundCmpNarrowInt:
 		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
 		if !ok || pageIdx < 0 || pageIdx >= len(col.Pages) {
 			return false
@@ -881,24 +648,11 @@ func childAlwaysMatchesPage(child BoundPredicate, seg *Segment, pageIdx int) boo
 		if col.Pages[pageIdx].NullCount != 0 {
 			return false
 		}
-		_, max, ok := pageMinMaxInt(col, pageIdx)
+		min, max, ok := pageMinMaxInt(col, pageIdx)
 		if !ok {
 			return false
 		}
-		return max < c.value
-	case boundGtInt64:
-		col, ok := findSegmentColumnByID(seg, c.column, c.colID)
-		if !ok || pageIdx < 0 || pageIdx >= len(col.Pages) {
-			return false
-		}
-		if col.Pages[pageIdx].NullCount != 0 {
-			return false
-		}
-		min, _, ok := pageMinMaxInt(col, pageIdx)
-		if !ok {
-			return false
-		}
-		return min > c.value
+		return rangeAlways(min, max, c.value, c.op)
 	}
 	return false
 }
@@ -1075,7 +829,17 @@ func narrowDictByMask(indices []byte, accept [4]uint64, valid vector.Validity, s
 	}
 }
 
-func (b boundEqInt64) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
+// EvalEncoded covers Eq via FOR and Delta plus Lt and Gt via FOR ranges. Other ops report unhandled so the caller decodes.
+func (b boundCmpInt64) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
+	switch b.op {
+	case vector.FilterLess:
+		return evalEncodedFORRange(seg, pageIdx, sel, scratch, b.column, b.value, forRangeLT)
+	case vector.FilterGreater:
+		return evalEncodedFORRange(seg, pageIdx, sel, scratch, b.column, b.value, forRangeGT)
+	case vector.FilterEqual:
+	default:
+		return false, scratch, nil
+	}
 	colIdx, ok := findSegmentColumnIdx(seg.Segment, b.column)
 	if !ok {
 		return false, scratch, nil
@@ -1185,14 +949,6 @@ func narrowFOREq(residuals []uint64, target uint64, valid vector.Validity, sel *
 	if valid != nil {
 		applyValidity(valid, sel)
 	}
-}
-
-func (b boundLtInt64) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
-	return evalEncodedFORRange(seg, pageIdx, sel, scratch, b.column, b.value, forRangeLT)
-}
-
-func (b boundGtInt64) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
-	return evalEncodedFORRange(seg, pageIdx, sel, scratch, b.column, b.value, forRangeGT)
 }
 
 type forRangeOp uint8

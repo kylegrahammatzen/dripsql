@@ -4,6 +4,7 @@ package storage
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
@@ -261,53 +262,55 @@ func (c CompiledPred) ApplyEncoded(src pageSource, pageIdx int, sel *vector.Sele
 	return c.ee.EvalEncoded(src, pageIdx, sel, scratch)
 }
 
+// cmpFilterOp maps ordered comparison PredOps to the vector kernel op, OpInvalid falls out as zero.
+func cmpFilterOp(op PredOp) vector.FilterOp {
+	switch op {
+	case OpEq:
+		return vector.FilterEqual
+	case OpLt:
+		return vector.FilterLess
+	case OpLe:
+		return vector.FilterLessEqual
+	case OpGt:
+		return vector.FilterGreater
+	case OpGe:
+		return vector.FilterGreaterEqual
+	}
+	return 0
+}
+
 // toBound maps a Pred to the equivalent bound predicate so eval and prune reuse the proven legacy code.
 func (p Pred) toBound() (BoundPredicate, error) {
 	switch p.Op {
-	case OpEq:
+	case OpEq, OpLt, OpLe, OpGt, OpGe:
 		switch p.Kind {
 		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-			return boundEqInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
+			return boundCmpInt64{column: p.Col, colID: p.ColID, value: p.I64, op: cmpFilterOp(p.Op)}, nil
+		case vector.VecInt16:
+			if p.I64 < math.MinInt16 || p.I64 > math.MaxInt16 {
+				return nil, fmt.Errorf("toBound: literal %d outside int16 range", p.I64)
+			}
+			return boundCmpNarrowInt{column: p.Col, colID: p.ColID, value: p.I64, op: cmpFilterOp(p.Op)}, nil
+		case vector.VecInt32, vector.VecDate:
+			if p.I64 < math.MinInt32 || p.I64 > math.MaxInt32 {
+				return nil, fmt.Errorf("toBound: literal %d outside int32 range", p.I64)
+			}
+			return boundCmpNarrowInt{column: p.Col, colID: p.ColID, value: p.I64, op: cmpFilterOp(p.Op)}, nil
 		case vector.VecFloat64:
-			return boundEqFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
+			return boundCmpFloat64{column: p.Col, colID: p.ColID, value: p.F64, op: cmpFilterOp(p.Op)}, nil
 		case vector.VecText, vector.VecBytes, vector.VecJSON:
-			return boundEqBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
-		}
-	case OpLt:
-		switch p.Kind {
-		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-			return boundLtInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
-		case vector.VecFloat64:
-			return boundLtFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
-		case vector.VecText, vector.VecBytes, vector.VecJSON:
-			return boundLtBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
-		}
-	case OpLe:
-		switch p.Kind {
-		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-			return boundLeInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
-		case vector.VecFloat64:
-			return boundLeFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
-		case vector.VecText, vector.VecBytes, vector.VecJSON:
-			return boundLtBytes{column: p.Col, colID: p.ColID, value: p.Bytes, inclusive: true}, nil
-		}
-	case OpGt:
-		switch p.Kind {
-		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-			return boundGtInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
-		case vector.VecFloat64:
-			return boundGtFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
-		case vector.VecText, vector.VecBytes, vector.VecJSON:
-			return boundGtBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
-		}
-	case OpGe:
-		switch p.Kind {
-		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-			return boundGeInt64{column: p.Col, colID: p.ColID, value: p.I64}, nil
-		case vector.VecFloat64:
-			return boundGeFloat64{column: p.Col, colID: p.ColID, value: p.F64}, nil
-		case vector.VecText, vector.VecBytes, vector.VecJSON:
-			return boundGtBytes{column: p.Col, colID: p.ColID, value: p.Bytes, inclusive: true}, nil
+			switch p.Op {
+			case OpEq:
+				return boundEqBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
+			case OpLt:
+				return boundLtBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
+			case OpLe:
+				return boundLtBytes{column: p.Col, colID: p.ColID, value: p.Bytes, inclusive: true}, nil
+			case OpGt:
+				return boundGtBytes{column: p.Col, colID: p.ColID, value: p.Bytes}, nil
+			case OpGe:
+				return boundGtBytes{column: p.Col, colID: p.ColID, value: p.Bytes, inclusive: true}, nil
+			}
 		}
 	case OpIsNull:
 		return boundIsNull{column: p.Col, colID: p.ColID}, nil
@@ -339,7 +342,7 @@ func (p Pred) toBound() (BoundPredicate, error) {
 		if err != nil {
 			return nil, err
 		}
-		return boundNot{child: inner}, nil
+		return boundNot{child: inner, cols: p.Children[0].Columns()}, nil
 	}
 	return nil, fmt.Errorf("toBound: unsupported (op=%v, kind=%v)", p.Op, p.Kind)
 }
