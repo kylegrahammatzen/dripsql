@@ -33,8 +33,12 @@ func OpenReadOnly(path string) (*DB, error) {
 
 // Refresh re-reads the catalog and reloads every table's manifest so rows the writer
 // committed since open become visible. Segments are immutable and cache keys include
-// the DV path, so the segment cache is left alone.
+// the DV path, so the segment cache is left alone. Writer handles are always current
+// in a single-writer engine, so Refresh is refused unless the DB came from OpenReadOnly.
 func (db *DB) Refresh() error {
+	if !db.hardReadOnly {
+		return fmt.Errorf("engine: Refresh requires a database opened via OpenReadOnly")
+	}
 	if err := db.lockOpen(); err != nil {
 		return err
 	}

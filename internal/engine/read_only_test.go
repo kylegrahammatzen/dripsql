@@ -130,6 +130,9 @@ func TestOpenReadOnly_RefreshSeesWriterCommits(t *testing.T) {
 	wantRows(t, mustValues(t, r, "SELECT id FROM t ORDER BY id"), [][]any{{int64(1)}, {int64(2)}})
 
 	mustExec(t, w, "INSERT INTO t (id) VALUES (3), (4), (5)")
+	if err := w.Refresh(); err == nil {
+		t.Fatal("Refresh on a writer DB must be refused")
+	}
 	// The reader keeps its snapshot until it refreshes.
 	wantRows(t, mustValues(t, r, "SELECT id FROM t ORDER BY id"), [][]any{{int64(1)}, {int64(2)}})
 	if err := r.Refresh(); err != nil {
