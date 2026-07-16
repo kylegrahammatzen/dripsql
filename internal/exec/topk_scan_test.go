@@ -14,7 +14,7 @@ import (
 func TestTopKScan_MaterializesOnlyWinningProjectionPages(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "topk.dsv4")
-	if _, err := storage.WriteSegment(path, []vector.Batch{
+	if err := storage.WriteSegment(path, []vector.Batch{
 		makeTopKScanBatch(t, []string{"winner", "cold"}, []int64{100, 0}),
 		makeTopKScanBatch(t, []string{"loser-a", "loser-b"}, []int64{99, 98}),
 	}, nil); err != nil {

@@ -1,12 +1,11 @@
-// FilterOp narrows a child's selection mask. One recursive entry point handles AND/OR/NOT
-// and vectorizable leaves; anything else falls back to row-by-row. EvalPredicate is the DML entry.
+// FilterOp narrows a child's selection mask through one recursive entry point for AND/OR/NOT and vectorizable leaves, with row-by-row fallback.
+// EvalPredicate is the DML entry.
 package exec
 
 import (
 	"context"
 	"fmt"
 	"math"
-	"slices"
 
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
@@ -71,10 +70,7 @@ func (f *FilterOp) Next() (vector.Batch, bool, error) {
 	}
 }
 
-// filterPredicate is the single recursive entry point. AND narrows the right child with the
-// left's output mask (instead of the original input) so a selective left predicate skips
-// rows on the right; OR keeps both children on the same input and unions the results.
-// A non-nil scratch mask is reused in place by leaves so a chain of ANDs needs only one alloc.
+// filterPredicate recursively narrows AND's right child with the left's output mask so a selective left skips rows on the right, unions OR children evaluated over the same input, and reuses a non-nil scratch mask in leaves so a chain of ANDs needs only one alloc.
 func filterPredicate(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, scratch *vector.SelectionMask, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterResult, error) {
 	switch pred.Op {
 	case sql.ExprAnd:
@@ -143,10 +139,12 @@ func filterNotPred(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundE
 
 // exprContainsNot reports whether the tree has an ExprNot node so the filter switches to the mask-pair path.
 func exprContainsNot(e sql.BoundExpr) bool {
-	if e.Op == sql.ExprNot {
-		return true
-	}
-	return slices.ContainsFunc(e.Args, exprContainsNot)
+	found := false
+	sql.WalkExpr(e, func(n sql.BoundExpr) bool {
+		found = found || n.Op == sql.ExprNot
+		return !found
+	})
+	return found
 }
 
 // filterTP carries t for definitely true rows and p for possibly true rows with t always a subset of p.
@@ -157,8 +155,7 @@ type filterTP struct {
 	pcount int
 }
 
-// filterThreeValued mirrors filterPredicate under SQL three-valued logic so NOT excludes unknown rows.
-// NOT flips between the pair as sel minus the opposite child mask and the root answer is t.
+// filterThreeValued mirrors filterPredicate under SQL three-valued logic, flipping NOT between the pair as sel minus the opposite child mask so the root answer t excludes unknown rows.
 func filterThreeValued(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterTP, error) {
 	switch pred.Op {
 	case sql.ExprAnd:
@@ -209,8 +206,7 @@ func filterThreeValued(batch vector.Batch, sel vector.SelectionMask, pred sql.Bo
 	return filterLeafThreeValued(batch, sel, pred, outer, subBuild)
 }
 
-// filterLeafThreeValued evaluates one leaf into the mask pair. A vectorized comparison is unknown
-// exactly on selected rows where a referenced column is NULL since the literal side is never NULL.
+// filterLeafThreeValued evaluates one leaf into the mask pair, where a vectorized comparison is unknown exactly on selected rows whose referenced column is NULL since the literal side never is.
 func filterLeafThreeValued(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (filterTP, error) {
 	t, count, ok, err := applyLeaf(batch, sel, pred, nil)
 	if err != nil {
@@ -223,14 +219,18 @@ func filterLeafThreeValued(batch vector.Batch, sel vector.SelectionMask, pred sq
 		// IS NULL and IS NOT NULL are definite on every row so P stays equal to T.
 		if pred.Op != sql.ExprIsNull && pred.Op != sql.ExprIsNotNull {
 			var nulls vector.SelectionMask
-			leafColumns(pred, func(name string) {
-				col, found := batch.ColumnByName(name)
+			sql.WalkExpr(pred, func(e sql.BoundExpr) bool {
+				if e.Op != sql.ExprColumn || e.Outer {
+					return true
+				}
+				col, found := batch.ColumnByName(e.Column)
 				if !found || col.V.Valid == nil {
-					return
+					return true
 				}
 				nulls.CopyFrom(&sel)
 				nulls.AndNotValidity(col.V.Valid)
 				pcount = p.OrCount(nulls)
+				return true
 			})
 		}
 		return filterTP{t: t, p: p, count: count, pcount: pcount}, nil
@@ -260,16 +260,6 @@ func filterLeafThreeValued(batch vector.Batch, sel vector.SelectionMask, pred sq
 	return out, evalErr
 }
 
-// leafColumns walks a BoundExpr and reports each batch-local column reference.
-func leafColumns(e sql.BoundExpr, fn func(name string)) {
-	if e.Op == sql.ExprColumn && !e.Outer {
-		fn(e.Column)
-	}
-	for _, a := range e.Args {
-		leafColumns(a, fn)
-	}
-}
-
 // Normalized col-op-lit and col-BETWEEN-lo-AND-hi shape so applyLeaf dispatches on column kind once.
 type filterLeaf struct {
 	col     sql.BoundExpr
@@ -294,7 +284,17 @@ func makeFilterLeaf(pred sql.BoundExpr) (filterLeaf, bool) {
 		return filterLeaf{col: left, lo: right.Literal, op: op}, true
 	}
 	if right.Op == sql.ExprColumn && left.Op == sql.ExprLiteral {
-		return filterLeaf{col: right, lo: left.Literal, op: swapCompareOp(op)}, true
+		switch op {
+		case vector.FilterLess:
+			op = vector.FilterGreater
+		case vector.FilterLessEqual:
+			op = vector.FilterGreaterEqual
+		case vector.FilterGreater:
+			op = vector.FilterLess
+		case vector.FilterGreaterEqual:
+			op = vector.FilterLessEqual
+		}
+		return filterLeaf{col: right, lo: left.Literal, op: op}, true
 	}
 	return filterLeaf{}, false
 }
@@ -308,8 +308,7 @@ const (
 	boundUnsupported
 )
 
-// intCompareBound converts a float literal comparison on an int64 column into an exact integer
-// threshold so the typed kernel runs without promoting the column. 2^63 marks the int64 range edge.
+// intCompareBound converts a float literal comparison on an int64 column into an exact integer threshold so the typed kernel runs without promoting the column, with 2^63 marking the int64 range edge.
 func intCompareBound(f float64, op vector.FilterOp) (int64, vector.FilterOp, intBoundVerdict) {
 	const edge = 9223372036854775808.0
 	if math.IsNaN(f) {
@@ -560,8 +559,7 @@ func applyLeaf(batch vector.Batch, sel vector.SelectionMask, pred sql.BoundExpr,
 	return vector.SelectionMask{}, 0, false, nil
 }
 
-// ensureOutMask returns scratch if it already holds rows bits, otherwise a fresh mask.
-// Reusing the caller's mask is what makes a chain of ANDs single-alloc.
+// ensureOutMask returns scratch when it already holds rows bits and a fresh mask otherwise, the reuse being what makes a chain of ANDs single-alloc.
 func ensureOutMask(scratch *vector.SelectionMask, rows int) vector.SelectionMask {
 	if scratch != nil && scratch.Rows() == rows {
 		return *scratch
@@ -610,27 +608,12 @@ func mapCompareOp(op sql.ExprOp) (vector.FilterOp, bool) {
 	return 0, false
 }
 
-func swapCompareOp(op vector.FilterOp) vector.FilterOp {
-	switch op {
-	case vector.FilterLess:
-		return vector.FilterGreater
-	case vector.FilterLessEqual:
-		return vector.FilterGreaterEqual
-	case vector.FilterGreater:
-		return vector.FilterLess
-	case vector.FilterGreaterEqual:
-		return vector.FilterLessEqual
-	}
-	return op
-}
-
 func (f *FilterOp) Close() error {
 	f.state.close()
 	return f.Source.Close()
 }
 
-// EvalPredicate routes DELETE/UPDATE through the same vectorized path. Honors batch.Sel so
-// already-deleted rows are excluded from evaluation.
+// EvalPredicate routes DELETE/UPDATE through the same vectorized path, honoring batch.Sel so already-deleted rows are excluded.
 func EvalPredicate(batch vector.Batch, where sql.BoundExpr) (vector.SelectionMask, error) {
 	in := selectionForBatch(batch)
 	if exprContainsNot(where) {

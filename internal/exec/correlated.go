@@ -1,6 +1,5 @@
-// Correlated-subquery runtime state. The outer scope's current row binds outer
-// column references inside an inner plan; every per-row re-execution rebuilds
-// the inner operator tree against the same shared values pointer.
+// Correlated-subquery runtime state binding the outer scope's current row into inner plans.
+// Every per-row re-execution rebuilds the inner operator tree against the same shared values pointer.
 package exec
 
 import (
@@ -15,9 +14,7 @@ type correlatedOuter struct {
 
 func newCorrelatedOuter() *correlatedOuter { return &correlatedOuter{values: map[string]any{}} }
 
-// makeSubBuilder returns a closure used by row-by-row evaluators to build the
-// inner operator tree for a correlated subquery. The same outer pointer is
-// threaded so nested ExprColumn{Outer} reads see the binding set on this row.
+// makeSubBuilder returns the closure row-by-row evaluators use to build a correlated subquery's inner operator tree, threading the same outer pointer so nested ExprColumn{Outer} reads see the binding set on this row.
 func makeSubBuilder(segments SegmentsFn, outer *correlatedOuter) func(*sql.Plan) (Operator, error) {
 	return func(plan *sql.Plan) (Operator, error) {
 		return buildPlan(plan, segments, outer)
@@ -34,8 +31,7 @@ func (c *correlatedOuter) get(name string) (any, bool) {
 	return v, ok
 }
 
-// bindOuterRow snapshots the outer batch row into c.outer for the given names.
-// Falls back to nil when the column is missing (treated as SQL NULL by the inner plan).
+// bindOuterRow snapshots the outer batch row into c.outer for the given names, falling back to nil (SQL NULL to the inner plan) when a column is missing.
 func (c *evalCtx) bindOuterRow(names []string, row int) error {
 	if c.outer == nil {
 		c.outer = newCorrelatedOuter()

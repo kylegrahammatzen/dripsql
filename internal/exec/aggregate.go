@@ -245,7 +245,7 @@ func (st *aggBuild) consume(batch vector.Batch) error {
 		st.groupCols = make([]int, len(st.groupBy))
 		st.groupKinds = make([]vector.VecKind, len(st.groupBy))
 		for i, g := range st.groupBy {
-			idx := batchColumnIndex(batch, g.Column)
+			idx := batch.ColumnIndexByName(g.Column)
 			if idx == -1 {
 				return fmt.Errorf("aggregate: group column %q not in batch", g.Column)
 			}
@@ -259,7 +259,7 @@ func (st *aggBuild) consume(batch vector.Batch) error {
 				st.specCols[i] = aggCol{idx: -1}
 				continue
 			}
-			ci := batchColumnIndex(batch, spec.ArgName)
+			ci := batch.ColumnIndexByName(spec.ArgName)
 			if ci == -1 {
 				return fmt.Errorf("aggregate: column %q not in batch", spec.ArgName)
 			}
@@ -285,8 +285,7 @@ func (st *aggBuild) consume(batch vector.Batch) error {
 	}
 }
 
-// merge folds another worker's partial groups into st. The single-key dispatch
-// mirrors consume so keys land in the same lookup map they were built with.
+// merge folds another worker's partial groups into st, mirroring consume's single-key dispatch so keys land in the same lookup map they were built with.
 func (st *aggBuild) merge(other *aggBuild) {
 	if other.specCols != nil && st.specCols == nil {
 		st.specCols = other.specCols
@@ -394,7 +393,19 @@ func (st *aggBuild) aggregateBatchCompositeKey(batch vector.Batch) error {
 				return
 			}
 		}
-		keyBuf = encodeCompositeKey(keyBuf[:0], batch.Columns, st.groupCols, st.groupKinds, row)
+		keyBuf = keyBuf[:0]
+		for i, gc := range st.groupCols {
+			col := &batch.Columns[gc]
+			if col.Dict != nil {
+				e := col.Dict.Entries[col.Dict.Codes[row]]
+				n := uint32(len(e))
+				keyBuf = append(keyBuf, byte(n), byte(n>>8), byte(n>>16), byte(n>>24))
+				keyBuf = append(keyBuf, e...)
+			} else {
+				keyBuf = appendKeyBytes(keyBuf, col, st.groupKinds[i], row)
+			}
+			keyBuf = append(keyBuf, 0x00)
+		}
 		gIdx, ok := st.compIdx[string(keyBuf)]
 		if !ok {
 			gIdx = len(st.groups)
@@ -403,7 +414,12 @@ func (st *aggBuild) aggregateBatchCompositeKey(batch vector.Batch) error {
 			st.compIdx[string(keyCopy)] = gIdx
 			rowKeys := make([]any, len(st.groupCols))
 			for i, gc := range st.groupCols {
-				rowKeys[i] = readGroupKeyDict(&batch.Columns[gc], st.groupKinds[i], row)
+				col := &batch.Columns[gc]
+				if col.Dict != nil {
+					rowKeys[i] = string(col.Dict.Entries[col.Dict.Codes[row]])
+				} else {
+					rowKeys[i] = readGroupKey(col, st.groupKinds[i], row)
+				}
 			}
 			st.groups = append(st.groups, aggGroup{key: rowKeys, aggs: make([]aggAccum, len(st.specs))})
 		}
@@ -414,10 +430,7 @@ func (st *aggBuild) aggregateBatchCompositeKey(batch vector.Batch) error {
 	return loopErr
 }
 
-// aggregateBatchCompositeAllDict packs up to eight per-row dict codes into one
-// uint64 combo key resolved through a small linear cache, so no per-row byte key
-// is built and no string hashing happens. New groups register under the canonical
-// encoded key so merge dedups against groups built by the string path.
+// aggregateBatchCompositeAllDict packs up to eight per-row dict codes into one uint64 combo key resolved through a small linear cache, registering new groups under the canonical encoded key so merge dedups against string-path groups.
 func (st *aggBuild) aggregateBatchCompositeAllDict(batch vector.Batch) error {
 	var dicts [8]*vector.DictCol
 	k := len(st.groupCols)
@@ -492,29 +505,6 @@ func (st *aggBuild) aggregateBatchCompositeAllDict(batch vector.Batch) error {
 		}
 	})
 	return loopErr
-}
-
-func readGroupKeyDict(col *vector.Column, vk vector.VecKind, row int) any {
-	if col.Dict != nil {
-		return string(col.Dict.Entries[col.Dict.Codes[row]])
-	}
-	return readGroupKey(col, vk, row)
-}
-
-func encodeCompositeKey(dst []byte, cols []vector.Column, groupCols []int, groupKinds []vector.VecKind, row int) []byte {
-	for i, gc := range groupCols {
-		col := &cols[gc]
-		if col.Dict != nil {
-			e := col.Dict.Entries[col.Dict.Codes[row]]
-			n := uint32(len(e))
-			dst = append(dst, byte(n), byte(n>>8), byte(n>>16), byte(n>>24))
-			dst = append(dst, e...)
-		} else {
-			dst = appendKeyBytes(dst, col, groupKinds[i], row)
-		}
-		dst = append(dst, 0x00)
-	}
-	return dst
 }
 
 func appendKeyBytes(dst []byte, col *vector.Column, vk vector.VecKind, row int) []byte {
@@ -621,8 +611,7 @@ func (st *aggBuild) aggregateBatchIntKey(batch vector.Batch, col *vector.Column,
 	return loopErr
 }
 
-// `idx[string(b)]` is the well-known compiler trick that avoids the per-lookup string
-// allocation. The miss branch materializes the key only when we record a new group.
+// The idx[string(b)] compiler trick avoids the per-lookup string allocation, and the miss branch materializes the key only when a new group is recorded.
 func (st *aggBuild) aggregateBatchTextKey(batch vector.Batch, col *vector.Column) error {
 	if col.Dict != nil {
 		return st.aggregateBatchTextKeyDict(batch, col.Dict)
@@ -656,9 +645,7 @@ func (st *aggBuild) aggregateBatchTextKey(batch vector.Batch, col *vector.Column
 	return loopErr
 }
 
-// Dictionary pages resolve each distinct entry to a group slot at most once, then
-// rows accumulate through a code-indexed table with no per-row hashing. Entries are
-// resolved lazily so codes no selected row references never create phantom groups.
+// Dictionary pages resolve each distinct entry to a group slot at most once and accumulate rows through a code-indexed table, resolving entries lazily so codes no selected row references never create phantom groups.
 func (st *aggBuild) aggregateBatchTextKeyDict(batch vector.Batch, d *vector.DictCol) error {
 	var lut [256]int32
 	for i := range d.Entries {
@@ -839,15 +826,6 @@ type aggCol struct {
 	vk  vector.VecKind
 }
 
-func batchColumnIndex(batch vector.Batch, name string) int {
-	for i := range batch.Columns {
-		if batch.Columns[i].Name == name {
-			return i
-		}
-	}
-	return -1
-}
-
 func readGroupKey(col *vector.Column, vk vector.VecKind, row int) any {
 	switch vk {
 	case vector.VecInt16:
@@ -949,8 +927,7 @@ func (a *AggregateOp) materializeChunk(start, end int) (vector.Batch, *vector.Se
 		cols = append(cols, vector.Column{Name: expr.Column, Type: expr.Type, V: v})
 	}
 	if len(a.GroupBy) > 1 {
-		// Composite-key groups store their per-column raw values as []any in group.key.
-		// Build one output vector per GROUP BY expression.
+		// Composite-key groups store per-column raw values as []any in group.key, so build one output vector per GROUP BY expression.
 		for keyIdx, expr := range a.GroupBy {
 			v, err := buildGroupKeyVec(expr.Type, rows, func(i int) any {
 				keys, ok := chunk[i].key.([]any)
@@ -977,7 +954,15 @@ func (a *AggregateOp) materializeChunk(start, end int) (vector.Batch, *vector.Se
 		}
 		v.Valid = valid
 		name := aggregateColumnName(spec)
-		t := aggregateOutputType(spec, argKind)
+		t := schema.Int64
+		if spec.Func == sql.AggregateAvg {
+			t = schema.Float64
+		} else if argKind == vector.VecFloat32 || argKind == vector.VecFloat64 {
+			switch spec.Func {
+			case sql.AggregateSum, sql.AggregateMin, sql.AggregateMax:
+				t = schema.Float64
+			}
+		}
 		cols = append(cols, vector.Column{Name: name, Type: t, V: v})
 	}
 
@@ -1072,19 +1057,6 @@ func buildGroupKeyVec(t schema.Type, rows int, key func(int) any) (vector.Vec, e
 		return v, nil
 	}
 	return vector.Vec{}, fmt.Errorf("aggregate: group key kind %v not supported", vk)
-}
-
-func aggregateOutputType(spec sql.AggSpec, argKind vector.VecKind) schema.Type {
-	if spec.Func == sql.AggregateAvg {
-		return schema.Float64
-	}
-	if argKind == vector.VecFloat32 || argKind == vector.VecFloat64 {
-		switch spec.Func {
-		case sql.AggregateSum, sql.AggregateMin, sql.AggregateMax:
-			return schema.Float64
-		}
-	}
-	return schema.Int64
 }
 
 // count is always int64 output and never null, everything else outputs one vector

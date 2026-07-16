@@ -1,7 +1,5 @@
-// ScanOp adapts push-based storage.Scan to pull-based Operator. Parallelism > 1
-// partitions segments across workers sharing one output channel; output order is
-// unordered. TopK pushdown requires a single pass across all segments to stay sound,
-// so callers must leave Parallelism at 1 when Opts.TopK is set.
+// ScanOp adapts push-based storage.Scan to pull-based Operator, sharding segments across workers with unordered output.
+// TopK pushdown needs a single pass across all segments, so callers must leave Parallelism at 1 when Opts.TopK is set.
 package exec
 
 import (
@@ -74,7 +72,10 @@ func (s *ScanOp) Open(ctx context.Context) error {
 		go s.runShardClose(s.Opts.Segments)
 		return nil
 	}
-	shards := partitionSegments(s.Opts.Segments, workers)
+	shards := make([][]*storage.Segment, workers)
+	for i, seg := range s.Opts.Segments {
+		shards[i%workers] = append(shards[i%workers], seg)
+	}
 	for _, shard := range shards {
 		if len(shard) == 0 {
 			continue
@@ -121,15 +122,6 @@ func (s *ScanOp) runScan(segs []*storage.Segment) {
 		default:
 		}
 	}
-}
-
-func partitionSegments(segs []*storage.Segment, workers int) [][]*storage.Segment {
-	out := make([][]*storage.Segment, workers)
-	for i, seg := range segs {
-		bucket := i % workers
-		out[bucket] = append(out[bucket], seg)
-	}
-	return out
 }
 
 // cloneBatch copies the callback-scoped storage batch into buffers the consumer may

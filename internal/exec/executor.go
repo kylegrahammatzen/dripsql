@@ -1,6 +1,5 @@
 // BuildOperator turns a bound *sql.Plan into a chain of Operators by walking its Rel tree.
-// SegmentsFn resolves a BoundTableDef to its storage segments at execution time so the
-// engine layer can keep catalog -> segment mapping out of exec.
+// SegmentsFn resolves a BoundTableDef to storage segments at run time, keeping the catalog mapping out of exec.
 package exec
 
 import (
@@ -16,8 +15,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-// Operator is the pull-based interface every exec node implements.
-// Next returns ok=false when exhausted. Row visibility lives in batch.Sel and nil Sel means all batch.Len rows are visible.
+// Operator is the pull-based interface every exec node implements, where Next returns ok=false when exhausted and row visibility lives in batch.Sel with nil meaning all rows are visible.
 var (
 	ErrOperatorAlreadyOpen = errors.New("operator already open")
 	ErrOperatorNotOpen     = errors.New("operator not open")
@@ -148,8 +146,7 @@ func materializeSubqueriesExpr(expr sql.BoundExpr, segments SegmentsFn) (sql.Bou
 			return sql.BoundExpr{}, fmt.Errorf("subquery materialize: empty subplan")
 		}
 		if len(expr.SubPlan.OuterRefs) > 0 {
-			// Correlated: leave the node in place; the row-by-row evaluator builds and
-			// drains the inner plan against the bound outer row per call.
+			// A correlated node stays in place because the row-by-row evaluator builds and drains the inner plan per outer row.
 			if err := materializeSubqueries(expr.SubPlan.Rel, segments); err != nil {
 				return sql.BoundExpr{}, err
 			}
@@ -377,8 +374,10 @@ func buildRelWithOuter(rel *sql.Rel, segments SegmentsFn, outer *correlatedOuter
 		}
 		return &WindowOp{Source: source, Funcs: rel.WindowFuncs}, nil
 	case sql.RelProject:
-		if err := checkProjectionOps(rel.Projection); err != nil {
-			return nil, err
+		for _, o := range rel.Projection {
+			if err := checkExecExpr(o.Expr); err != nil {
+				return nil, err
+			}
 		}
 		source, err := buildRelWithOuter(rel.Inputs[0], segments, outer)
 		if err != nil {
@@ -507,8 +506,13 @@ func buildLateTopKScan(sortRel *sql.Rel, segments SegmentsFn) (Operator, bool, e
 	if err != nil {
 		return nil, false, err
 	}
-	if !topKScanColumnsPresent(segs, append(append([]string(nil), names...), keyName)) {
-		return nil, false, nil
+	needed := append(append([]string(nil), names...), keyName)
+	for _, seg := range segs {
+		for _, name := range needed {
+			if findTopKColumn(seg, name) < 0 {
+				return nil, false, nil
+			}
+		}
 	}
 	return &TopKScanOp{
 		Segments: segs,
@@ -521,17 +525,6 @@ func buildLateTopKScan(sortRel *sql.Rel, segments SegmentsFn) (Operator, bool, e
 		K:        sortRel.K,
 		Offset:   sortRel.Offset,
 	}, true, nil
-}
-
-func topKScanColumnsPresent(segs []*storage.Segment, names []string) bool {
-	for _, seg := range segs {
-		for _, name := range names {
-			if findTopKColumn(seg, name) < 0 {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func isIdentityProject(rel *sql.Rel) bool {
@@ -561,37 +554,22 @@ func sameFoldName(a, b string) bool {
 	return schema.NormalizeName(a) == schema.NormalizeName(b)
 }
 
-// checkProjectionOps rejects expressions the row-by-row eval has not implemented yet.
-func checkProjectionOps(outs []sql.BoundOutput) error {
-	for _, o := range outs {
-		if err := checkExecExpr(o.Expr); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
+// checkExecExpr rejects trees holding ExprInvalid nodes the row-by-row eval cannot run.
 func checkExecExpr(expr sql.BoundExpr) error {
-	if err := walkUnsupported(expr); err != nil {
-		return fmt.Errorf("exec: %w", err)
-	}
-	return nil
-}
-
-func walkUnsupported(expr sql.BoundExpr) error {
-	if expr.Op == sql.ExprInvalid {
-		return fmt.Errorf("invalid expression")
-	}
-	for _, a := range expr.Args {
-		if err := walkUnsupported(a); err != nil {
-			return err
+	invalid := false
+	sql.WalkExpr(expr, func(e sql.BoundExpr) bool {
+		if e.Op == sql.ExprInvalid {
+			invalid = true
 		}
+		return !invalid
+	})
+	if invalid {
+		return fmt.Errorf("exec: invalid expression")
 	}
 	return nil
 }
 
-// buildSortInput detects RelSort directly over RelScan with a single int-like column
-// SortKey and K > 0, and pushes top-K into ScanOpts. SortOp stays above for correctness.
+// buildSortInput pushes top-K into ScanOpts when RelSort sits directly over RelScan with a single int-like SortKey and K > 0, keeping SortOp above for correctness.
 func buildSortInput(sortRel *sql.Rel, segments SegmentsFn, outer *correlatedOuter) (Operator, error) {
 	child := sortRel.Inputs[0]
 	if child.Op == sql.RelScan && child.Where == nil && sortRel.K > 0 && len(sortRel.SortKeys) == 1 {
@@ -668,9 +646,7 @@ func scanColumnMetadata(rel *sql.Rel) ([]string, []uint64, []vector.VecKind, []s
 	return names, ids, kinds, defaults, types, labels, nil
 }
 
-// wireDictGroupKey asks the scan for dictionary codes on varbytes group keys sitting
-// directly on it, so the aggregate can group by code instead of by string. Columns
-// the storage predicate reads stay materialized because Pred.Apply needs them.
+// wireDictGroupKey asks the scan for dictionary codes on varbytes group keys sitting directly on it so the aggregate groups by code instead of by string, except columns the storage predicate reads stay materialized because Pred.Apply needs them.
 func wireDictGroupKey(source Operator, rel *sql.Rel) {
 	scan, ok := source.(*ScanOp)
 	if !ok {

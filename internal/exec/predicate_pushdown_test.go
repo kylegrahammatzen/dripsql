@@ -1,4 +1,4 @@
-﻿// loweredPredicate maps binary comparison ops to storage.Pred with reversed-operand handling and overflow guards.
+// loweredPredicate maps binary comparison ops to storage.Pred with reversed-operand handling and overflow guards.
 package exec
 
 import (

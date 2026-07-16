@@ -142,7 +142,17 @@ func vecApplyArith(op sql.ExprOp, l, r numOperand, sel *vector.SelectionMask, ro
 		}
 		return numOperand{}, false, nil
 	}
-	valid := mergeValidity(l.valid, r.valid, rows)
+	valid := l.valid
+	if valid == nil {
+		valid = r.valid
+	} else if r.valid != nil {
+		merged := make(vector.Validity, vector.ValidityWords(rows))
+		copy(merged, l.valid)
+		for i := range merged {
+			merged[i] &= r.valid[i]
+		}
+		valid = merged
+	}
 	if l.isFloat || r.isFloat {
 		if op == sql.ExprModulo || op == sql.ExprIntDivide {
 			return numOperand{}, false, nil
@@ -319,19 +329,4 @@ func promoteFloat(o numOperand, rows int) numOperand {
 		f[i] = float64(v)
 	}
 	return numOperand{isFloat: true, f: f, valid: o.valid}
-}
-
-func mergeValidity(a, b vector.Validity, rows int) vector.Validity {
-	if a == nil {
-		return b
-	}
-	if b == nil {
-		return a
-	}
-	out := make(vector.Validity, vector.ValidityWords(rows))
-	copy(out, a)
-	for i := range out {
-		out[i] &= b[i]
-	}
-	return out
 }

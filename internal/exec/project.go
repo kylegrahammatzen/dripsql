@@ -1,12 +1,11 @@
 // ProjectOp builds an output batch whose columns are bound expressions.
-// Column-ref outputs alias the input Vec; computed outputs materialize via row-by-row eval.
+// Column-ref outputs alias the input Vec while computed outputs materialize via row-by-row eval.
 package exec
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
@@ -24,7 +23,7 @@ type ProjectOp struct {
 	planSrc int
 }
 
-// srcIdx >= 0 aliases child column at that index; -1 marks a computed expr.
+// srcIdx >= 0 aliases the child column at that index and -1 marks a computed expr.
 type projectStep struct {
 	srcIdx int
 	name   string
@@ -83,7 +82,7 @@ func (p *ProjectOp) bindPlan(batch vector.Batch) error {
 		o := &p.Outputs[i]
 		step := projectStep{srcIdx: -1, out: o}
 		if o.Expr.Op == sql.ExprColumn {
-			idx := findColumnIndex(batch, o.Expr.Column)
+			idx := batch.ColumnIndexByName(o.Expr.Column)
 			if idx < 0 {
 				return fmt.Errorf("project: column %q not in input batch", o.Expr.Column)
 			}
@@ -108,16 +107,6 @@ func (p *ProjectOp) planValid(batch vector.Batch) bool {
 		}
 	}
 	return true
-}
-
-func findColumnIndex(batch vector.Batch, name string) int {
-	want := schema.NormalizeName(name)
-	for i := range batch.Columns {
-		if schema.NormalizeName(batch.Columns[i].Name) == want {
-			return i
-		}
-	}
-	return -1
 }
 
 func projectColumn(batch vector.Batch, sel *vector.SelectionMask, output sql.BoundOutput, outer *correlatedOuter, subBuild func(*sql.Plan) (Operator, error)) (vector.Column, error) {
@@ -146,9 +135,7 @@ func projectColumn(batch vector.Batch, sel *vector.SelectionMask, output sql.Bou
 	return vector.Column{Name: output.Alias, Type: output.Expr.Type, V: v}, nil
 }
 
-// materializeVec evaluates expr row-by-row and writes into a fresh Vec. Validity is allocated
-// lazily on the first null and starts AllValid for rows already selected, so a nullless
-// computed projection skips the validity slice entirely.
+// materializeVec evaluates expr row-by-row into a fresh Vec, allocating validity lazily on the first null so a nullless computed projection skips the validity slice entirely.
 func materializeVec(ctx *evalCtx, expr sql.BoundExpr, sel *vector.SelectionMask, rows int, vk vector.VecKind) (vector.Vec, vector.Validity, error) {
 	if v, valid, ok, err := vecEvalArith(ctx.batch, expr, sel, rows, vk); err != nil {
 		return vector.Vec{}, nil, err
@@ -157,7 +144,13 @@ func materializeVec(ctx *evalCtx, expr sql.BoundExpr, sel *vector.SelectionMask,
 	}
 	var valid vector.Validity
 	var loopErr error
-	v := newComputedVec(vk, rows)
+	var v vector.Vec
+	switch vk {
+	case vector.VecText, vector.VecBytes, vector.VecJSON:
+		v = vector.NewVarVec(vk, rows, 0)
+	default:
+		v = vector.NewVec(vk, rows)
+	}
 	sel.IterSet(func(row int) {
 		if loopErr != nil {
 			return
@@ -182,14 +175,6 @@ func materializeVec(ctx *evalCtx, expr sql.BoundExpr, sel *vector.SelectionMask,
 		return vector.Vec{}, nil, loopErr
 	}
 	return v, valid, nil
-}
-
-func newComputedVec(vk vector.VecKind, rows int) vector.Vec {
-	switch vk {
-	case vector.VecText, vector.VecBytes, vector.VecJSON:
-		return vector.NewVarVec(vk, rows, 0)
-	}
-	return vector.NewVec(vk, rows)
 }
 
 func writeComputedRow(v *vector.Vec, vk vector.VecKind, row int, raw any) error {

@@ -1,5 +1,4 @@
-// Exec smoke tests: round-trip a written segment through Scan/Filter/Project/Limit and
-// verify the result row set matches expectations.
+// Exec smoke tests that round-trip a written segment through Scan/Filter/Project/Limit and check the result rows.
 package exec
 
 import (
@@ -32,7 +31,7 @@ func writeUsersSegment(t *testing.T, dir string) *storage.Segment {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(dir, "users.dsv4")
-	if _, err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
+	if err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := storage.OpenSegment(path)
@@ -227,7 +226,7 @@ func writeSalesSegment(t *testing.T, dir string) *storage.Segment {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(dir, "sales.dsv4")
-	if _, err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
+	if err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := storage.OpenSegment(path)
@@ -336,7 +335,7 @@ func writeWideGroupSegment(t *testing.T, dir string, groups int) *storage.Segmen
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(dir, "wide.dsv4")
-	if _, err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
+	if err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := storage.OpenSegment(path)
@@ -379,8 +378,7 @@ func TestExec_GroupBy_PaginatesAboveStandardBatchRows(t *testing.T) {
 		t.Fatalf("BuildOperator: %v", err)
 	}
 	rows := runOperator(t, op)
-	// seg1 has 2048 unique tags (g00000..g02047), seg2 has 1000 unique tags (g00000..g00999).
-	// Overlap is the first 1000. Distinct group count = 2048.
+	// seg1 has 2048 unique tags and seg2's 1000 all overlap seg1's first 1000, so the distinct group count is 2048.
 	if len(rows) != vector.StandardBatchRows {
 		t.Fatalf("got %d groups, want %d", len(rows), vector.StandardBatchRows)
 	}
@@ -427,7 +425,7 @@ func TestExec_GroupBy_DictCodesMatchDecoded(t *testing.T) {
 			t.Fatalf("NewBatch: %v", err)
 		}
 		path := filepath.Join(dir, fname)
-		if _, err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
+		if err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 			t.Fatalf("WriteSegment: %v", err)
 		}
 		seg, err := storage.OpenSegment(path)
@@ -553,7 +551,7 @@ func TestExec_GroupBy_CompositeDictMatchesDecoded(t *testing.T) {
 			t.Fatalf("NewBatch: %v", err)
 		}
 		path := filepath.Join(dir, fname)
-		if _, err := storage.WriteSegment(path, []vector.Batch{batch}, nil); err != nil {
+		if err := storage.WriteSegment(path, []vector.Batch{batch}, nil); err != nil {
 			t.Fatalf("WriteSegment: %v", err)
 		}
 		seg, err := storage.OpenSegment(path)
@@ -665,7 +663,7 @@ func TestExec_GroupBy_ParallelMergeMatchesSerial(t *testing.T) {
 			t.Fatalf("NewBatch: %v", err)
 		}
 		path := filepath.Join(t.TempDir(), fmt.Sprintf("p%d.dsv4", s))
-		if _, err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
+		if err := storage.WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 			t.Fatalf("WriteSegment: %v", err)
 		}
 		seg, err := storage.OpenSegment(path)

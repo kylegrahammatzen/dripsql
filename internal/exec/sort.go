@@ -1,7 +1,5 @@
-// SortOp buffers selected rows, sorts an index permutation by the bound keys, and emits
-// chunks of StandardBatchRows. K > 0 with a single int-like column key takes the streaming
-// top-K path: only K+Offset heap items live in sort metadata, though source batches are
-// still retained for materialization so total memory remains O(input payload).
+// SortOp buffers selected rows, sorts an index permutation by the bound keys, and emits chunks of StandardBatchRows.
+// The streaming top-K path keeps only K+Offset heap items in sort metadata while retaining source batches for materialization.
 package exec
 
 import (
@@ -68,8 +66,7 @@ type sortRow struct {
 
 const topKInt64InsertCapMax = 256
 
-// selectionForBatch returns a read-only mask view for iteration.
-// nil Sel means all rows visible, so it materializes an all-set mask.
+// selectionForBatch returns a read-only mask view for iteration, materializing an all-set mask when a nil Sel means every row is visible.
 func selectionForBatch(batch vector.Batch) vector.SelectionMask {
 	if batch.Sel != nil {
 		return *batch.Sel
@@ -192,10 +189,21 @@ func (s *SortOp) buildSlow() error {
 		}
 		ra, rb := &s.slowRows[a], &s.slowRows[b]
 		for ki, key := range s.Keys {
-			c, err := compareNullable(s.slowKeys[ra.keyOff+ki], s.slowKeys[rb.keyOff+ki])
-			if err != nil {
-				cmpErr = err
-				return 0
+			av, bv := s.slowKeys[ra.keyOff+ki], s.slowKeys[rb.keyOff+ki]
+			var c int
+			switch {
+			case av == nil && bv == nil:
+			case av == nil:
+				c = -1
+			case bv == nil:
+				c = 1
+			default:
+				var err error
+				c, err = orderingCompare(av, bv)
+				if err != nil {
+					cmpErr = err
+					return 0
+				}
 			}
 			if c == 0 {
 				continue
@@ -470,9 +478,7 @@ func (s *SortOp) heapCapUnknown() int {
 	return int(want)
 }
 
-// buildTopKInt64Streaming reads source batches and pushes (key, null, seq, bufIdx, row)
-// items into a bounded heap of capacity K+Offset. Memory cost is O(K+Offset) instead of
-// O(total selected rows). Buffers are still retained for downstream materialization.
+// buildTopKInt64Streaming pushes (key, null, seq, bufIdx, row) items into a bounded heap of capacity K+Offset so sort metadata stays O(K+Offset), while buffers are still retained for downstream materialization.
 func (s *SortOp) buildTopKInt64Streaming(capN int, desc bool) error {
 	keyCol := s.Keys[0].Expr.Column
 	useInsert := capN <= topKInt64InsertCapMax
@@ -668,9 +674,7 @@ func bitSet(bits []uint64, i uint32) {
 	bits[i>>6] |= uint64(1) << uint(i&63)
 }
 
-// cmpInt64Sort returns < 0 if (key, null, seq) a sorts before b under SQL semantics.
-// ASC: nulls first. DESC: nulls last. Tie-break on seq for stability under slices.SortFunc.
-// Used by every int-key path (full sort, streaming top-K heap, final top-K sort).
+// cmpInt64Sort orders (key, null, seq) triples with nulls first under ASC and last under DESC, tie-breaking on seq for stability.
 func cmpInt64Sort(ak int64, anull bool, ai uint32, bk int64, bnull bool, bi uint32, desc bool) int {
 	if anull != bnull {
 		c := 1
@@ -718,9 +722,7 @@ type topKInt64Heap struct {
 	desc bool
 }
 
-// less ranks data[i] as weaker (more eligible for eviction) than data[j]. An item is
-// weaker if it would sort LATER in the final SQL ordering, so the root is the next
-// candidate to evict when a stronger one arrives.
+// less ranks data[i] as weaker than data[j] when it would sort later in the final SQL ordering, keeping the next eviction candidate at the root for when a stronger item arrives.
 func (h *topKInt64Heap) less(i, j int) bool {
 	a, b := h.data[i], h.data[j]
 	return cmpInt64Sort(a.key, a.isNull, a.seq, b.key, b.isNull, b.seq, h.desc) > 0
@@ -762,19 +764,6 @@ func (h *topKInt64Heap) siftDown(start int) {
 		h.data[i], h.data[j] = h.data[j], h.data[i]
 		i = j
 	}
-}
-
-func compareNullable(a, b any) (int, error) {
-	if a == nil && b == nil {
-		return 0, nil
-	}
-	if a == nil {
-		return -1, nil
-	}
-	if b == nil {
-		return 1, nil
-	}
-	return orderingCompare(a, b)
 }
 
 func (s *SortOp) Close() error {

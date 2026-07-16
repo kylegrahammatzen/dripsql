@@ -76,8 +76,7 @@ type columnTemplate struct {
 	Kind       vector.VecKind
 }
 
-// joinRow flags whether each side contributes real data or a null fill. Probe-matched rows
-// set both, left-outer misses set only hasLeft, right-outer drain rows set only hasRight.
+// joinRow flags whether each side contributes real data or a null fill, with probe matches setting both, left-outer misses only hasLeft, and right-outer drain rows only hasRight.
 type joinRow struct {
 	leftRow  int
 	right    rightRowRef
@@ -281,9 +280,7 @@ func (h *HashJoinOp) collectRows(left vector.Batch) error {
 	return loopErr
 }
 
-// resolveJoinKeyCols pre-resolves the column index for each join key. splitJoinEquality
-// already requires keys to be column references, so the type switch in encodeRow can
-// dispatch on VecKind without going through evalCtx or ColumnByName per row.
+// resolveJoinKeyCols pre-resolves the column index for each join key, which splitJoinEquality guarantees is a column reference, so encodeRow dispatches on VecKind without evalCtx or ColumnByName per row.
 func resolveJoinKeyCols(batch vector.Batch, keys []sql.BoundExpr) ([]joinKeyCol, error) {
 	cols := make([]joinKeyCol, len(keys))
 	for i, k := range keys {
@@ -306,9 +303,7 @@ func resolveJoinKeyCols(batch vector.Batch, keys []sql.BoundExpr) ([]joinKeyCol,
 	return cols, nil
 }
 
-// encodeRow writes a type-tagged deterministic byte form of the row's join key. Tags
-// guard against type drift between sides. -0.0 is canonicalised to +0.0 so float keys
-// compare equal across rows that wrote the negative sign bit.
+// encodeRow writes a type-tagged deterministic byte form of the join key, tagging against type drift between sides and canonicalising -0.0 to +0.0 so float keys compare equal.
 func (e *keyEncoder) encodeRow(batch vector.Batch, cols []joinKeyCol, row int) ([]byte, uint64, bool, error) {
 	e.buf = e.buf[:0]
 	for _, kc := range cols {

@@ -4,6 +4,7 @@ package exec
 
 import (
 	"math"
+	"slices"
 
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
@@ -144,7 +145,7 @@ func loweredComparison(expr sql.BoundExpr) (storage.Pred, bool) {
 		if !ok {
 			return storage.Pred{}, false
 		}
-		// LE and GE rewrite to strict ops so encoded FOR range evaluation applies. Extremes cannot shift.
+		// LE and GE rewrite to strict ops so encoded FOR range evaluation applies, and the guarded extremes cannot shift.
 		switch op {
 		case sql.ExprLessEqual:
 			if v == math.MaxInt64 {
@@ -208,9 +209,7 @@ func loweredComparison(expr sql.BoundExpr) (storage.Pred, bool) {
 	return base, true
 }
 
-// predUnsafeUnderNot guards NOT lowering because boundNot's validity re-mask is only sound over
-// children that are false or unknown on null rows. AND trees break the unknown propagation and a
-// nested NOT over IS NULL is a definite false on null rows whose complement the re-mask would drop.
+// predUnsafeUnderNot guards NOT lowering because boundNot's validity re-mask is only sound over children that are false or unknown on null rows, which AND trees and a nested NOT over IS NULL both break.
 func predUnsafeUnderNot(p storage.Pred) bool {
 	if p.Op == storage.OpAnd {
 		return true
@@ -218,32 +217,24 @@ func predUnsafeUnderNot(p storage.Pred) bool {
 	if p.Op == storage.OpNot && len(p.Children) == 1 && p.Children[0].Op == storage.OpIsNull {
 		return true
 	}
-	for _, c := range p.Children {
-		if predUnsafeUnderNot(c) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(p.Children, predUnsafeUnderNot)
 }
 
 // splitWhere separates a WHERE tree into a pushable storage predicate and a residual expression where either may be nil.
 func splitWhere(expr sql.BoundExpr) (*storage.Pred, *sql.BoundExpr) {
 	var pushable []storage.Pred
 	var residual []sql.BoundExpr
-	var walk func(sql.BoundExpr)
-	walk = func(e sql.BoundExpr) {
+	sql.WalkExpr(expr, func(e sql.BoundExpr) bool {
 		if e.Op == sql.ExprAnd && len(e.Args) == 2 {
-			walk(e.Args[0])
-			walk(e.Args[1])
-			return
+			return true
 		}
 		if p, ok := loweredComparison(e); ok {
 			pushable = append(pushable, p)
-			return
+		} else {
+			residual = append(residual, e)
 		}
-		residual = append(residual, e)
-	}
-	walk(expr)
+		return false
+	})
 
 	var push *storage.Pred
 	switch len(pushable) {

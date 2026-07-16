@@ -1,5 +1,5 @@
-// Row-by-row BoundExpr evaluator. Dispatches by ExprOp; child operands live in Args.
-// Returns a Go any per row; the caller knows the expected type.
+// Row-by-row BoundExpr evaluator that dispatches by ExprOp with child operands in Args.
+// Each row yields a Go any whose expected type the caller already knows.
 package exec
 
 import (
@@ -227,9 +227,25 @@ func (c *evalCtx) evalBinary(expr sql.BoundExpr, row int) (any, error) {
 	}
 	switch expr.Op {
 	case sql.ExprAnd:
-		return logicalAnd(left, right), nil
+		lb, lok := left.(bool)
+		rb, rok := right.(bool)
+		if (lok && !lb) || (rok && !rb) {
+			return false, nil
+		}
+		if lok && rok {
+			return true, nil
+		}
+		return nil, nil
 	case sql.ExprOr:
-		return logicalOr(left, right), nil
+		lb, lok := left.(bool)
+		rb, rok := right.(bool)
+		if (lok && lb) || (rok && rb) {
+			return true, nil
+		}
+		if lok && rok {
+			return false, nil
+		}
+		return nil, nil
 	case sql.ExprEqual, sql.ExprNotEqual, sql.ExprLess, sql.ExprLessEqual, sql.ExprGreater, sql.ExprGreaterEqual:
 		return compare(expr.Op, left, right)
 	case sql.ExprAdd, sql.ExprSubtract, sql.ExprMultiply, sql.ExprDivide, sql.ExprModulo, sql.ExprIntDivide:
@@ -425,36 +441,6 @@ func (c *evalCtx) evalIn(expr sql.BoundExpr, row int) (any, error) {
 	return expr.Not, nil
 }
 
-func logicalAnd(left, right any) any {
-	lb, lok := left.(bool)
-	rb, rok := right.(bool)
-	if lok && !lb {
-		return false
-	}
-	if rok && !rb {
-		return false
-	}
-	if lok && rok {
-		return true
-	}
-	return nil
-}
-
-func logicalOr(left, right any) any {
-	lb, lok := left.(bool)
-	rb, rok := right.(bool)
-	if lok && lb {
-		return true
-	}
-	if rok && rb {
-		return true
-	}
-	if lok && rok {
-		return false
-	}
-	return nil
-}
-
 func compare(op sql.ExprOp, left, right any) (any, error) {
 	if left == nil || right == nil {
 		return nil, nil
@@ -518,7 +504,19 @@ func arithmetic(op sql.ExprOp, left, right any) (any, error) {
 	}
 	if li, lok := asInt64(left); lok {
 		if ri, rok := asInt64(right); rok {
-			return intArith(op, li, ri)
+			switch op {
+			case sql.ExprAdd:
+				return vector.AddInt(li, ri), nil
+			case sql.ExprSubtract:
+				return vector.SubInt(li, ri), nil
+			case sql.ExprMultiply:
+				return vector.MulInt(li, ri), nil
+			case sql.ExprDivide, sql.ExprIntDivide:
+				return vector.DivInt(li, ri)
+			case sql.ExprModulo:
+				return vector.ModInt(li, ri)
+			}
+			return nil, fmt.Errorf("arithmetic: unsupported int op %v", op)
 		}
 	}
 	lf, lok := asFloat64(left)
@@ -526,35 +524,15 @@ func arithmetic(op sql.ExprOp, left, right any) (any, error) {
 	if !lok || !rok {
 		return nil, fmt.Errorf("arithmetic: non-numeric operands %T %T", left, right)
 	}
-	return floatArith(op, lf, rf)
-}
-
-func intArith(op sql.ExprOp, l, r int64) (any, error) {
 	switch op {
 	case sql.ExprAdd:
-		return vector.AddInt(l, r), nil
+		return vector.AddFloat(lf, rf), nil
 	case sql.ExprSubtract:
-		return vector.SubInt(l, r), nil
+		return vector.SubFloat(lf, rf), nil
 	case sql.ExprMultiply:
-		return vector.MulInt(l, r), nil
-	case sql.ExprDivide, sql.ExprIntDivide:
-		return vector.DivInt(l, r)
-	case sql.ExprModulo:
-		return vector.ModInt(l, r)
-	}
-	return nil, fmt.Errorf("arithmetic: unsupported int op %v", op)
-}
-
-func floatArith(op sql.ExprOp, l, r float64) (any, error) {
-	switch op {
-	case sql.ExprAdd:
-		return vector.AddFloat(l, r), nil
-	case sql.ExprSubtract:
-		return vector.SubFloat(l, r), nil
-	case sql.ExprMultiply:
-		return vector.MulFloat(l, r), nil
+		return vector.MulFloat(lf, rf), nil
 	case sql.ExprDivide:
-		return vector.DivFloat(l, r)
+		return vector.DivFloat(lf, rf)
 	}
 	return nil, fmt.Errorf("arithmetic: unsupported float op %v", op)
 }
