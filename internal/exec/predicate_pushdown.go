@@ -81,10 +81,22 @@ func loweredComparison(expr sql.BoundExpr) (storage.Pred, bool) {
 			return storage.Pred{}, false
 		}
 		child, ok := loweredComparison(expr.Args[0])
-		if !ok || predContainsAnd(child) {
+		if !ok || predUnsafeUnderNot(child) {
 			return storage.Pred{}, false
 		}
 		return storage.Pred{Op: storage.OpNot, Children: []storage.Pred{child}}, true
+
+	case sql.ExprIsNull, sql.ExprIsNotNull:
+		if len(expr.Args) != 1 || expr.Args[0].Op != sql.ExprColumn || expr.Args[0].Outer {
+			return storage.Pred{}, false
+		}
+		col := expr.Args[0]
+		p := storage.Pred{Op: storage.OpIsNull, Col: col.Column, ColID: uint64(col.ColumnID)}
+		if expr.Op == sql.ExprIsNotNull {
+			// NOT over IS NULL is exact in storage because the complement then validity re-mask yields the valid rows.
+			p = storage.Pred{Op: storage.OpNot, Children: []storage.Pred{p}}
+		}
+		return p, true
 	}
 
 	if len(expr.Args) != 2 {
@@ -196,13 +208,18 @@ func loweredComparison(expr sql.BoundExpr) (storage.Pred, bool) {
 	return base, true
 }
 
-// predContainsAnd guards NOT lowering because boundNot's validity re-mask is only sound over leaves and OR trees.
-func predContainsAnd(p storage.Pred) bool {
+// predUnsafeUnderNot guards NOT lowering because boundNot's validity re-mask is only sound over
+// children that are false or unknown on null rows. AND trees break the unknown propagation and a
+// nested NOT over IS NULL is a definite false on null rows whose complement the re-mask would drop.
+func predUnsafeUnderNot(p storage.Pred) bool {
 	if p.Op == storage.OpAnd {
 		return true
 	}
+	if p.Op == storage.OpNot && len(p.Children) == 1 && p.Children[0].Op == storage.OpIsNull {
+		return true
+	}
 	for _, c := range p.Children {
-		if predContainsAnd(c) {
+		if predUnsafeUnderNot(c) {
 			return true
 		}
 	}

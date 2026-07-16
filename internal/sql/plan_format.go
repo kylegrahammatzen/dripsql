@@ -180,6 +180,10 @@ func (e BoundExpr) String() string {
 		return fmt.Sprintf("%v", e.Literal)
 	case ExprNot:
 		return "NOT " + e.Args[0].String()
+	case ExprIsNull:
+		return e.Args[0].String() + " IS NULL"
+	case ExprIsNotNull:
+		return e.Args[0].String() + " IS NOT NULL"
 	case ExprAnd:
 		return "(" + e.Args[0].String() + " AND " + e.Args[1].String() + ")"
 	case ExprOr:

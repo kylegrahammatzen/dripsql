@@ -168,6 +168,30 @@ func (s *SelectionMask) AndCount(other SelectionMask) int {
 	return count
 }
 
+// AndNotCount clears rows of s that are set in other and returns the remaining count.
+func (s *SelectionMask) AndNotCount(other SelectionMask) int {
+	count := 0
+	for i := range s.words {
+		s.words[i] &^= other.words[i]
+		count += bits.OnesCount64(s.words[i])
+	}
+	s.allSet = count == s.rows
+	return count
+}
+
+// AndNotValidity keeps only rows whose validity bit is zero.
+// A nil validity means every row is valid so the mask clears to empty.
+func (s *SelectionMask) AndNotValidity(v Validity) {
+	if v == nil {
+		s.Clear()
+		return
+	}
+	for i := range s.words {
+		s.words[i] &^= v[i]
+	}
+	s.allSet = false
+}
+
 // AndValidity masks s by a Validity bitmap using word-level AND.
 // A nil validity means all rows are valid and is a no-op.
 func (s *SelectionMask) AndValidity(v Validity) {

@@ -358,6 +358,9 @@ const (
 	ExprExists
 	// ExprParameter is a positional ? placeholder bound to args[Parameter-1] at execution time.
 	ExprParameter
+	// ExprIsNull and ExprIsNotNull take Args = [operand] and are never unknown under three-valued logic.
+	ExprIsNull
+	ExprIsNotNull
 )
 
 type BoundExpr struct {

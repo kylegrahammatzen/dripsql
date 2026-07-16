@@ -1617,6 +1617,8 @@ func bindWhereLogicalExpr(columns map[string]BoundColumnDef, expr Expr) (BoundEx
 			return BoundExpr{}, err
 		}
 		return BoundExpr{Op: ExprNot, Type: schema.Bool, Args: []BoundExpr{child}}, nil
+	case *IsNullExpr:
+		return bindExpr(columns, expr)
 	case *BinaryExpr:
 		op, err := bindBinaryOp(expr.Op)
 		if err != nil {

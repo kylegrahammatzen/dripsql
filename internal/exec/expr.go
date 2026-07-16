@@ -23,13 +23,22 @@ func newEvalCtxWith(batch vector.Batch, outer *correlatedOuter, subBuild func(pl
 	return &evalCtx{batch: batch, outer: outer, subBuild: subBuild}
 }
 
-func (c *evalCtx) EvalBool(expr sql.BoundExpr, row int) (truth bool, err error) {
+// EvalTruth evaluates a predicate to SQL three-valued truth where unknown reports a NULL result.
+func (c *evalCtx) EvalTruth(expr sql.BoundExpr, row int) (truth bool, unknown bool, err error) {
 	v, err := c.eval(expr, row)
 	if err != nil {
-		return false, err
+		return false, false, err
+	}
+	if v == nil {
+		return false, true, nil
 	}
 	b, ok := v.(bool)
-	return ok && b, nil
+	return ok && b, false, nil
+}
+
+func (c *evalCtx) EvalBool(expr sql.BoundExpr, row int) (truth bool, err error) {
+	truth, _, err = c.EvalTruth(expr, row)
+	return truth, err
 }
 
 func (c *evalCtx) eval(expr sql.BoundExpr, row int) (any, error) {
@@ -52,6 +61,18 @@ func (c *evalCtx) eval(expr sql.BoundExpr, row int) (any, error) {
 		return c.evalCorrelatedExists(expr, row)
 	case sql.ExprNot, sql.ExprLower, sql.ExprUpper, sql.ExprLength, sql.ExprAbs:
 		return c.evalUnary(expr, row)
+	case sql.ExprIsNull, sql.ExprIsNotNull:
+		if len(expr.Args) != 1 {
+			return nil, fmt.Errorf("eval: IS NULL expects 1 arg")
+		}
+		v, err := c.eval(expr.Args[0], row)
+		if err != nil {
+			return nil, err
+		}
+		if expr.Op == sql.ExprIsNull {
+			return v == nil, nil
+		}
+		return v != nil, nil
 	case sql.ExprNullIf:
 		return c.evalNullIf(expr, row)
 	case sql.ExprBetween:
@@ -254,13 +275,7 @@ func (c *evalCtx) evalSubstring(expr sql.BoundExpr, row int) (any, error) {
 		return nil, fmt.Errorf("eval: substring start not integer")
 	}
 	// SQL substring is 1-based with a clamp to [0, len].
-	begin := int(start) - 1
-	if begin < 0 {
-		begin = 0
-	}
-	if begin > len(s) {
-		begin = len(s)
-	}
+	begin := min(max(int(start)-1, 0), len(s))
 	end := len(s)
 	if len(expr.Args) >= 3 {
 		lengthRaw, err := c.eval(expr.Args[2], row)
@@ -274,10 +289,7 @@ func (c *evalCtx) evalSubstring(expr sql.BoundExpr, row int) (any, error) {
 		if length < 0 {
 			return nil, fmt.Errorf("eval: substring length is negative")
 		}
-		end = begin + int(length)
-		if end > len(s) {
-			end = len(s)
-		}
+		end = min(begin+int(length), len(s))
 	}
 	return s[begin:end], nil
 }
@@ -388,10 +400,15 @@ func (c *evalCtx) evalIn(expr sql.BoundExpr, row int) (any, error) {
 	if err != nil || target == nil {
 		return nil, err
 	}
+	sawNull := false
 	for _, candidate := range expr.Args[1:] {
 		v, err := c.eval(candidate, row)
 		if err != nil {
 			return nil, err
+		}
+		if v == nil {
+			sawNull = true
+			continue
 		}
 		eq, err := compare(sql.ExprEqual, target, v)
 		if err != nil {
@@ -400,6 +417,10 @@ func (c *evalCtx) evalIn(expr sql.BoundExpr, row int) (any, error) {
 		if b, ok := eq.(bool); ok && b {
 			return !expr.Not, nil
 		}
+	}
+	// A miss against a list containing NULL is unknown so NOT IN cannot claim the row.
+	if sawNull {
+		return nil, nil
 	}
 	return expr.Not, nil
 }

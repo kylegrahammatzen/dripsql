@@ -272,6 +272,47 @@ func TestLoweredPredicate_NotOverAndUnpushable(t *testing.T) {
 	}
 }
 
+// IS NULL pushes as OpIsNull and IS NOT NULL as OpNot over it, while NOT over IS NOT NULL must stay
+// decoded because boundNot's validity re-mask would drop the null rows that predicate selects.
+func TestLoweredPredicate_IsNull(t *testing.T) {
+	isNull := sql.BoundExpr{Op: sql.ExprIsNull, Args: []sql.BoundExpr{{Op: sql.ExprColumn, Column: "v"}}}
+	got, ok := loweredComparison(isNull)
+	if !ok || !predEq(got, storage.Pred{Op: storage.OpIsNull, Col: "v"}) {
+		t.Errorf("IS NULL got ok=%v %#v", ok, got)
+	}
+	isNotNull := sql.BoundExpr{Op: sql.ExprIsNotNull, Args: isNull.Args}
+	wantNot := storage.Pred{Op: storage.OpNot, Children: []storage.Pred{{Op: storage.OpIsNull, Col: "v"}}}
+	got, ok = loweredComparison(isNotNull)
+	if !ok || !predEq(got, wantNot) {
+		t.Errorf("IS NOT NULL got ok=%v %#v", ok, got)
+	}
+	got, ok = loweredComparison(sql.BoundExpr{Op: sql.ExprNot, Args: []sql.BoundExpr{isNull}})
+	if !ok || !predEq(got, wantNot) {
+		t.Errorf("NOT(IS NULL) got ok=%v %#v", ok, got)
+	}
+	if _, ok := loweredComparison(sql.BoundExpr{Op: sql.ExprNot, Args: []sql.BoundExpr{isNotNull}}); ok {
+		t.Error("NOT(IS NOT NULL) must not lower")
+	}
+}
+
+// A NULL element makes IN three-valued so both IN and NOT IN must refuse the two-valued storage lowering.
+func TestLoweredPredicate_InWithNullRefused(t *testing.T) {
+	for _, not := range []bool{false, true} {
+		expr := sql.BoundExpr{
+			Op:  sql.ExprIn,
+			Not: not,
+			Args: []sql.BoundExpr{
+				{Op: sql.ExprColumn, Column: "id"},
+				{Op: sql.ExprLiteral, Literal: int64(1)},
+				{Op: sql.ExprLiteral, Literal: nil},
+			},
+		}
+		if _, ok := loweredComparison(expr); ok {
+			t.Errorf("IN with NULL element must not lower (not=%v)", not)
+		}
+	}
+}
+
 // In range narrow int literals push, out of range ones stay decoded where clampVerdict resolves them.
 func TestLoweredPredicate_NarrowIntRange(t *testing.T) {
 	narrowCmp := func(lit int64) sql.BoundExpr {

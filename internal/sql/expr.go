@@ -11,10 +11,6 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-func BindExpr(columns []BoundColumnDef, expr Expr) (BoundExpr, error) {
-	return bindExpr(buildColumnIndex(columns), expr)
-}
-
 func bindExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
 	switch e := expr.(type) {
 	case *ColumnRef:
@@ -95,6 +91,16 @@ func bindExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
 			return BoundExpr{}, err
 		}
 		return BoundExpr{Op: ExprNot, Type: schema.Bool, Args: []BoundExpr{child}}, nil
+	case *IsNullExpr:
+		child, err := bindExpr(columns, e.Expr)
+		if err != nil {
+			return BoundExpr{}, err
+		}
+		op := ExprIsNull
+		if e.Not {
+			op = ExprIsNotNull
+		}
+		return BoundExpr{Op: op, Type: schema.Bool, Args: []BoundExpr{child}}, nil
 	case *CaseExpr:
 		return bindCaseExpr(columns, e)
 	case *SubqueryExpr:
@@ -723,6 +729,10 @@ func validateBetween(target, low, high BoundExpr, r betweenRules) error {
 }
 
 func validateWhereInValue(target BoundExpr, value BoundExpr) error {
+	// A bare NULL is a legal list element of any type whose misses evaluate to unknown.
+	if value.Op == ExprLiteral && value.Literal == nil && value.Type.Kind == schema.KindInvalid {
+		return nil
+	}
 	if isIntegerExpr(target) && isIntegerExpr(value) {
 		return nil
 	}

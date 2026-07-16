@@ -1728,6 +1728,20 @@ func (p *parser) parsePredicateAfterLeft(left Expr) (Expr, error) {
 		return &BetweenExpr{Expr: left, Low: low, High: high}, nil
 	}
 
+	if ok, err := p.maybeWord("is"); err != nil || ok {
+		if err != nil {
+			return nil, err
+		}
+		not, err := p.maybeWord("not")
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectWord("null"); err != nil {
+			return nil, err
+		}
+		return &IsNullExpr{Expr: left, Not: not}, nil
+	}
+
 	inNot := false
 	if ok, err := p.maybeWord("not"); err != nil {
 		return nil, err

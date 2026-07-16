@@ -265,6 +265,11 @@ type NotExpr struct {
 	Expr Expr
 }
 
+type IsNullExpr struct {
+	Expr Expr
+	Not  bool
+}
+
 type WhenClause struct {
 	When Expr
 	Then Expr
@@ -298,6 +303,7 @@ func (*CaseExpr) isExpr()     {}
 func (*SubqueryExpr) isExpr() {}
 func (*ExistsExpr) isExpr()   {}
 func (*NotExpr) isExpr()      {}
+func (*IsNullExpr) isExpr()   {}
 
 type BinaryOp uint8
 

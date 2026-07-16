@@ -1,4 +1,4 @@
-// Scalar BindExpr tests: column resolution, literal typing, arithmetic result type,
+// Scalar bindExpr tests: column resolution, literal typing, arithmetic result type,
 // JSON path typing, scalar function arity/typing, NOT/AND/OR shape, aggregate rejection.
 package sql
 
@@ -24,7 +24,7 @@ func bindExprFromSQL(t *testing.T, sql string) (BoundExpr, error) {
 		t.Fatalf("parse %q: %v", sql, err)
 	}
 	sel := stmt.(*SelectStmt)
-	return BindExpr(sampleSchema(), sel.Select[0].Expr)
+	return bindExpr(buildColumnIndex(sampleSchema()), sel.Select[0].Expr)
 }
 
 func TestBindExpr_ColumnAndLiteral(t *testing.T) {
@@ -147,7 +147,7 @@ func TestBindExpr_UUIDColumn_RejectsIncompatibleColumn(t *testing.T) {
 		{ID: 2, Name: "n", Type: schema.Int64},
 	}
 	cmp := &BinaryExpr{Left: &ColumnRef{Name: "u"}, Op: BinaryEqual, Right: &ColumnRef{Name: "n"}}
-	if _, err := BindExpr(schema, cmp); err == nil {
+	if _, err := bindExpr(buildColumnIndex(schema), cmp); err == nil {
 		t.Fatal("uuid_col = int_col must error")
 	}
 }
@@ -158,7 +158,7 @@ func TestBindExpr_BytesColumn_RejectsIncompatibleColumn(t *testing.T) {
 		{ID: 2, Name: "f", Type: schema.Bool},
 	}
 	cmp := &BinaryExpr{Left: &ColumnRef{Name: "b"}, Op: BinaryEqual, Right: &ColumnRef{Name: "f"}}
-	if _, err := BindExpr(schema, cmp); err == nil {
+	if _, err := bindExpr(buildColumnIndex(schema), cmp); err == nil {
 		t.Fatal("bytes_col = bool_col must error")
 	}
 }
@@ -169,7 +169,7 @@ func TestBindExpr_EnumColumn_RejectsIncompatibleColumn(t *testing.T) {
 		{ID: 2, Name: "n", Type: schema.Int64},
 	}
 	cmp := &BinaryExpr{Left: &ColumnRef{Name: "e"}, Op: BinaryEqual, Right: &ColumnRef{Name: "n"}}
-	if _, err := BindExpr(schema, cmp); err == nil {
+	if _, err := bindExpr(buildColumnIndex(schema), cmp); err == nil {
 		t.Fatal("enum_col = int_col must error")
 	}
 }
@@ -180,11 +180,11 @@ func TestBindExpr_DifferentEnums_Reject(t *testing.T) {
 		{ID: 2, Name: "b", Type: schema.Named("status"), Labels: []string{"y"}},
 	}
 	cmp := &BinaryExpr{Left: &ColumnRef{Name: "a"}, Op: BinaryEqual, Right: &ColumnRef{Name: "b"}}
-	if _, err := BindExpr(schema, cmp); err == nil {
+	if _, err := bindExpr(buildColumnIndex(schema), cmp); err == nil {
 		t.Fatal("comparing different enum types must error")
 	}
 	coalesce := &FuncCall{Name: "coalesce", Args: []Expr{&ColumnRef{Name: "a"}, &ColumnRef{Name: "b"}}}
-	if _, err := BindExpr(schema, coalesce); err == nil {
+	if _, err := bindExpr(buildColumnIndex(schema), coalesce); err == nil {
 		t.Fatal("coalescing different enum types must error")
 	}
 }
@@ -192,7 +192,7 @@ func TestBindExpr_DifferentEnums_Reject(t *testing.T) {
 func TestBindExpr_NotAndOr(t *testing.T) {
 	// NOT/AND/OR are WHERE-level operators in the grammar, so test via a hand-built AST.
 	not := &NotExpr{Expr: &BinaryExpr{Left: &ColumnRef{Name: "name"}, Op: BinaryEqual, Right: &Literal{Value: Value{Kind: ValueString, String: "x"}}}}
-	be, err := BindExpr(sampleSchema(), not)
+	be, err := bindExpr(buildColumnIndex(sampleSchema()), not)
 	if err != nil {
 		t.Fatalf("BindExpr: %v", err)
 	}
