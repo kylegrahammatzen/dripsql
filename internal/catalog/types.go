@@ -44,7 +44,6 @@ type Table struct {
 	Columns             []Column      `json:"columns"`
 	PrimaryKey          []ColumnID    `json:"primary_key"`
 	Constraints         []Constraint  `json:"constraints"`
-	Indexes             []Index       `json:"indexes"`
 	StoragePolicy       StoragePolicy `json:"storage_policy"`
 }
 
@@ -87,13 +86,6 @@ type Constraint struct {
 	Predicate string     `json:"predicate,omitempty"`
 }
 
-type Index struct {
-	Name    string     `json:"name"`
-	Kind    string     `json:"kind"`
-	Columns []ColumnID `json:"columns"`
-	Unique  bool       `json:"unique"`
-}
-
 // Force empty slices to render as [] so hand-read catalogs never carry stray nulls.
 func (f File) MarshalJSON() ([]byte, error) {
 	type alias File
@@ -118,9 +110,6 @@ func (t Table) MarshalJSON() ([]byte, error) {
 	}
 	if out.Constraints == nil {
 		out.Constraints = []Constraint{}
-	}
-	if out.Indexes == nil {
-		out.Indexes = []Index{}
 	}
 	return json.Marshal(out)
 }

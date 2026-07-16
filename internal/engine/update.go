@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
@@ -34,12 +35,6 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan, commit commitFn) (int6
 		return 0, err
 	}
 
-	stmt := storage.NewSpan("UPDATE " + def.Name)
-	defer func() {
-		stmt.End()
-		db.publishWriteSpan(stmt)
-	}()
-
 	stage := stagedUpdate{}
 	flush := func() error {
 		if pending.rows == 0 {
@@ -50,14 +45,10 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan, commit commitFn) (int6
 			return err
 		}
 		path := db.nextSegmentPath(def.Name)
-		span, err := storage.WriteSegmentWithIdentity(path, []vector.Batch{batch}, columnCodecs(def), db.segmentIdentity(def))
-		if span != nil {
-			stmt.AppendChild(span)
-		}
-		if err != nil {
+		if _, err := storage.WriteSegmentWithIdentity(path, []vector.Batch{batch}, columnCodecs(def), db.segmentIdentity(def)); err != nil {
 			return err
 		}
-		stage.adds = append(stage.adds, storage.ManifestSegmentAdd{Path: path, Rows: uint32(pending.rows), SchemaGeneration: uint64(db.catalog.Generation)})
+		stage.adds = append(stage.adds, storage.ManifestSegmentAdd{Path: filepath.Base(path), Rows: uint32(pending.rows), SchemaGeneration: uint64(db.catalog.Generation)})
 		stage.paths = append(stage.paths, path)
 		return pending.reset()
 	}
@@ -76,7 +67,7 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan, commit commitFn) (int6
 		updated += n
 		if dvUpdate != nil {
 			stage.dvUpdates = append(stage.dvUpdates, *dvUpdate)
-			stage.paths = append(stage.paths, dvUpdate.DVPath)
+			stage.paths = append(stage.paths, db.resolveTablePath(def.Name, dvUpdate.DVPath))
 		}
 	}
 	if err := flush(); err != nil {
@@ -168,7 +159,9 @@ func (db *DB) applyUpdateToSegment(ctx context.Context, entry storage.ManifestEn
 	if err := ctx.Err(); err != nil {
 		return 0, nil, err
 	}
-	seg, err := storage.OpenSegmentWithDV(entry.Path, entry.DeletionVectorPath)
+	table := plan.Table.Name
+	segPath := db.resolveTablePath(table, entry.Path)
+	seg, err := storage.OpenSegmentWithDV(segPath, db.resolveTablePath(table, entry.DeletionVectorPath))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -207,11 +200,11 @@ func (db *DB) applyUpdateToSegment(ctx context.Context, entry storage.ManifestEn
 	if !anyMatch {
 		return updated, nil, nil
 	}
-	dvPath := versionedDVPath(entry.Path)
+	dvPath := versionedDVPath(segPath)
 	if err := storage.WriteDVAtPath(dvPath, rows, dv); err != nil {
 		return updated, nil, err
 	}
-	return updated, &storage.ManifestDVUpdate{SegmentPath: entry.Path, DVPath: dvPath, Rows: uint32(rows)}, nil
+	return updated, &storage.ManifestDVUpdate{SegmentPath: entry.Path, DVPath: filepath.Base(dvPath), Rows: uint32(rows)}, nil
 }
 
 type updateBuffer struct {
@@ -299,6 +292,10 @@ func (b *updateBuffer) materialize() (vector.Batch, error) {
 }
 
 func writeAssignedRow(v *vector.Vec, vk vector.VecKind, val sql.Value, row int) error {
+	val, err := normalizeTemporal(vk, val)
+	if err != nil {
+		return err
+	}
 	switch vk {
 	case vector.VecBool:
 		if val.Bool {

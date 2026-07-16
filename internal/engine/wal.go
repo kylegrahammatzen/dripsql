@@ -54,12 +54,13 @@ func (db *DB) recoverTxnGroup(group []storage.ManifestIntent) error {
 			return fmt.Errorf("wal recover: manifest for %q: %w", intent.Table, err)
 		}
 		view := m.Snapshot()
+		// Compare basenames so intents and manifest entries match across path formats.
 		known := make(map[string]struct{}, len(view.Entries))
 		for _, e := range view.Entries {
-			known[e.Path] = struct{}{}
+			known[filepath.Base(e.Path)] = struct{}{}
 		}
 		for _, a := range intent.Adds {
-			if _, ok := known[a.Path]; ok {
+			if _, ok := known[filepath.Base(a.Path)]; ok {
 				st.committed = true
 				anyCommitted = true
 				break
@@ -85,13 +86,15 @@ func (db *DB) recoverTxnGroup(group []storage.ManifestIntent) error {
 	// Nothing committed: delete every staged file across the group.
 	for _, st := range states {
 		for _, a := range st.intent.Adds {
-			if err := os.Remove(a.Path); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("wal recover: remove orphan %q: %w", a.Path, err)
+			p := db.resolveTablePath(st.intent.Table, a.Path)
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("wal recover: remove orphan %q: %w", p, err)
 			}
 		}
 		for _, dv := range st.intent.DVUpdates {
-			if err := os.Remove(dv.DVPath); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("wal recover: remove orphan dv %q: %w", dv.DVPath, err)
+			p := db.resolveTablePath(st.intent.Table, dv.DVPath)
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("wal recover: remove orphan dv %q: %w", p, err)
 			}
 		}
 		if err := db.markIntentResolved(st.intent, 0); err != nil {

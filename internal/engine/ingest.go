@@ -57,10 +57,7 @@ func (db *DB) Ingest(ctx context.Context, cfg IngestConfig) (int64, error) {
 		return 0, fmt.Errorf("ingest: %d rows exceeds single segment capacity", total)
 	}
 
-	root := storage.NewSpan("Ingest " + def.Name)
-	add, cleanup, err := db.writeSegmentAdd(def, cfg.Batches, uint32(total), root)
-	root.End()
-	db.publishWriteSpan(root)
+	add, cleanup, err := db.writeSegmentAdd(def, cfg.Batches, uint32(total))
 	if err != nil {
 		return 0, err
 	}

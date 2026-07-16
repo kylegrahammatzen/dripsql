@@ -143,7 +143,6 @@ func buildTable(file *catalog.File, spec schema.TableSpec, gen catalog.Generatio
 		Columns:             make([]catalog.Column, 0, len(spec.Columns)),
 		PrimaryKey:          []catalog.ColumnID{},
 		Constraints:         []catalog.Constraint{},
-		Indexes:             []catalog.Index{},
 	}
 	codecs := []catalog.ColumnCodec{}
 	colByName := make(map[string]catalog.ColumnID, len(spec.Columns))

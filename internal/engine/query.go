@@ -107,7 +107,10 @@ func (db *DB) openSegmentsAt(table string, readTs uint64) ([]*storage.Segment, e
 	segs := make([]*storage.Segment, 0, len(view.Entries))
 	working := make(map[segCacheKey]struct{}, len(view.Entries))
 	for _, entry := range view.Entries {
-		key := segCacheKey{path: entry.Path, dvPath: entry.DeletionVectorPath}
+		// Cache keys use resolved paths so legacy absolute and relative entries for one file share identity.
+		segPath := db.resolveTablePath(table, entry.Path)
+		dvPath := db.resolveTablePath(table, entry.DeletionVectorPath)
+		key := segCacheKey{path: segPath, dvPath: dvPath}
 		working[key] = struct{}{}
 		if seg, ok := db.segments.touch(key); ok {
 			// CommitTs may differ after a manifest rewrite even when the file handle is still valid.
@@ -115,9 +118,9 @@ func (db *DB) openSegmentsAt(table string, readTs uint64) ([]*storage.Segment, e
 			segs = append(segs, seg)
 			continue
 		}
-		seg, err := storage.OpenSegmentWithDV(entry.Path, entry.DeletionVectorPath)
+		seg, err := storage.OpenSegmentWithDV(segPath, dvPath)
 		if err != nil {
-			return nil, fmt.Errorf("engine: open segment %q: %w", entry.Path, err)
+			return nil, fmt.Errorf("engine: open segment %q: %w", segPath, err)
 		}
 		seg.CommitTs = entry.CommitTs
 		db.segments.add(key, seg)

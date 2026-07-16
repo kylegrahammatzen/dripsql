@@ -25,7 +25,6 @@ func validBase() *File {
 			},
 			PrimaryKey:  []ColumnID{},
 			Constraints: []Constraint{},
-			Indexes:     []Index{},
 			StoragePolicy: StoragePolicy{
 				Storage:     "default",
 				Profile:     "default",

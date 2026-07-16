@@ -828,14 +828,16 @@ func TestEngine_AggregateExpressionArgs(t *testing.T) {
 func TestEngine_AggregateExpressionWithDictGroupKey(t *testing.T) {
 	db := openTestDB(t)
 	mustExec(t, db, "CREATE TABLE t (cat text NOT NULL, price int64 NOT NULL, qty int64 NOT NULL)")
-	var stmts []string
+	var ins strings.Builder
+	ins.WriteString("INSERT INTO t (cat, price, qty) VALUES ")
 	for i := range 300 {
+		if i > 0 {
+			ins.WriteString(",")
+		}
 		cat := []string{"x", "y", "z"}[i%3]
-		stmts = append(stmts, fmt.Sprintf("INSERT INTO t (cat, price, qty) VALUES ('%s', %d, %d)", cat, i, i%7))
+		fmt.Fprintf(&ins, "('%s', %d, %d)", cat, i, i%7)
 	}
-	if _, err := db.BulkInsert(context.Background(), stmts); err != nil {
-		t.Fatalf("BulkInsert: %v", err)
-	}
+	mustExec(t, db, ins.String())
 
 	got := mustValues(t, db, "SELECT cat, sum(price * qty) AS pq, count(*) AS c FROM t GROUP BY cat ORDER BY cat")
 	var wantX, wantY, wantZ int64

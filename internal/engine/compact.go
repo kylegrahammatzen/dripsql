@@ -20,6 +20,9 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		return 0, err
 	}
 	defer db.mu.Unlock()
+	if db.readOnly.Load() {
+		return 0, ErrReadOnly
+	}
 	m, err := db.manifestFor(table)
 	if err != nil {
 		return 0, err
@@ -40,11 +43,6 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		activeIDs[uint64(c.ID)] = struct{}{}
 	}
 	rewritten := 0
-	stmt := storage.NewSpan("COMPACT " + table)
-	defer func() {
-		stmt.End()
-		db.publishWriteSpan(stmt)
-	}()
 	for _, entry := range view.Entries {
 		if entry.Path == "" {
 			continue
@@ -52,7 +50,8 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		if err := ctx.Err(); err != nil {
 			return rewritten, err
 		}
-		seg := segByPath[entry.Path]
+		segPath := db.resolveTablePath(table, entry.Path)
+		seg := segByPath[segPath]
 		if seg == nil {
 			continue
 		}
@@ -67,17 +66,16 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		if !halfDeleted && !hasDroppedColumn && !isLegacy {
 			continue
 		}
-		liveBatch, err := readSegmentLiveRows(seg, def)
-		if err != nil {
-			return rewritten, fmt.Errorf("compact %s: %w", entry.Path, err)
+		var liveBatches []vector.Batch
+		if liveCount > 0 {
+			liveBatches, err = readSegmentLiveRows(seg, def)
+			if err != nil {
+				return rewritten, fmt.Errorf("compact %s: %w", entry.Path, err)
+			}
 		}
 		newPath := db.nextSegmentPath(table)
 		if liveCount > 0 {
-			span, err := storage.WriteSegmentWithIdentity(newPath, []vector.Batch{liveBatch}, codecs, db.segmentIdentity(def))
-			if span != nil {
-				stmt.AppendChild(span)
-			}
-			if err != nil {
+			if _, err := storage.WriteSegmentWithIdentity(newPath, liveBatches, codecs, db.segmentIdentity(def)); err != nil {
 				return rewritten, err
 			}
 		}
@@ -85,7 +83,7 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		for i := range rows {
 			fullDV.SetInvalid(i)
 		}
-		dvPath := versionedDVPath(entry.Path)
+		dvPath := versionedDVPath(segPath)
 		if err := storage.WriteDVAtPath(dvPath, rows, fullDV); err != nil {
 			if liveCount > 0 {
 				os.Remove(newPath)
@@ -94,9 +92,9 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		}
 		var adds []storage.ManifestSegmentAdd
 		if liveCount > 0 {
-			adds = append(adds, storage.ManifestSegmentAdd{Path: newPath, Rows: uint32(liveCount), SchemaGeneration: uint64(db.catalog.Generation)})
+			adds = append(adds, storage.ManifestSegmentAdd{Path: filepath.Base(newPath), Rows: uint32(liveCount), SchemaGeneration: uint64(db.catalog.Generation)})
 		}
-		if err := db.commitManifestTxn(table, adds, []storage.ManifestDVUpdate{{SegmentPath: entry.Path, DVPath: dvPath, Rows: uint32(rows)}}); err != nil {
+		if err := db.commitManifestTxn(table, adds, []storage.ManifestDVUpdate{{SegmentPath: entry.Path, DVPath: filepath.Base(dvPath), Rows: uint32(rows)}}); err != nil {
 			if liveCount > 0 {
 				os.Remove(newPath)
 			}
@@ -113,6 +111,9 @@ func (db *DB) Vacuum() (int, error) {
 		return 0, err
 	}
 	defer db.mu.Unlock()
+	if db.readOnly.Load() {
+		return 0, ErrReadOnly
+	}
 	total := 0
 	for name := range db.tables {
 		n, err := db.vacuumTableLocked(name)
@@ -141,6 +142,9 @@ func (db *DB) VacuumRetention(retainBefore uint64) (int, error) {
 		return 0, err
 	}
 	defer db.mu.Unlock()
+	if db.readOnly.Load() {
+		return 0, ErrReadOnly
+	}
 	return db.vacuumRetentionLocked(retainBefore)
 }
 
@@ -171,24 +175,25 @@ func (db *DB) retireFullyDeletedSegments(table string, cutoff uint64) (int, erro
 		return 0, err
 	}
 	view := m.Snapshot()
-	var paths []string
+	// stored keeps the exact manifest strings for Retire while the resolved lists drive file removal.
+	var stored []string
+	var segPaths []string
 	var dvPaths []string
 	for _, entry := range view.Entries {
 		// Retention is safe only when both seg.CommitTs and DV-out CommitTs are strictly
 		// below cutoff, otherwise a reader pinned between them would expect to see live rows.
-		effectiveTs := entry.CommitTs
-		if entry.DVCommitTs > effectiveTs {
-			effectiveTs = entry.DVCommitTs
-		}
+		effectiveTs := max(entry.CommitTs, entry.DVCommitTs)
 		if effectiveTs == 0 || effectiveTs >= cutoff {
 			continue
 		}
 		if entry.DeletionVectorPath == "" {
 			continue
 		}
-		seg, err := storage.OpenSegmentWithDV(entry.Path, entry.DeletionVectorPath)
+		segPath := db.resolveTablePath(table, entry.Path)
+		dvPath := db.resolveTablePath(table, entry.DeletionVectorPath)
+		seg, err := storage.OpenSegmentWithDV(segPath, dvPath)
 		if err != nil {
-			return 0, fmt.Errorf("retention: open %q: %w", entry.Path, err)
+			return 0, fmt.Errorf("retention: open %q: %w", segPath, err)
 		}
 		rows := int(seg.Rows())
 		fullyDead := seg.DV != nil && seg.DV.NullCount(rows) == rows
@@ -196,20 +201,21 @@ func (db *DB) retireFullyDeletedSegments(table string, cutoff uint64) (int, erro
 		if !fullyDead {
 			continue
 		}
-		paths = append(paths, entry.Path)
-		dvPaths = append(dvPaths, entry.DeletionVectorPath)
+		stored = append(stored, entry.Path)
+		segPaths = append(segPaths, segPath)
+		dvPaths = append(dvPaths, dvPath)
 	}
-	if len(paths) == 0 {
+	if len(stored) == 0 {
 		return 0, nil
 	}
-	for _, p := range paths {
+	for _, p := range segPaths {
 		db.segments.removeByPath(p)
 	}
 	commitTs := db.nextCommitTs.Add(1)
-	if err := m.Retire(commitTs, paths); err != nil {
+	if err := m.Retire(commitTs, stored); err != nil {
 		return 0, err
 	}
-	for _, p := range paths {
+	for _, p := range segPaths {
 		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return 0, fmt.Errorf("retention: remove %q: %w", p, err)
 		}
@@ -219,7 +225,7 @@ func (db *DB) retireFullyDeletedSegments(table string, cutoff uint64) (int, erro
 			return 0, fmt.Errorf("retention: remove dv %q: %w", p, err)
 		}
 	}
-	return len(paths), nil
+	return len(stored), nil
 }
 
 func (db *DB) vacuumTableLocked(table string) (int, error) {
@@ -228,10 +234,11 @@ func (db *DB) vacuumTableLocked(table string) (int, error) {
 		return 0, err
 	}
 	view := m.Snapshot()
+	// Keyed by basename so stored-format differences never orphan or double-free a DV file.
 	referenced := make(map[string]struct{}, 2*len(view.Entries))
 	for _, e := range view.Entries {
 		if e.DeletionVectorPath != "" {
-			referenced[e.DeletionVectorPath] = struct{}{}
+			referenced[filepath.Base(e.DeletionVectorPath)] = struct{}{}
 		}
 	}
 	dir := db.tableDir(table)
@@ -251,11 +258,10 @@ func (db *DB) vacuumTableLocked(table string) (int, error) {
 		if strings.HasSuffix(name, ".tmp") {
 			continue
 		}
-		full := filepath.Join(dir, name)
-		if _, ok := referenced[full]; ok {
+		if _, ok := referenced[name]; ok {
 			continue
 		}
-		if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
 			return removed, err
 		}
 		removed++
@@ -263,9 +269,6 @@ func (db *DB) vacuumTableLocked(table string) (int, error) {
 	return removed, nil
 }
 
-// Caller must ensure the segment's live row count fits in a single batch
-// (StandardBatchRows). Compact only invokes this when liveCount <= rows/2, and rows
-// is bounded by the seal-time page size.
 // segmentHasInactiveColumn flags segments whose footer still carries a column id that
 // the current catalog has tombstoned, so they get rewritten next compaction pass.
 func segmentHasInactiveColumn(seg *storage.Segment, activeIDs map[uint64]struct{}) bool {
@@ -283,7 +286,9 @@ func segmentHasInactiveColumn(seg *storage.Segment, activeIDs map[uint64]struct{
 	return false
 }
 
-func readSegmentLiveRows(seg *storage.Segment, def sql.BoundTableDef) (vector.Batch, error) {
+// readSegmentLiveRows re-materializes every live row of seg into page-capped batches
+// so the rewrite never exceeds StandardBatchRows per page regardless of live count.
+func readSegmentLiveRows(seg *storage.Segment, def sql.BoundTableDef) ([]vector.Batch, error) {
 	names := make([]string, len(def.Columns))
 	ids := make([]uint64, len(def.Columns))
 	kinds := make([]vector.VecKind, len(def.Columns))
@@ -293,7 +298,7 @@ func readSegmentLiveRows(seg *storage.Segment, def sql.BoundTableDef) (vector.Ba
 		ids[i] = uint64(c.ID)
 		k, err := vector.VecKindOf(c.Type)
 		if err != nil {
-			return vector.Batch{}, fmt.Errorf("compact: column %q vec kind: %w", c.Name, err)
+			return nil, fmt.Errorf("compact: column %q vec kind: %w", c.Name, err)
 		}
 		kinds[i] = k
 		defaults[i] = storage.ScanDefault{
@@ -312,50 +317,69 @@ func readSegmentLiveRows(seg *storage.Segment, def sql.BoundTableDef) (vector.Ba
 		ColumnKinds:    kinds,
 		ColumnDefaults: defaults,
 	}
-	var collected []vector.Column
-	var totalRows int
-	err := storage.Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error {
-		live := sel.PopCount()
-		if live == 0 {
+	var out []vector.Batch
+	var open []vector.Column
+	openRows := 0
+	flush := func() error {
+		if openRows == 0 {
 			return nil
 		}
-		if collected == nil {
-			collected = make([]vector.Column, len(batch.Columns))
-			for i, c := range batch.Columns {
-				v, err := vector.NewVecForKind(c.V.Kind, vector.StandardBatchRows)
-				if err != nil {
-					return err
-				}
-				collected[i] = vector.Column{Name: c.Name, Type: c.Type, EnumLabels: c.EnumLabels, V: v}
-			}
+		for i := range open {
+			open[i].V.Truncate(openRows)
+		}
+		b, err := vector.NewBatch(open)
+		if err != nil {
+			return err
+		}
+		out = append(out, b)
+		open = nil
+		openRows = 0
+		return nil
+	}
+	err := storage.Scan(opts, func(batch vector.Batch, sel *vector.SelectionMask) error {
+		if sel.PopCount() == 0 {
+			return nil
 		}
 		var loopErr error
 		sel.IterSet(func(row int) {
 			if loopErr != nil {
 				return
 			}
-			for i, c := range batch.Columns {
-				if err := vector.CopyVecRow(c.V, row, &collected[i].V, totalRows); err != nil {
+			if openRows == vector.StandardBatchRows {
+				if err := flush(); err != nil {
 					loopErr = err
 					return
 				}
 			}
-			totalRows++
+			if open == nil {
+				open = make([]vector.Column, len(batch.Columns))
+				for i, c := range batch.Columns {
+					v, err := vector.NewVecForKind(c.V.Kind, vector.StandardBatchRows)
+					if err != nil {
+						loopErr = err
+						return
+					}
+					open[i] = vector.Column{Name: c.Name, Type: c.Type, EnumLabels: c.EnumLabels, V: v}
+				}
+			}
+			for i, c := range batch.Columns {
+				if err := vector.CopyVecRow(c.V, row, &open[i].V, openRows); err != nil {
+					loopErr = err
+					return
+				}
+			}
+			openRows++
 		})
 		return loopErr
 	})
 	if err != nil {
-		return vector.Batch{}, err
+		return nil, err
 	}
-	if collected == nil {
-		return vector.Batch{}, fmt.Errorf("readSegmentLiveRows: no rows decoded")
+	if err := flush(); err != nil {
+		return nil, err
 	}
-	for i := range collected {
-		collected[i].V.Truncate(totalRows)
-	}
-	out, err := vector.NewBatch(collected)
-	if err != nil {
-		return vector.Batch{}, err
+	if len(out) == 0 {
+		return nil, fmt.Errorf("readSegmentLiveRows: no rows decoded")
 	}
 	return out, nil
 }

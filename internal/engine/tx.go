@@ -65,11 +65,12 @@ func (tx *Tx) commit(table string, adds []storage.ManifestSegmentAdd, dvUpdates 
 	}
 	p.adds = append(p.adds, adds...)
 	p.dvUpdates = append(p.dvUpdates, dvUpdates...)
+	// Rollback removes by filesystem path, so resolve the stored strings up front.
 	for _, a := range adds {
-		tx.files = append(tx.files, a.Path)
+		tx.files = append(tx.files, tx.db.resolveTablePath(table, a.Path))
 	}
 	for _, d := range dvUpdates {
-		tx.files = append(tx.files, d.DVPath)
+		tx.files = append(tx.files, tx.db.resolveTablePath(table, d.DVPath))
 	}
 	return nil
 }
@@ -150,10 +151,11 @@ func (tx *Tx) resolveSegments(d sql.BoundTableDef) ([]*storage.Segment, error) {
 		return nil, err
 	}
 	view := m.SnapshotAt(tx.readTs)
+	// Overrides key on resolved paths so stored-format differences cannot miss a match.
 	dvOverride := make(map[string]string)
 	if p != nil {
 		for _, dv := range p.dvUpdates {
-			dvOverride[dv.SegmentPath] = dv.DVPath
+			dvOverride[tx.db.resolveTablePath(d.Name, dv.SegmentPath)] = dv.DVPath
 		}
 	}
 	segs := make([]*storage.Segment, 0, len(view.Entries)+(func() int {
@@ -163,13 +165,14 @@ func (tx *Tx) resolveSegments(d sql.BoundTableDef) ([]*storage.Segment, error) {
 		return len(p.adds)
 	}()))
 	for _, entry := range view.Entries {
+		segPath := tx.db.resolveTablePath(d.Name, entry.Path)
 		dvPath := entry.DeletionVectorPath
-		if pdv, ok := dvOverride[entry.Path]; ok {
+		if pdv, ok := dvOverride[segPath]; ok {
 			dvPath = pdv
 		}
-		seg, err := storage.OpenSegmentWithDV(entry.Path, dvPath)
+		seg, err := storage.OpenSegmentWithDV(segPath, tx.db.resolveTablePath(d.Name, dvPath))
 		if err != nil {
-			return nil, fmt.Errorf("tx: open segment %q: %w", entry.Path, err)
+			return nil, fmt.Errorf("tx: open segment %q: %w", segPath, err)
 		}
 		seg.CommitTs = entry.CommitTs
 		tx.opened = append(tx.opened, seg)
@@ -177,9 +180,10 @@ func (tx *Tx) resolveSegments(d sql.BoundTableDef) ([]*storage.Segment, error) {
 	}
 	if p != nil {
 		for _, a := range p.adds {
-			seg, err := storage.OpenSegmentWithDV(a.Path, "")
+			addPath := tx.db.resolveTablePath(d.Name, a.Path)
+			seg, err := storage.OpenSegmentWithDV(addPath, "")
 			if err != nil {
-				return nil, fmt.Errorf("tx: open pending segment %q: %w", a.Path, err)
+				return nil, fmt.Errorf("tx: open pending segment %q: %w", addPath, err)
 			}
 			tx.opened = append(tx.opened, seg)
 			segs = append(segs, seg)

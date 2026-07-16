@@ -130,14 +130,6 @@ func validateTable(t *Table, typesByName map[string]struct{}) error {
 			}
 		}
 	}
-	for _, idx := range t.Indexes {
-		for _, id := range idx.Columns {
-			if _, ok := colsByID[id]; !ok {
-				return fmt.Errorf("index %q references missing column_id %d", idx.Name, id)
-			}
-		}
-	}
-
 	if _, ok := schema.ParseStorageKindStrict(t.StoragePolicy.Storage); !ok {
 		return fmt.Errorf("unknown storage %q", t.StoragePolicy.Storage)
 	}

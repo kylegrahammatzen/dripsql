@@ -203,7 +203,6 @@ func migrateTable(lt legacyTableRec, gen Generation) (Table, error) {
 		Columns:             make([]Column, 0, len(lt.Spec.Columns)),
 		PrimaryKey:          []ColumnID{},
 		Constraints:         []Constraint{},
-		Indexes:             []Index{},
 	}
 
 	codecs := []ColumnCodec{}

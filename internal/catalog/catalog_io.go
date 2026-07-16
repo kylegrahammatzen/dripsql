@@ -19,24 +19,15 @@ const (
 )
 
 func Load(root string) (*File, error) {
-	path := filepath.Join(root, fileName)
-	tmpPath := filepath.Join(root, tmpFileName)
-	bakPath := filepath.Join(root, bakFileName)
-
 	// A stale .tmp is always garbage left from a crashed save.
-	_ = os.Remove(tmpPath)
+	_ = os.Remove(filepath.Join(root, tmpFileName))
 
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		if bakRaw, bakErr := os.ReadFile(bakPath); bakErr == nil {
-			raw = bakRaw
-		} else if os.IsNotExist(bakErr) {
-			return newEmpty(), nil
-		} else {
-			return nil, bakErr
-		}
-	} else if err != nil {
+	raw, err := readRaw(root)
+	if err != nil {
 		return nil, err
+	}
+	if raw == nil {
+		return newEmpty(), nil
 	}
 
 	if isV1(raw) {
@@ -49,10 +40,48 @@ func Load(root string) (*File, error) {
 		}
 		return f, nil
 	}
+	return parseV2(root, raw)
+}
 
+// LoadReadOnly reads the catalog without sweeping tmp files or persisting a migration.
+// v1-era catalogs are refused because migrating them requires a Save.
+func LoadReadOnly(root string) (*File, error) {
+	raw, err := readRaw(root)
+	if err != nil {
+		return nil, err
+	}
+	if raw == nil {
+		return newEmpty(), nil
+	}
+	if isV1(raw) {
+		return nil, fmt.Errorf("catalog: %s is a v1-era catalog, open the database read-write once to migrate it before read-only use", filepath.Join(root, fileName))
+	}
+	return parseV2(root, raw)
+}
+
+// readRaw returns the newest persisted catalog bytes, or nil when no catalog exists yet.
+func readRaw(root string) ([]byte, error) {
+	raw, err := os.ReadFile(filepath.Join(root, fileName))
+	if err == nil {
+		return raw, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, err
+	}
+	bakRaw, bakErr := os.ReadFile(filepath.Join(root, bakFileName))
+	if bakErr == nil {
+		return bakRaw, nil
+	}
+	if os.IsNotExist(bakErr) {
+		return nil, nil
+	}
+	return nil, bakErr
+}
+
+func parseV2(root string, raw []byte) (*File, error) {
 	var f File
 	if err := json.Unmarshal(raw, &f); err != nil {
-		return nil, fmt.Errorf("catalog: parse %s: %w", path, err)
+		return nil, fmt.Errorf("catalog: parse %s: %w", filepath.Join(root, fileName), err)
 	}
 	if err := Validate(&f); err != nil {
 		return nil, err

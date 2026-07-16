@@ -403,7 +403,7 @@ func TestVacuumRetention_DropsFullyDeletedOldSegment(t *testing.T) {
 	mustExec(t, db, "INSERT INTO t (id) VALUES (1)")
 	mustExec(t, db, "INSERT INTO t (id) VALUES (2)")
 	view := snapshotOf(t, db, "t")
-	pathFirst := view.Entries[0].Path
+	pathFirst := db.resolveTablePath("t", view.Entries[0].Path)
 	mustExec(t, db, "DELETE FROM t WHERE id = 1")
 	cutoff := db.nextCommitTs.Load() + 1
 

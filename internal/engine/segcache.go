@@ -79,8 +79,6 @@ func (c *segmentCache) removeByPath(path string) {
 	}
 }
 
-func (c *segmentCache) len() int { return c.lru.Len() }
-
 // close releases every cached segment and reports the first error encountered.
 func (c *segmentCache) close() error {
 	var firstErr error

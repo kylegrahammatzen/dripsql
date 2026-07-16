@@ -81,6 +81,49 @@ func TestLoad_RecoversFromBakWhenMainMissing(t *testing.T) {
 	}
 }
 
+// Catalogs written before the index surface was removed carry an indexes key that must be ignored, not rejected.
+func TestLoad_IgnoresLegacyIndexesKey(t *testing.T) {
+	dir := t.TempDir()
+	if err := Save(dir, validBase()); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, fileName)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var tables []map[string]json.RawMessage
+	if err := json.Unmarshal(doc["tables"], &tables); err != nil {
+		t.Fatal(err)
+	}
+	tables[0]["indexes"] = json.RawMessage(`[{"name":"idx_id","kind":"btree","columns":[1],"unique":true}]`)
+	doc["tables"], err = json.Marshal(tables)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Load(dir)
+	if err != nil {
+		t.Fatalf("catalog with indexes key must still load: %v", err)
+	}
+	if len(f.Tables) != 1 || f.Tables[0].Name != "t" {
+		t.Fatalf("unexpected tables after load: %+v", f.Tables)
+	}
+	if _, err := LoadReadOnly(dir); err != nil {
+		t.Fatalf("read-only load with indexes key: %v", err)
+	}
+}
+
 func TestLoad_EmptyDirReturnsFreshFile(t *testing.T) {
 	dir := t.TempDir()
 	got, err := Load(dir)

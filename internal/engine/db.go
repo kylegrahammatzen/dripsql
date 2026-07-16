@@ -37,20 +37,21 @@ type DB struct {
 	tables        map[string]*catalog.Table
 	version       sql.SchemaVersion
 	plans         *sql.PlanCache
-	manifests     map[string]*storage.Manifest
-	segCount      map[string]uint64
-	segments      *segmentCache
-	closed        bool
-	lastWriteSpan atomic.Pointer[storage.Span]
-	wal           *storage.WAL
-	nextTxnID     uint64
-	nextCommitTs  atomic.Uint64
-	pinnedReadTs  map[uint64]int
+	manifests    map[string]*storage.Manifest
+	segCount     map[string]uint64
+	segments     *segmentCache
+	closed       bool
+	wal          *storage.WAL
+	nextTxnID    uint64
+	nextCommitTs atomic.Uint64
+	pinnedReadTs map[uint64]int
 
 	autoRetention atomic.Bool
 	retentionLag  atomic.Uint64
 	cacheSize     atomic.Int64
 	readOnly      atomic.Bool
+	// hardReadOnly is set once by OpenReadOnly and can never be cleared.
+	hardReadOnly bool
 }
 
 func (db *DB) SetAutoRetention(on bool) { db.autoRetention.Store(on) }
@@ -65,7 +66,14 @@ func (db *DB) SetCacheSize(n int) {
 	db.cacheSize.Store(int64(n))
 }
 
-func (db *DB) SetReadOnly(on bool) { db.readOnly.Store(on) }
+// SetReadOnly toggles the soft write gate, and clearing it is refused on a database opened via OpenReadOnly.
+func (db *DB) SetReadOnly(on bool) error {
+	if !on && db.hardReadOnly {
+		return fmt.Errorf("engine: database was opened read-only: %w", ErrReadOnly)
+	}
+	db.readOnly.Store(on)
+	return nil
+}
 
 func (db *DB) LastCommitTs() uint64 { return db.nextCommitTs.Load() }
 
@@ -78,20 +86,6 @@ func (db *DB) segCacheLimit() int {
 		return int(n)
 	}
 	return defaultSegCacheLimit
-}
-
-// Returns the most recent statement's write-phase span tree, or nil. The
-// pointer is replaced atomically. The tree it points to is never mutated
-// after publish, so concurrent readers are safe.
-func (db *DB) LastWriteSpan() *storage.Span {
-	return db.lastWriteSpan.Load()
-}
-
-func (db *DB) publishWriteSpan(s *storage.Span) {
-	if s == nil {
-		return
-	}
-	db.lastWriteSpan.Store(s)
 }
 
 type Result struct {
@@ -140,6 +134,19 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	db := newDB(path, file)
+	if err := db.bootstrapCommitTs(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := db.openWAL(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func newDB(path string, file *catalog.File) *DB {
 	db := &DB{
 		root:         path,
 		catalog:      file,
@@ -152,23 +159,23 @@ func Open(path string) (*DB, error) {
 		pinnedReadTs: make(map[uint64]int),
 	}
 	db.segments = newSegmentCache(db.segCacheLimit)
+	return db
+}
+
+// bootstrapCommitTs seeds the commit counter past every persisted manifest record.
+func (db *DB) bootstrapCommitTs() error {
 	var maxCommitTs uint64
 	for name := range db.tables {
 		m, err := db.manifestFor(name)
 		if err != nil {
-			db.Close()
-			return nil, err
+			return err
 		}
 		if t := m.MaxCommitTs(); t > maxCommitTs {
 			maxCommitTs = t
 		}
 	}
 	db.nextCommitTs.Store(maxCommitTs)
-	if err := db.openWAL(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return db, nil
+	return nil
 }
 
 func (db *DB) Close() error {
@@ -202,16 +209,30 @@ func (db *DB) tableDir(name string) string {
 	return filepath.Join(db.root, "segments", key)
 }
 
+// resolveTablePath joins a basename manifest path onto the table dir, passing legacy entries with separators through verbatim.
+func (db *DB) resolveTablePath(table, stored string) string {
+	if stored == "" || strings.ContainsAny(stored, `/\`) {
+		return stored
+	}
+	return filepath.Join(db.tableDir(table), stored)
+}
+
 func (db *DB) manifestFor(name string) (*storage.Manifest, error) {
 	key := schema.NormalizeName(name)
 	if m, ok := db.manifests[key]; ok {
 		return m, nil
 	}
 	dir := db.tableDir(key)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
+	var m *storage.Manifest
+	var err error
+	if db.hardReadOnly {
+		m, err = storage.OpenManifestReadOnly(filepath.Join(dir, "manifest"))
+	} else {
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+			return nil, mkErr
+		}
+		m, err = storage.OpenManifest(filepath.Join(dir, "manifest"))
 	}
-	m, err := storage.OpenManifest(filepath.Join(dir, "manifest"))
 	if err != nil {
 		return nil, err
 	}
@@ -624,11 +645,6 @@ func (db *DB) dropColumn(tab *catalog.Table, p *sql.AlterDropColumn) error {
 	}
 	if slices.Contains(tab.PrimaryKey, target.ColumnID) {
 		return fmt.Errorf("cannot drop column %q referenced by primary key", p.Name)
-	}
-	for _, idx := range tab.Indexes {
-		if slices.Contains(idx.Columns, target.ColumnID) {
-			return fmt.Errorf("cannot drop column %q referenced by index %q", p.Name, idx.Name)
-		}
 	}
 	prevGen := db.catalog.Generation
 	prevSchemaVersion := tab.SchemaVersion

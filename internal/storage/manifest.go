@@ -62,11 +62,14 @@ type ManifestView struct {
 }
 
 type Manifest struct {
-	path    string
-	f       *os.File
-	mu      sync.Mutex
-	records []ManifestEntry
-	version uint64
+	path     string
+	f        *os.File
+	mu       sync.Mutex
+	records  []ManifestEntry
+	version  uint64
+	readOnly bool
+	// goodEnd is the byte offset just past the last successfully parsed line.
+	goodEnd int64
 }
 
 func OpenManifest(path string) (*Manifest, error) {
@@ -90,6 +93,47 @@ func OpenManifest(path string) (*Manifest, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// OpenManifestReadOnly opens the manifest without creating, truncating, or syncing anything.
+// A missing file yields an empty view and a corrupt tail line is dropped in memory only.
+func OpenManifestReadOnly(path string) (*Manifest, error) {
+	m := &Manifest{path: path, readOnly: true}
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return m, nil
+		}
+		return nil, err
+	}
+	m.f = f
+	if err := m.load(); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return m, nil
+}
+
+// Reload folds in records appended after the last successful read, opening the file if it
+// has appeared since. The tail-drop rule applies again, so a line that was partial on the
+// previous pass is retried from the same offset.
+func (m *Manifest) Reload() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.f == nil {
+		if !m.readOnly {
+			return fmt.Errorf("manifest: closed")
+		}
+		f, err := os.Open(m.path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		m.f = f
+	}
+	return m.loadFrom(m.goodEnd)
 }
 
 // openOrCreate creates the file if absent and reports whether the creation happened.
@@ -143,6 +187,9 @@ func (m *Manifest) appendRecord(entry ManifestEntry) error {
 	if m.f == nil {
 		return fmt.Errorf("manifest: closed")
 	}
+	if m.readOnly {
+		return fmt.Errorf("manifest: read-only")
+	}
 	entry.Version = m.version + 1
 	line, err := encodeManifestLine(entry)
 	if err != nil {
@@ -160,6 +207,7 @@ func (m *Manifest) appendRecord(entry ManifestEntry) error {
 	}
 	m.version++
 	m.records = append(m.records, entry)
+	m.goodEnd = offset + int64(len(line))
 	return nil
 }
 
@@ -185,13 +233,6 @@ func (m *Manifest) Snapshot() ManifestView {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return ManifestView{Version: m.version, Entries: m.resolveLocked(m.version)}
-}
-
-func (m *Manifest) At(version uint64) ManifestView {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	clamped := min(version, m.version)
-	return ManifestView{Version: clamped, Entries: m.resolveLocked(clamped)}
 }
 
 // SnapshotAt returns the per-segment view containing only records whose CommitTs is at most
@@ -285,32 +326,40 @@ func (m *Manifest) Retire(commitTs uint64, paths []string) error {
 }
 
 func (m *Manifest) load() error {
-	if _, err := m.f.Seek(0, io.SeekStart); err != nil {
+	if err := m.loadFrom(0); err != nil {
+		return err
+	}
+	if m.readOnly {
+		return nil
+	}
+	return m.truncateTail(m.goodEnd)
+}
+
+// loadFrom parses records starting at offset and advances goodEnd past each complete line.
+// A corrupt or partial tail stops the scan and stays on disk for the caller to handle.
+func (m *Manifest) loadFrom(offset int64) error {
+	if _, err := m.f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
 	reader := bufio.NewReader(m.f)
-	var goodEnd int64
+	m.goodEnd = offset
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
 			entry, parseErr := decodeManifestLine(line)
 			if parseErr != nil {
-				break
+				return nil
 			}
 			m.records = append(m.records, entry)
 			if entry.Version > m.version {
 				m.version = entry.Version
 			}
-			goodEnd += int64(len(line))
-		}
-		if err == io.EOF {
-			return nil
+			m.goodEnd += int64(len(line))
 		}
 		if err != nil {
-			break
+			return nil
 		}
 	}
-	return m.truncateTail(goodEnd)
 }
 
 func (m *Manifest) truncateTail(offset int64) error {

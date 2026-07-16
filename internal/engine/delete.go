@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"time"
@@ -71,7 +72,9 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 	if err := ctx.Err(); err != nil {
 		return 0, nil, err
 	}
-	seg, err := storage.OpenSegmentWithDV(entry.Path, entry.DeletionVectorPath)
+	table := plan.Table.Name
+	segPath := db.resolveTablePath(table, entry.Path)
+	seg, err := storage.OpenSegmentWithDV(segPath, db.resolveTablePath(table, entry.DeletionVectorPath))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -92,11 +95,11 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 			return 0, nil, nil
 		}
 		newDV := make(vector.Validity, vector.ValidityWords(rows))
-		dvPath := versionedDVPath(entry.Path)
+		dvPath := versionedDVPath(segPath)
 		if err := storage.WriteDVAtPath(dvPath, rows, newDV); err != nil {
 			return 0, nil, err
 		}
-		return n, &storage.ManifestDVUpdate{SegmentPath: entry.Path, DVPath: dvPath, Rows: uint32(rows)}, nil
+		return n, &storage.ManifestDVUpdate{SegmentPath: entry.Path, DVPath: filepath.Base(dvPath), Rows: uint32(rows)}, nil
 	}
 
 	predNames := exprColumnNames(*plan.Where)
@@ -130,11 +133,11 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 	if deleted == 0 {
 		return 0, nil, nil
 	}
-	dvPath := versionedDVPath(entry.Path)
+	dvPath := versionedDVPath(segPath)
 	if err := storage.WriteDVAtPath(dvPath, rows, dv); err != nil {
 		return 0, nil, err
 	}
-	return deleted, &storage.ManifestDVUpdate{SegmentPath: entry.Path, DVPath: dvPath, Rows: uint32(rows)}, nil
+	return deleted, &storage.ManifestDVUpdate{SegmentPath: entry.Path, DVPath: filepath.Base(dvPath), Rows: uint32(rows)}, nil
 }
 
 // walkLivePages iterates each page of seg, decoding only defs columns into a reused scratch, and invokes fn with the page batch plus a sel mask of rows matching where (or all live rows when where is nil).

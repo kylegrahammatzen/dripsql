@@ -66,7 +66,6 @@ func TestFile_TableEmptySlicesRenderAsArray(t *testing.T) {
 	wantSlots := []string{
 		`"primary_key": []`,
 		`"constraints": []`,
-		`"indexes": []`,
 		`"sort_by": []`,
 		`"column_codecs": []`,
 	}

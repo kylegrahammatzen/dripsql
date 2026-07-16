@@ -57,7 +57,6 @@
       ],
       "primary_key": [],
       "constraints": [],
-      "indexes": [],
       "storage_policy": {
         "storage": "default",
         "profile": "default",

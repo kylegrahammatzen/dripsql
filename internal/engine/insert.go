@@ -1,94 +1,26 @@
-// Insert path. Bind the statement, materialize one Batch per call, write a fresh segment, append manifest.
+// Insert path. Bind the statement, materialize page-capped batches, write a fresh segment, append manifest.
 package engine
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
-	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-// BulkInsert parses and plans each statement, accumulates the resulting batches,
-// and writes them as one multi-page segment with a single manifest append. All
-// statements must target the same table. Returns the total rows inserted.
-func (db *DB) BulkInsert(ctx context.Context, statements []string) (int64, error) {
-	if len(statements) == 0 {
-		return 0, nil
-	}
-	ctx = ctxOrBackground(ctx)
-
-	var (
-		def     sql.BoundTableDef
-		defSet  bool
-		batches []vector.Batch
-		total   int64
-	)
-
-	for i, text := range statements {
-		if err := ctx.Err(); err != nil {
-			return total, err
-		}
-		stmts, err := sql.Parse(text)
-		if err != nil {
-			return total, fmt.Errorf("BulkInsert: parse stmt %d: %w", i, err)
-		}
-		for _, stmt := range stmts {
-			plan, err := db.planner().Plan(stmt)
-			if err != nil {
-				return total, fmt.Errorf("BulkInsert: plan stmt %d: %w", i, err)
-			}
-			if plan.Kind != sql.PlanInsert {
-				return total, fmt.Errorf("BulkInsert: stmt %d is not INSERT (got %v)", i, plan.Kind)
-			}
-			if plan.Values.RowCount == 0 {
-				continue
-			}
-			if !defSet {
-				def = plan.Table
-				defSet = true
-			} else if schema.NormalizeName(def.Name) != schema.NormalizeName(plan.Table.Name) {
-				return total, fmt.Errorf("BulkInsert: stmt %d targets %q but bulk set is for %q", i, plan.Table.Name, def.Name)
-			}
-			batch, err := batchFromInsert(plan.Values, plan.Table)
-			if err != nil {
-				return total, fmt.Errorf("BulkInsert: build batch %d: %w", i, err)
-			}
-			batches = append(batches, batch)
-			total += int64(plan.Values.RowCount)
-		}
-	}
-
-	if len(batches) == 0 {
-		return 0, nil
-	}
-
-	// Each bulkPagesPerSegment chunk seals one multi-page segment through the shared ingest path.
-	const bulkPagesPerSegment = 128
-	for i := 0; i < len(batches); i += bulkPagesPerSegment {
-		chunk := batches[i:min(i+bulkPagesPerSegment, len(batches))]
-		if _, err := db.Ingest(ctx, IngestConfig{Table: def.Name, Batches: chunk}); err != nil {
-			return total, err
-		}
-	}
-	return total, nil
-}
-
 // writeSegmentAdd writes batches to a fresh segment file and returns the matching manifest entry plus a cleanup func that removes the file when called.
-func (db *DB) writeSegmentAdd(def sql.BoundTableDef, batches []vector.Batch, rows uint32, parent *storage.Span) (storage.ManifestSegmentAdd, func(), error) {
+func (db *DB) writeSegmentAdd(def sql.BoundTableDef, batches []vector.Batch, rows uint32) (storage.ManifestSegmentAdd, func(), error) {
 	path := db.nextSegmentPath(def.Name)
-	span, err := storage.WriteSegmentWithIdentity(path, batches, columnCodecs(def), db.segmentIdentity(def))
-	if span != nil && parent != nil {
-		parent.AppendChild(span)
-	}
-	if err != nil {
+	if _, err := storage.WriteSegmentWithIdentity(path, batches, columnCodecs(def), db.segmentIdentity(def)); err != nil {
 		os.Remove(path)
 		return storage.ManifestSegmentAdd{}, nil, err
 	}
-	return storage.ManifestSegmentAdd{Path: path, Rows: rows, SchemaGeneration: uint64(db.catalog.Generation)}, func() { os.Remove(path) }, nil
+	return storage.ManifestSegmentAdd{Path: filepath.Base(path), Rows: rows, SchemaGeneration: uint64(db.catalog.Generation)}, func() { os.Remove(path) }, nil
 }
 
 func (db *DB) insert(ctx context.Context, plan *sql.Plan, commit commitFn) (int64, error) {
@@ -100,17 +32,14 @@ func (db *DB) insert(ctx context.Context, plan *sql.Plan, commit commitFn) (int6
 	if values.RowCount == 0 {
 		return 0, nil
 	}
-	batch, err := batchFromInsert(values, def)
+	batches, err := batchesFromInsert(values, def)
 	if err != nil {
 		return 0, err
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	stmt := storage.NewSpan("INSERT " + def.Name)
-	add, cleanup, err := db.writeSegmentAdd(def, []vector.Batch{batch}, uint32(values.RowCount), stmt)
-	stmt.End()
-	db.publishWriteSpan(stmt)
+	add, cleanup, err := db.writeSegmentAdd(def, batches, uint32(values.RowCount))
 	if err != nil {
 		return 0, err
 	}
@@ -122,62 +51,75 @@ func (db *DB) insert(ctx context.Context, plan *sql.Plan, commit commitFn) (int6
 	return int64(values.RowCount), nil
 }
 
-func batchFromInsert(values sql.InsertValues, def sql.BoundTableDef) (vector.Batch, error) {
+// batchesFromInsert materializes the VALUES rows as page-capped batches so no
+// single page ever exceeds StandardBatchRows.
+func batchesFromInsert(values sql.InsertValues, def sql.BoundTableDef) ([]vector.Batch, error) {
 	byID := make(map[sql.ColumnID]sql.InsertColumn, len(values.Columns))
 	for _, c := range values.Columns {
 		byID[c.ID] = c
 	}
-	cols := make([]vector.Column, len(def.Columns))
-	for i, c := range def.Columns {
+	for _, c := range def.Columns {
 		ic, ok := byID[c.ID]
 		if !ok {
-			return vector.Batch{}, fmt.Errorf("insert: column %q not provided", c.Name)
+			return nil, fmt.Errorf("insert: column %q not provided", c.Name)
 		}
-		v, err := buildInsertVec(ic, c, values.RowCount)
-		if err != nil {
-			return vector.Batch{}, fmt.Errorf("insert: column %q: %w", c.Name, err)
+		if len(ic.Values) != values.RowCount {
+			return nil, fmt.Errorf("insert: column %q: got %d values for %d rows", c.Name, len(ic.Values), values.RowCount)
 		}
-		cols[i] = vector.Column{Name: c.Name, Type: c.Type, EnumLabels: c.Labels, V: v}
+		if ic.NullCount > 0 && !c.Nullable {
+			firstNull := 0
+			for i, v := range ic.Values {
+				if v.Kind == sql.ValueNull {
+					firstNull = i
+					break
+				}
+			}
+			return nil, fmt.Errorf("insert: column %q: row %d is null but column is NOT NULL", c.Name, firstNull)
+		}
 	}
-	return vector.NewBatch(cols)
+	batches := make([]vector.Batch, 0, (values.RowCount+vector.StandardBatchRows-1)/vector.StandardBatchRows)
+	for start := 0; start < values.RowCount; start += vector.StandardBatchRows {
+		count := min(start+vector.StandardBatchRows, values.RowCount) - start
+		cols := make([]vector.Column, len(def.Columns))
+		for i, c := range def.Columns {
+			v, err := buildInsertVec(byID[c.ID], c, start, count)
+			if err != nil {
+				return nil, fmt.Errorf("insert: column %q: %w", c.Name, err)
+			}
+			cols[i] = vector.Column{Name: c.Name, Type: c.Type, EnumLabels: c.Labels, V: v}
+		}
+		b, err := vector.NewBatch(cols)
+		if err != nil {
+			return nil, err
+		}
+		batches = append(batches, b)
+	}
+	return batches, nil
 }
 
 type insertValueWriter func(row int, val sql.Value) error
 
-func buildInsertVec(ic sql.InsertColumn, def sql.BoundColumnDef, rows int) (vector.Vec, error) {
-	if len(ic.Values) != rows {
-		return vector.Vec{}, fmt.Errorf("got %d values for %d rows", len(ic.Values), rows)
-	}
-	if ic.NullCount > 0 && !def.Nullable {
-		firstNull := 0
-		for i, v := range ic.Values {
-			if v.Kind == sql.ValueNull {
-				firstNull = i
-				break
-			}
-		}
-		return vector.Vec{}, fmt.Errorf("row %d is null but column is NOT NULL", firstNull)
-	}
+func buildInsertVec(ic sql.InsertColumn, def sql.BoundColumnDef, start, count int) (vector.Vec, error) {
 	vk, err := vector.VecKindOf(def.Type)
 	if err != nil {
 		return vector.Vec{}, err
 	}
-	v, err := vector.NewVecForKind(vk, rows)
+	v, err := vector.NewVecForKind(vk, count)
 	if err != nil {
 		return vector.Vec{}, err
 	}
 	var valid vector.Validity
 	if ic.NullCount > 0 {
-		valid = make(vector.Validity, vector.ValidityWords(rows))
+		valid = make(vector.Validity, vector.ValidityWords(count))
 	}
 	writer, err := newInsertValueWriter(&v, vk)
 	if err != nil {
 		return vector.Vec{}, err
 	}
-	for row, val := range ic.Values {
+	for row, val := range ic.Values[start : start+count] {
 		if val.Kind == sql.ValueNull {
 			if valid == nil {
-				return vector.Vec{}, fmt.Errorf("row %d null literal but column rejects nulls", row)
+				return vector.Vec{}, fmt.Errorf("row %d null literal but column rejects nulls", start+row)
 			}
 			continue
 		}
@@ -185,11 +127,40 @@ func buildInsertVec(ic sql.InsertColumn, def sql.BoundColumnDef, rows int) (vect
 			valid.SetValid(row)
 		}
 		if err := writer(row, val); err != nil {
-			return vector.Vec{}, fmt.Errorf("row %d: %w", row, err)
+			return vector.Vec{}, fmt.Errorf("row %d: %w", start+row, err)
 		}
 	}
 	v.Valid = valid
 	return v, nil
+}
+
+// normalizeTemporal converts a validated temporal string literal into the column encoding, days since the Unix epoch for dates, UnixNano for timestamps, and nanoseconds since midnight for times.
+func normalizeTemporal(vk vector.VecKind, val sql.Value) (sql.Value, error) {
+	if val.Kind != sql.ValueString {
+		return val, nil
+	}
+	switch vk {
+	case vector.VecDate:
+		t, err := time.Parse("2006-01-02", val.String)
+		if err != nil {
+			return val, fmt.Errorf("invalid date literal %q", val.String)
+		}
+		return sql.Value{Kind: sql.ValueInt, Int: t.Unix() / 86400}, nil
+	case vector.VecTimestamp:
+		t, err := time.Parse(time.RFC3339Nano, val.String)
+		if err != nil {
+			return val, fmt.Errorf("invalid timestamp literal %q", val.String)
+		}
+		return sql.Value{Kind: sql.ValueInt, Int: t.UnixNano()}, nil
+	case vector.VecTime:
+		t, err := time.Parse("15:04:05.999999999", val.String)
+		if err != nil {
+			return val, fmt.Errorf("invalid time literal %q", val.String)
+		}
+		ns := int64(t.Hour())*3_600_000_000_000 + int64(t.Minute())*60_000_000_000 + int64(t.Second())*1_000_000_000 + int64(t.Nanosecond())
+		return sql.Value{Kind: sql.ValueInt, Int: ns}, nil
+	}
+	return val, nil
 }
 
 func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, error) {
@@ -217,6 +188,10 @@ func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, 
 	case vector.VecInt32, vector.VecDate:
 		dst := v.I32()
 		return func(row int, val sql.Value) error {
+			val, err := normalizeTemporal(vk, val)
+			if err != nil {
+				return err
+			}
 			if val.Kind != sql.ValueInt {
 				return fmt.Errorf("expected int, got %v", val.Kind)
 			}
@@ -226,6 +201,10 @@ func newInsertValueWriter(v *vector.Vec, vk vector.VecKind) (insertValueWriter, 
 	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
 		dst := v.I64()
 		return func(row int, val sql.Value) error {
+			val, err := normalizeTemporal(vk, val)
+			if err != nil {
+				return err
+			}
 			if val.Kind != sql.ValueInt {
 				return fmt.Errorf("expected int, got %v", val.Kind)
 			}
