@@ -1,4 +1,4 @@
-﻿// Plain codec invariant tests: round-trip per kind class, truncated-payload rejection.
+// Plain codec invariant tests covering round-trip per kind class and truncated-payload rejection.
 // These pin the wire layout storage will rely on for v4 Flat-encoded pages.
 package codec
 

@@ -1,4 +1,4 @@
-// Type and VecKindOf tests: Parse normalization, mixed-state rejection, SQL-to-physical mapping.
+// Type and VecKindOf tests covering Parse normalization, mixed-state rejection, and SQL-to-physical mapping.
 // VecKindOf is the bridge SQL-side types use to provision the physical Vec.
 package schema
 
@@ -60,4 +60,3 @@ func TestType_ValidRejectsEmptyNamed(t *testing.T) {
 		t.Fatal("zero Type must be invalid")
 	}
 }
-

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
@@ -89,14 +88,8 @@ func (t *TopKScanOp) build() (vector.Batch, error) {
 	slices.SortFunc(items, func(a, b topKRowItem) int {
 		return cmpInt64Sort(a.key, a.isNull, a.seq, b.key, b.isNull, b.seq, t.Desc)
 	})
-	start := int(t.Offset)
-	if start > len(items) {
-		start = len(items)
-	}
-	end := start + int(t.K)
-	if end > len(items) {
-		end = len(items)
-	}
+	start := min(int(t.Offset), len(items))
+	end := min(start+int(t.K), len(items))
 	return t.materialize(items[start:end])
 }
 
@@ -364,12 +357,7 @@ func fillTopKKeyColumn(v *vector.Vec, items []topKRowItem) {
 }
 
 func findTopKColumn(seg *storage.Segment, name string) int {
-	for i := range seg.Cols {
-		if strings.EqualFold(seg.Cols[i].Name, name) {
-			return i
-		}
-	}
-	return -1
+	return seg.ColumnIndex(name)
 }
 
 func (h *topKRowHeap) less(i, j int) bool {

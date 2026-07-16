@@ -39,10 +39,9 @@ type ScanDefault struct {
 	Bool  bool
 }
 
-// TopKPushdown is storage-owned scan metadata for ORDER BY ... LIMIT/OFFSET over a single
-// int-like column. Storage uses per-page min/max stats to skip pages whose values cannot
-// reach the top K+Offset rows. SortOp remains the correctness layer; pushdown only
-// reduces what storage decodes.
+// TopKPushdown is storage-owned scan metadata for ORDER BY with LIMIT/OFFSET over a single
+// int-like column, using per-page min/max stats to skip pages that cannot reach the top
+// K+Offset rows. SortOp remains the correctness layer and pushdown only reduces what storage decodes.
 type TopKPushdown struct {
 	Column string
 	Desc   bool
@@ -176,14 +175,14 @@ func SelectTopKPages(segments []*Segment, tk *TopKPushdown) map[[2]int]bool {
 		if seg.DV != nil {
 			return nil
 		}
-		colIdx := -1
-		for j := range seg.Cols {
-			if strings.EqualFold(seg.Cols[j].Name, tk.Column) {
-				colIdx = j
-				break
-			}
+		colIdx := seg.ColumnIndex(tk.Column)
+		if colIdx < 0 {
+			return nil
 		}
-		if colIdx < 0 || !topKKindEligible(seg.Cols[colIdx].Kind) {
+		switch seg.Cols[colIdx].Kind {
+		case vector.VecInt16, vector.VecInt32, vector.VecInt64,
+			vector.VecDate, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
+		default:
 			return nil
 		}
 		seg.LoadPageStats()
@@ -207,7 +206,7 @@ func SelectTopKPages(segments []*Segment, tk *TopKPushdown) map[[2]int]bool {
 	if total <= need {
 		return nil
 	}
-	// DESC: page r is dominated by pages with min > r.max. Sort by min ascending,
+	// Under DESC page r is dominated by pages with min > r.max. Sort by min ascending,
 	// binary-search the first index past r.max, read a precomputed suffix sum of rows.
 	// ASC mirrors with max ascending + prefix sum for indices with max < r.min.
 	sorted := make([]pageRef, len(refs))
@@ -248,15 +247,6 @@ func SelectTopKPages(segments []*Segment, tk *TopKPushdown) map[[2]int]bool {
 		return nil
 	}
 	return selected
-}
-
-func topKKindEligible(k vector.VecKind) bool {
-	switch k {
-	case vector.VecInt16, vector.VecInt32, vector.VecInt64,
-		vector.VecDate, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-		return true
-	}
-	return false
 }
 
 func unionNames(a, b []string) []string {
@@ -394,7 +384,7 @@ func fillSyntheticVec(kind vector.VecKind, rows int, def ScanDefault) vector.Vec
 	v := vector.NewVec(kind, rows)
 	v.Valid = vector.NewValidity(rows)
 	if !def.Set || def.Null {
-		for r := 0; r < rows; r++ {
+		for r := range rows {
 			v.Valid.SetInvalid(r)
 		}
 		return v
@@ -428,7 +418,7 @@ func fillSyntheticVec(kind vector.VecKind, rows int, def ScanDefault) vector.Vec
 	case vector.VecBool:
 		bits := v.BoolBits()
 		if def.Bool {
-			for r := 0; r < rows; r++ {
+			for r := range rows {
 				bits[r/8] |= 1 << (uint(r) % 8)
 			}
 		}
@@ -436,7 +426,7 @@ func fillSyntheticVec(kind vector.VecKind, rows int, def ScanDefault) vector.Vec
 		v = vector.NewVarVec(kind, rows, len(def.Bytes)*rows)
 		v.Valid = vector.NewValidity(rows)
 		vb := v.Var()
-		for r := 0; r < rows; r++ {
+		for r := range rows {
 			vb.AppendBytes(r, def.Bytes)
 		}
 	}
@@ -551,12 +541,7 @@ func resolveSegmentColumns(seg *Segment, decode, projection []string, decodeIDs 
 				}
 			}
 		} else {
-			for j := range seg.Cols {
-				if strings.EqualFold(seg.Cols[j].Name, name) {
-					found = j
-					break
-				}
-			}
+			found = seg.ColumnIndex(name)
 			if found < 0 {
 				if canSynth && synthKinds[i] != 0 {
 					decodeIdx[i] = -1
@@ -623,12 +608,20 @@ func scanSegment(seg *Segment, decode []string, decodeIdx, projIdx []int, predNe
 		}
 		needed[pi] = true
 	}
-	src := pageSource{Segment: seg, stripes: newStripeSet(seg, needed)}
+	src := pageSource{Segment: seg, stripes: &stripeSet{seg: seg, needed: needed, cols: make([]colStripe, len(seg.Cols))}}
 	decoded := make([]vector.Column, len(decode))
 	projected := make([]vector.Column, len(projIdx))
 	var sel vector.SelectionMask
 	var scratch []byte
-	predOnly := predicateOnlyMask(decodeIdx, projIdx)
+	predOnly := make([]bool, len(decodeIdx))
+	for i := range predOnly {
+		predOnly[i] = true
+	}
+	for _, p := range projIdx {
+		if p >= 0 && p < len(predOnly) {
+			predOnly[p] = false
+		}
+	}
 	predOnlyAny := false
 	for _, b := range predOnly {
 		if b {
@@ -857,17 +850,4 @@ func parseDictPayload(payload []byte, rows int) (entries [][]byte, codes []byte,
 		}
 	}
 	return entries, codes, nil
-}
-
-func predicateOnlyMask(decodeIdx, projIdx []int) []bool {
-	mask := make([]bool, len(decodeIdx))
-	for i := range mask {
-		mask[i] = true
-	}
-	for _, p := range projIdx {
-		if p >= 0 && p < len(mask) {
-			mask[p] = false
-		}
-	}
-	return mask
 }

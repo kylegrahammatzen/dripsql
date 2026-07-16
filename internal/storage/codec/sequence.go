@@ -1,5 +1,5 @@
-// Sequence codec: arithmetic progression start + step*i in 16 bytes regardless of row count.
-// Scope is width-8 FOR-packable kinds (Int64, Timestamp, Time, Decimal64). Int64 wrap semantics on overflow are tolerated.
+// Sequence codec emits an arithmetic progression start + step*i in 16 bytes regardless of row count.
+// Scope is width-8 FOR-packable kinds (Int64, Timestamp, Time, Decimal64) and Int64 wrap on overflow is tolerated.
 package codec
 
 import (

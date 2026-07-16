@@ -1,4 +1,4 @@
-﻿// Dictionary codec for varbytes kinds that stores each distinct value once indexed by u8 per row.
+// Dictionary codec for varbytes kinds that stores each distinct value once indexed by u8 per row.
 // Wire is u16 LE dictCount then u32 LE len plus bytes per entry then u8 indices times rows and the codec rejects above DictMaxValues.
 package codec
 

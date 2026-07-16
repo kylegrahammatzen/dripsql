@@ -40,11 +40,11 @@ type Table struct {
 	CreatedAtGeneration Generation    `json:"created_at_generation"`
 	UpdatedAtGeneration Generation    `json:"updated_at_generation"`
 	// LegacyPath means data lives under v1 segments/<name>/ rather than tables/<id>/.
-	LegacyPath          bool          `json:"legacy_path,omitempty"`
-	Columns             []Column      `json:"columns"`
-	PrimaryKey          []ColumnID    `json:"primary_key"`
-	Constraints         []Constraint  `json:"constraints"`
-	StoragePolicy       StoragePolicy `json:"storage_policy"`
+	LegacyPath    bool          `json:"legacy_path,omitempty"`
+	Columns       []Column      `json:"columns"`
+	PrimaryKey    []ColumnID    `json:"primary_key"`
+	Constraints   []Constraint  `json:"constraints"`
+	StoragePolicy StoragePolicy `json:"storage_policy"`
 }
 
 type Column struct {
@@ -59,13 +59,13 @@ type Column struct {
 }
 
 type StoragePolicy struct {
-	Storage       string        `json:"storage"`
-	Profile       string        `json:"profile"`
-	SegmentRows   SegmentRows   `json:"segment_rows"`
-	SortBy        []ColumnID    `json:"sort_by"`
-	Compression   string        `json:"compression"`
-	TimeColumnID  *ColumnID     `json:"time_column_id"`
-	ColumnCodecs  []ColumnCodec `json:"column_codecs"`
+	Storage      string        `json:"storage"`
+	Profile      string        `json:"profile"`
+	SegmentRows  SegmentRows   `json:"segment_rows"`
+	SortBy       []ColumnID    `json:"sort_by"`
+	Compression  string        `json:"compression"`
+	TimeColumnID *ColumnID     `json:"time_column_id"`
+	ColumnCodecs []ColumnCodec `json:"column_codecs"`
 }
 
 // Mode is "auto" or "fixed" and Rows is meaningful only in "fixed".

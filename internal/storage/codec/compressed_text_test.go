@@ -1,4 +1,4 @@
-﻿// compressed_text codec invariant tests: round-trip via both Flate and Zstd, kind rejection,
+// compressed_text codec invariant tests covering round-trip via both Flate and Zstd, kind rejection,
 // truncated header handling, length-mismatch detection, and compression actually shrinking repetitive input.
 package codec
 

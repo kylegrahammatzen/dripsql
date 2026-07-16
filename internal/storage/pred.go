@@ -3,6 +3,7 @@
 package storage
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 
@@ -55,10 +56,10 @@ func (op PredOp) String() string {
 	return "invalid"
 }
 
-// Pred is the bound predicate tree; exactly one typed slot is live per leaf based on Kind.
+// Pred is the bound predicate tree where exactly one typed slot is live per leaf based on Kind.
 type Pred struct {
-	Op   PredOp
-	Col  string
+	Op  PredOp
+	Col string
 	// ColID is set by the engine so renames resolve by id when the segment carries identity.
 	ColID uint64
 	Kind  vector.VecKind
@@ -120,7 +121,7 @@ func BindPred(raw Pred, lookup SchemaLookup) (Pred, error) {
 		if !ok {
 			return Pred{}, fmt.Errorf("column %q not in schema", raw.Col)
 		}
-		return Pred{Op: raw.Op, Col: raw.Col, Kind: k, I64: raw.I64, F64: raw.F64, Bytes: cloneBytes(raw.Bytes)}, nil
+		return Pred{Op: raw.Op, Col: raw.Col, Kind: k, I64: raw.I64, F64: raw.F64, Bytes: bytes.Clone(raw.Bytes)}, nil
 	}
 	return Pred{}, fmt.Errorf("BindPred: unknown op %v", raw.Op)
 }
@@ -173,15 +174,6 @@ func (p Pred) columnRefs() ([]string, []uint64) {
 	}
 	walk(p)
 	return names, ids
-}
-
-func cloneBytes(b []byte) []byte {
-	if b == nil {
-		return nil
-	}
-	out := make([]byte, len(b))
-	copy(out, b)
-	return out
 }
 
 // CompiledPred caches one Pred -> BoundPredicate conversion so Scan can reuse it across every page and segment instead of paying for toBound on each call.

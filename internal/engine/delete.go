@@ -18,7 +18,6 @@ import (
 )
 
 // addExprColumns walks a bound expression and seeds every ExprColumn name into the caller's set.
-// exprColumnNames is the sorted-slice variant for callers that need deterministic order.
 func addExprColumns(seen map[string]struct{}, expr sql.BoundExpr) {
 	if expr.Op == sql.ExprColumn {
 		seen[schema.NormalizeName(expr.Column)] = struct{}{}
@@ -27,17 +26,6 @@ func addExprColumns(seen map[string]struct{}, expr sql.BoundExpr) {
 	for _, a := range expr.Args {
 		addExprColumns(seen, a)
 	}
-}
-
-func exprColumnNames(expr sql.BoundExpr) []string {
-	seen := make(map[string]struct{})
-	addExprColumns(seen, expr)
-	out := make([]string, 0, len(seen))
-	for n := range seen {
-		out = append(out, n)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func (db *DB) delete(ctx context.Context, plan *sql.Plan, commit commitFn) (int64, error) {
@@ -102,7 +90,13 @@ func (db *DB) applyDeleteToSegment(ctx context.Context, entry storage.ManifestEn
 		return n, &storage.ManifestDVUpdate{SegmentPath: entry.Path, DVPath: filepath.Base(dvPath), Rows: uint32(rows)}, nil
 	}
 
-	predNames := exprColumnNames(*plan.Where)
+	seen := make(map[string]struct{})
+	addExprColumns(seen, *plan.Where)
+	predNames := make([]string, 0, len(seen))
+	for n := range seen {
+		predNames = append(predNames, n)
+	}
+	sort.Strings(predNames)
 	defs := make([]sql.BoundColumnDef, 0, len(predNames))
 	for _, name := range predNames {
 		found := false
@@ -146,11 +140,10 @@ func walkLivePages(ctx context.Context, seg *storage.Segment, dv vector.Validity
 		return fmt.Errorf("walk: segment has no columns")
 	}
 	hadDV := seg.DV != nil
-	idxByName := segmentColumnIndex(seg)
 	segIdxs := make([]int, len(defs))
 	for i, d := range defs {
-		idx, ok := idxByName[schema.NormalizeName(d.Name)]
-		if !ok {
+		idx := seg.ColumnIndex(d.Name)
+		if idx < 0 {
 			return fmt.Errorf("column %q not in segment", d.Name)
 		}
 		segIdxs[i] = idx
@@ -210,14 +203,6 @@ func cloneOrAllValidDV(seg *storage.Segment, rows int) vector.Validity {
 		return seg.DV.Clone()
 	}
 	return vector.NewAllValid(rows)
-}
-
-func segmentColumnIndex(seg *storage.Segment) map[string]int {
-	out := make(map[string]int, len(seg.Cols))
-	for i, c := range seg.Cols {
-		out[schema.NormalizeName(c.Name)] = i
-	}
-	return out
 }
 
 // versionedDVPath returns a fresh per-update DV path. A unix-nano suffix gives uniqueness

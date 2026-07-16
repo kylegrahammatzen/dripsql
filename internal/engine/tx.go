@@ -1,4 +1,4 @@
-// PR-V3: multi-statement transactions. BeginTx holds db.mu for the txn's lifetime and
+// Multi-statement transactions. BeginTx holds db.mu for the txn's lifetime and
 // stages writes in memory until Commit applies them under one commit_ts.
 package engine
 

@@ -474,7 +474,7 @@ func TestEngine_Compact_MigratesLegacySegments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := storage.WriteSegment(legacyPath, []vector.Batch{batch}, nil); err != nil {
+	if err := storage.WriteSegment(legacyPath, []vector.Batch{batch}, nil); err != nil {
 		t.Fatal(err)
 	}
 

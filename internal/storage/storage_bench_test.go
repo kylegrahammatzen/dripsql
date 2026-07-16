@@ -58,12 +58,12 @@ func TestFloat64_ALPVsPlain_FileSize(t *testing.T) {
 	tmp := t.TempDir()
 
 	defaultPath := filepath.Join(tmp, "alp.dsv4")
-	if _, err := WriteSegment(defaultPath, pages, nil); err != nil {
+	if err := WriteSegment(defaultPath, pages, nil); err != nil {
 		t.Fatal(err)
 	}
 	forcedPath := filepath.Join(tmp, "plain.dsv4")
 	overrides := map[string]schema.Encoding{"price": schema.EncPlain}
-	if _, err := WriteSegment(forcedPath, pages, overrides); err != nil {
+	if err := WriteSegment(forcedPath, pages, overrides); err != nil {
 		t.Fatal(err)
 	}
 	alpSize := fileSize(t, defaultPath)
@@ -78,7 +78,7 @@ func BenchmarkStorage_OpenCold(b *testing.B) {
 	tmp := b.TempDir()
 	path := filepath.Join(tmp, "seg.dsv4")
 	page := makeBenchSegmentBatch(benchPageRows)
-	if _, err := WriteSegment(path, []vector.Batch{page, page, page, page}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{page, page, page, page}, nil); err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
@@ -231,7 +231,7 @@ func openBenchSegment(b *testing.B, pages int) *Segment {
 	for i := range pages {
 		all[i] = batch
 	}
-	if _, err := WriteSegment(path, all, nil); err != nil {
+	if err := WriteSegment(path, all, nil); err != nil {
 		b.Fatal(err)
 	}
 	seg, err := OpenSegment(path)
@@ -248,7 +248,7 @@ func runWriteShapeBench(b *testing.B, page vector.Batch) {
 	for b.Loop() {
 		tmp := b.TempDir()
 		path := filepath.Join(tmp, "seg.dsv4")
-		if _, err := WriteSegment(path, pages, nil); err != nil {
+		if err := WriteSegment(path, pages, nil); err != nil {
 			b.Fatal(err)
 		}
 	}

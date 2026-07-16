@@ -1,5 +1,5 @@
-// Smoke test for OpenRandomAccess: writes a temp file, reopens with the targeted-read
-// helper, and verifies a ReadAt round-trip. Platform-specific flag is exercised in CI.
+// Smoke test for OpenRandomAccess that writes a temp file, reopens with the targeted-read
+// helper, and verifies a ReadAt round-trip. The platform-specific flag is exercised in CI.
 package storage
 
 import (

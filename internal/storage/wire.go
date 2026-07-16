@@ -26,7 +26,7 @@ const PageEntrySize = 32
 // Legacy v3 was the same trailing 24 bytes without the version+flags prefix, so both
 // layouts put sidecarLen, footerLen, and magic at the same window-relative offsets.
 
-// Field order: u64 fields first so the in-memory layout matches the wire bytes on 64-bit LE.
+// The u64 fields come first so the in-memory layout matches the wire bytes on 64-bit LE.
 type Page struct {
 	PayloadOffset uint64
 	PayloadLength uint64

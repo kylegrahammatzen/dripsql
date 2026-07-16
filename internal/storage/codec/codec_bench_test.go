@@ -1,6 +1,6 @@
 // Codec encode/decode microbenches across the codecs the cascade chooses on real workloads.
 // Fixtures use 2048-row pages to match the StandardBatchRows page storage seals today.
-// Run with: go test ./internal/storage/codec -bench=Codec -benchmem -run=^$
+// Run via go test ./internal/storage/codec -bench=Codec -benchmem -run=^$
 package codec
 
 import (

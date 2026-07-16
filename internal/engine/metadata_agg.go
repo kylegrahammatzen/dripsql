@@ -96,8 +96,16 @@ func (db *DB) tryCountWithFilter(plan *sql.Plan, rel, agg, scan *sql.Rel) (*Rows
 	if !ok {
 		return nil, false, nil
 	}
-	colDef, ok := scanColumnDefByName(scan, col)
-	if !ok {
+	var colDef sql.BoundColumnDef
+	found := false
+	want := schema.NormalizeName(col)
+	for _, c := range scan.Table.Columns {
+		if schema.NormalizeName(c.Name) == want {
+			colDef, found = c, true
+			break
+		}
+	}
+	if !found {
 		return nil, false, nil
 	}
 	switch colDef.Type.Kind {
@@ -156,16 +164,6 @@ func singleEqLeaf(e sql.BoundExpr) (col string, lit string, ok bool) {
 		return "", "", false
 	}
 	return c.Column, s, true
-}
-
-func scanColumnDefByName(scan *sql.Rel, name string) (sql.BoundColumnDef, bool) {
-	want := schema.NormalizeName(name)
-	for _, c := range scan.Table.Columns {
-		if schema.NormalizeName(c.Name) == want {
-			return c, true
-		}
-	}
-	return sql.BoundColumnDef{}, false
 }
 
 // All aggregates must be count (Star or over a non-nullable column) or sum or avg over a non-nullable int-backed column.
@@ -440,8 +438,15 @@ func mergeMinMax(segs []*storage.Segment, name string, kind schema.Kind, wantMax
 		if !sc.SinkTrusted {
 			return nil, false, nil
 		}
-		segMin, segMax, ok := segColInt64MinMax(sc)
-		if !ok {
+		var segMin, segMax int64
+		switch sc.Kind {
+		case vector.VecInt16, vector.VecInt32, vector.VecDate:
+			s := storage.UnmarshalNumericStats[int32](sc.Stats[:], true)
+			segMin, segMax = int64(s.Min), int64(s.Max)
+		case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
+			s := storage.UnmarshalNumericStats[int64](sc.Stats[:], true)
+			segMin, segMax = s.Min, s.Max
+		default:
 			return nil, false, nil
 		}
 		if !have {
@@ -502,18 +507,6 @@ func addOverflows(a, b int64) bool {
 	return false
 }
 
-func segColInt64MinMax(c *storage.SegmentColumn) (int64, int64, bool) {
-	switch c.Kind {
-	case vector.VecInt16, vector.VecInt32, vector.VecDate:
-		s := storage.UnmarshalNumericStats[int32](c.Stats[:], true)
-		return int64(s.Min), int64(s.Max), true
-	case vector.VecInt64, vector.VecTimestamp, vector.VecTime, vector.VecDecimal64:
-		s := storage.UnmarshalNumericStats[int64](c.Stats[:], true)
-		return s.Min, s.Max, true
-	}
-	return 0, 0, false
-}
-
 func narrowInt(v int64, kind schema.Kind) any {
 	switch kind {
 	case schema.KindInt16:
@@ -529,10 +522,8 @@ func narrowInt(v int64, kind schema.Kind) any {
 }
 
 func findSegColumn(seg *storage.Segment, name string) (*storage.SegmentColumn, bool) {
-	for i := range seg.Cols {
-		if schema.NormalizeName(seg.Cols[i].Name) == schema.NormalizeName(name) {
-			return &seg.Cols[i], true
-		}
+	if i := seg.ColumnIndex(name); i >= 0 {
+		return &seg.Cols[i], true
 	}
 	return nil, false
 }

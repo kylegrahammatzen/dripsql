@@ -1,4 +1,4 @@
-// WAL tests: round-trip, truncated-tail recovery, corrupt-crc tail truncation, reopen size growth.
+// WAL tests covering round-trip, truncated-tail recovery, corrupt-crc tail truncation, and reopen size growth.
 package storage
 
 import (

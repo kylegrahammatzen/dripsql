@@ -1,13 +1,11 @@
 // BoundPredicate plus the bound types are internal eval helpers reached only via Pred.toBound.
-// All shape and binding live in pred.go.
-// Helpers below resolve segment columns, stats, and encoded paths.
+// Shape and binding live in pred.go while the helpers here resolve segment columns, stats, and encoded paths.
 package storage
 
 import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"strings"
 
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/storage/codec"
@@ -39,10 +37,8 @@ func findSegmentColumnByID(seg *Segment, name string, colID uint64) (*SegmentCol
 			}
 		}
 	}
-	for i := range seg.Cols {
-		if strings.EqualFold(seg.Cols[i].Name, name) {
-			return &seg.Cols[i], true
-		}
+	if i := seg.ColumnIndex(name); i >= 0 {
+		return &seg.Cols[i], true
 	}
 	return nil, false
 }
@@ -54,29 +50,6 @@ func numericStatsFromCol(c *SegmentColumn) (NumericStats[int64], bool) {
 		return NumericStats[int64]{}, false
 	}
 	return UnmarshalNumericStats[int64](c.Stats[:], c.SinkTrusted), true
-}
-
-func floatStatsFromCol(c *SegmentColumn) (FloatStats, bool) {
-	if c.Rows == 0 {
-		return FloatStats{}, false
-	}
-	return UnmarshalFloatStats(c.Stats[:], c.SinkTrusted), true
-}
-
-// pageMinMaxFloat returns the float64 min/max for a page when the column is float64.
-func pageMinMaxFloat(c *SegmentColumn, pageIdx int) (min, max float64, ok bool) {
-	if pageIdx < 0 || pageIdx >= len(c.PageStats) {
-		return 0, 0, false
-	}
-	page := c.Pages[pageIdx]
-	if page.Rows == 0 || page.Flags&PageFlagAllNull != 0 {
-		return 0, 0, false
-	}
-	if c.Kind == vector.VecFloat64 {
-		s := UnmarshalFloatStats(c.PageStats[pageIdx][:], true)
-		return s.Min, s.Max, s.HasFinite
-	}
-	return 0, 0, false
 }
 
 // pageMinMaxInt returns the int64 min/max for a page when the column kind populates
@@ -289,10 +262,10 @@ func (b boundCmpFloat64) PruneSegment(seg *Segment) bool {
 	if !ok {
 		return false
 	}
-	stats, present := floatStatsFromCol(c)
-	if !present {
+	if c.Rows == 0 {
 		return true
 	}
+	stats := UnmarshalFloatStats(c.Stats[:], c.SinkTrusted)
 	if !stats.HasFinite {
 		return false
 	}
@@ -301,16 +274,19 @@ func (b boundCmpFloat64) PruneSegment(seg *Segment) bool {
 
 func (b boundCmpFloat64) PrunePage(seg *Segment, pageIdx int) bool {
 	c, ok := findSegmentColumnByID(seg, b.column, b.colID)
-	if !ok {
+	if !ok || c.Kind != vector.VecFloat64 || pageIdx < 0 || pageIdx >= len(c.PageStats) {
 		return false
 	}
-	min, max, ok := pageMinMaxFloat(c, pageIdx)
-	if !ok {
+	page := c.Pages[pageIdx]
+	if page.Rows == 0 || page.Flags&PageFlagAllNull != 0 {
 		return false
 	}
-	return rangeSkips(min, max, b.value, b.op)
+	s := UnmarshalFloatStats(c.PageStats[pageIdx][:], true)
+	if !s.HasFinite {
+		return false
+	}
+	return rangeSkips(s.Min, s.Max, b.value, b.op)
 }
-
 
 type boundEqBytes struct {
 	column string
@@ -560,9 +536,8 @@ func (b boundNot) PrunePage(seg *Segment, pageIdx int) bool {
 	return childAlwaysMatchesPage(b.child, seg, pageIdx)
 }
 
-// childAlwaysMatchesSegment returns true when child is guaranteed to select every
-// row in the segment, which lets NOT(child) prune. Sound but conservative: any
-// undetermined case returns false.
+// childAlwaysMatchesSegment reports whether child is guaranteed to select every row in
+// the segment, which lets NOT(child) prune, and stays sound by returning false for any undetermined case.
 func childAlwaysMatchesSegment(child BoundPredicate, seg *Segment) bool {
 	switch c := child.(type) {
 	case boundIsNull:
@@ -664,8 +639,8 @@ type EncodedEvaluator interface {
 }
 
 func (b boundEqBytes) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
-	colIdx, ok := findSegmentColumnIdx(seg.Segment, b.column)
-	if !ok {
+	colIdx := seg.ColumnIndex(b.column)
+	if colIdx < 0 {
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
@@ -696,14 +671,30 @@ func evalEncodedDictEq(seg pageSource, colIdx, pageIdx int, sel *vector.Selectio
 	if allNull {
 		return true, newScratch, nil
 	}
-	code, indices, found, err := resolveDictCode(payload, rows, target)
+	entries, indices, err := parseDictPayload(payload, rows)
 	if err != nil {
 		return false, newScratch, err
+	}
+	code, found := 0, false
+	for i, e := range entries {
+		if bytes.Equal(e, target) {
+			code, found = i, true
+			break
+		}
 	}
 	if !found {
 		return true, newScratch, nil
 	}
-	narrowDictEq(indices, code, valid, sel)
+	// Indices are uint8 per row, so the inner loop is a byte compare and 8 rows fit in a SIMDable lane.
+	sel.Clear()
+	for i := range rows {
+		if indices[i] == uint8(code) {
+			sel.Set(i)
+		}
+	}
+	if valid != nil {
+		applyValidity(valid, sel)
+	}
 	return true, newScratch, nil
 }
 
@@ -765,8 +756,8 @@ func (b boundGtBytes) EvalEncoded(seg pageSource, pageIdx int, sel *vector.Selec
 // It builds a 256-bit accept mask by comparing every dict entry against target, then walks
 // the index stream once. Same allocation profile as the eq path.
 func evalEncodedDictOrdered(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte, column string, target []byte, greater, inclusive bool) (bool, []byte, error) {
-	colIdx, ok := findSegmentColumnIdx(seg.Segment, column)
-	if !ok {
+	colIdx := seg.ColumnIndex(column)
+	if colIdx < 0 {
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
@@ -790,7 +781,16 @@ func evalEncodedDictOrdered(seg pageSource, pageIdx int, sel *vector.SelectionMa
 	if err != nil {
 		return false, newScratch, err
 	}
-	narrowDictByMask(indices, accept, valid, sel)
+	sel.Clear()
+	for i := range len(indices) {
+		c := indices[i]
+		if accept[c>>6]&(1<<uint(c&63)) != 0 {
+			sel.Set(i)
+		}
+	}
+	if valid != nil {
+		applyValidity(valid, sel)
+	}
 	return true, newScratch, nil
 }
 
@@ -816,21 +816,6 @@ func dictAcceptMask(payload []byte, rows int, target []byte, greater, inclusive 
 	return accept, indices, nil
 }
 
-// narrowDictByMask sets sel[i] when accept[indices[i]] is set, gated by validity.
-func narrowDictByMask(indices []byte, accept [4]uint64, valid vector.Validity, sel *vector.SelectionMask) {
-	sel.Clear()
-	rows := len(indices)
-	for i := range rows {
-		c := indices[i]
-		if accept[c>>6]&(1<<uint(c&63)) != 0 {
-			sel.Set(i)
-		}
-	}
-	if valid != nil {
-		applyValidity(valid, sel)
-	}
-}
-
 // EvalEncoded covers Eq via FOR and Delta plus Lt and Gt via FOR ranges. Other ops report unhandled so the caller decodes.
 func (b boundCmpInt64) EvalEncoded(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte) (bool, []byte, error) {
 	switch b.op {
@@ -842,8 +827,8 @@ func (b boundCmpInt64) EvalEncoded(seg pageSource, pageIdx int, sel *vector.Sele
 	default:
 		return false, scratch, nil
 	}
-	colIdx, ok := findSegmentColumnIdx(seg.Segment, b.column)
-	if !ok {
+	colIdx := seg.ColumnIndex(b.column)
+	if colIdx < 0 {
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
@@ -890,7 +875,15 @@ func evalEncodedEqFOR(seg pageSource, colIdx, pageIdx int, sel *vector.Selection
 	}
 	residuals := make([]uint64, rows)
 	codec.Unpack(width, payload[forHeaderSize:], rows, residuals)
-	narrowFOREq(residuals, residual, valid, sel)
+	sel.Clear()
+	for i, r := range residuals {
+		if r == residual {
+			sel.Set(i)
+		}
+	}
+	if valid != nil {
+		applyValidity(valid, sel)
+	}
 	return true, newScratch, nil
 }
 
@@ -941,18 +934,6 @@ func narrowDeltaEq(first, base int64, residuals []uint64, target int64, valid ve
 	}
 }
 
-func narrowFOREq(residuals []uint64, target uint64, valid vector.Validity, sel *vector.SelectionMask) {
-	sel.Clear()
-	for i, r := range residuals {
-		if r == target {
-			sel.Set(i)
-		}
-	}
-	if valid != nil {
-		applyValidity(valid, sel)
-	}
-}
-
 type forRangeOp uint8
 
 const (
@@ -961,8 +942,8 @@ const (
 )
 
 func evalEncodedFORRange(seg pageSource, pageIdx int, sel *vector.SelectionMask, scratch []byte, column string, limit int64, op forRangeOp) (bool, []byte, error) {
-	colIdx, ok := findSegmentColumnIdx(seg.Segment, column)
-	if !ok {
+	colIdx := seg.ColumnIndex(column)
+	if colIdx < 0 {
 		return false, scratch, nil
 	}
 	page := seg.Cols[colIdx].Pages[pageIdx]
@@ -1010,7 +991,15 @@ func evalEncodedFORRange(seg pageSource, pageIdx int, sel *vector.SelectionMask,
 		}
 		residuals := make([]uint64, rows)
 		codec.Unpack(width, payload[forHeaderSize:], rows, residuals)
-		narrowFORLT(residuals, uint64(threshold), valid, sel)
+		sel.Clear()
+		for i, r := range residuals {
+			if r < uint64(threshold) {
+				sel.Set(i)
+			}
+		}
+		if valid != nil {
+			applyValidity(valid, sel)
+		}
 		return true, newScratch, nil
 	case forRangeGT:
 		if threshold < 0 {
@@ -1026,65 +1015,18 @@ func evalEncodedFORRange(seg pageSource, pageIdx int, sel *vector.SelectionMask,
 		}
 		residuals := make([]uint64, rows)
 		codec.Unpack(width, payload[forHeaderSize:], rows, residuals)
-		narrowFORGT(residuals, uint64(threshold), valid, sel)
+		sel.Clear()
+		for i, r := range residuals {
+			if r > uint64(threshold) {
+				sel.Set(i)
+			}
+		}
+		if valid != nil {
+			applyValidity(valid, sel)
+		}
 		return true, newScratch, nil
 	}
 	return false, newScratch, nil
-}
-
-func narrowFORLT(residuals []uint64, threshold uint64, valid vector.Validity, sel *vector.SelectionMask) {
-	sel.Clear()
-	for i, r := range residuals {
-		if r < threshold {
-			sel.Set(i)
-		}
-	}
-	if valid != nil {
-		applyValidity(valid, sel)
-	}
-}
-
-func narrowFORGT(residuals []uint64, threshold uint64, valid vector.Validity, sel *vector.SelectionMask) {
-	sel.Clear()
-	for i, r := range residuals {
-		if r > threshold {
-			sel.Set(i)
-		}
-	}
-	if valid != nil {
-		applyValidity(valid, sel)
-	}
-}
-
-func findSegmentColumnIdx(seg *Segment, name string) (int, bool) {
-	for i := range seg.Cols {
-		if equalFoldFast(seg.Cols[i].Name, name) {
-			return i, true
-		}
-	}
-	return -1, false
-}
-
-func equalFoldFast(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range len(a) {
-		ca, cb := a[i], b[i]
-		if ca == cb {
-			continue
-		}
-		if 'A' <= ca && ca <= 'Z' {
-			ca += 32
-		}
-		if 'A' <= cb && cb <= 'Z' {
-			cb += 32
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
 }
 
 const forHeaderSize = 9
@@ -1099,36 +1041,6 @@ func parseFORHeader(payload []byte) (base int64, width int, err error) {
 		return 0, 0, fmt.Errorf("EvalEncoded FOR: width %d out of range", width)
 	}
 	return base, width, nil
-}
-
-// resolveDictCode finds the dictionary entry matching lit and returns its u8 code
-// plus the indices slice. Layout parsing is shared with the scan's dict path.
-func resolveDictCode(payload []byte, rows int, lit []byte) (code uint8, indices []byte, found bool, err error) {
-	entries, indices, err := parseDictPayload(payload, rows)
-	if err != nil {
-		return 0, nil, false, err
-	}
-	for i, e := range entries {
-		if bytes.Equal(e, lit) {
-			return uint8(i), indices, true, nil
-		}
-	}
-	return 0, indices, false, nil
-}
-
-// narrowDictEq sets sel[i] when indices[i] == code, gated by validity. The indices are
-// uint8 per row; the inner loop is a byte compare so 8 rows fit in a SIMDable lane.
-func narrowDictEq(indices []byte, code uint8, valid vector.Validity, sel *vector.SelectionMask) {
-	sel.Clear()
-	rows := len(indices)
-	for i := range rows {
-		if indices[i] == code {
-			sel.Set(i)
-		}
-	}
-	if valid != nil {
-		applyValidity(valid, sel)
-	}
 }
 
 func applyValidity(valid vector.Validity, sel *vector.SelectionMask) {

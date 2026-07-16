@@ -1,4 +1,4 @@
-// Cascade tests: kind-driven candidate sets and Pick chooses minimum-size.
+// Cascade tests covering kind-driven candidate sets and Pick choosing minimum-size.
 package codec
 
 import (

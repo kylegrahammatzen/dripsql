@@ -1,4 +1,4 @@
-﻿// ALP float codec encodes float32 and float64 as mantissa = round(x * 10^e) + FOR + bitpack.
+// ALP float codec encodes float32 and float64 as mantissa = round(x * 10^e) + FOR + bitpack.
 // Lossless only when every value round-trips exactly. NaN, Inf, -0, or non-decimal floats trigger ErrSkip.
 package codec
 

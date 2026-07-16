@@ -1,5 +1,5 @@
-﻿// ALP round-trip tests across float32 and float64.
-// Skip semantics: NaN, Inf, -0, non-decimal floats fall back to ErrSkip.
+// ALP round-trip tests across float32 and float64.
+// NaN, Inf, -0, and non-decimal floats fall back to ErrSkip.
 package codec
 
 import (

@@ -1,4 +1,4 @@
-﻿// Encoding invariant tests: wire byte 0 reserved, unknown bytes rejected, round-trip.
+// Encoding invariant tests covering wire byte 0 reserved, unknown bytes rejected, and round-trip.
 // Wire safety matters because v4 segment files lean on these mappings.
 package schema
 

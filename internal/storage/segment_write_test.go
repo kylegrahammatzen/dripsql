@@ -1,4 +1,4 @@
-// Segment writer smoke tests: column-major payload ordering, footer suffix magic,
+// Segment writer smoke tests covering column-major payload ordering, footer suffix magic,
 // and per-column page entries in the footer page directory.
 package storage
 
@@ -48,7 +48,7 @@ func makeTwoColumnBatch(t *testing.T, start, n int64) vector.Batch {
 
 func TestWriteSegment_FileExistsAndStartsWithMagic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 100)}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 100)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -65,7 +65,7 @@ func TestWriteSegment_FileExistsAndStartsWithMagic(t *testing.T) {
 
 func TestWriteSegment_FooterSuffixDecodes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 50)}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 50)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -88,7 +88,7 @@ func TestWriteSegment_ColumnMajorPagesContiguous(t *testing.T) {
 		makeTwoColumnBatch(t, 100, 100),
 		makeTwoColumnBatch(t, 200, 100),
 	}
-	if _, err := WriteSegment(path, pages, nil); err != nil {
+	if err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -171,7 +171,7 @@ func TestWriteSegment_NullableRoundTrip(t *testing.T) {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "nullable.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{b}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -208,7 +208,7 @@ func TestWriteSegment_AllNullRoundTrip(t *testing.T) {
 		t.Fatalf("NewBatch: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "allnull.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{b}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{b}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -231,7 +231,7 @@ func TestWriteSegment_AllNullRoundTrip(t *testing.T) {
 }
 
 func TestWriteSegment_RejectsEmpty(t *testing.T) {
-	if _, err := WriteSegment(filepath.Join(t.TempDir(), "x"), nil, nil); err == nil {
+	if err := WriteSegment(filepath.Join(t.TempDir(), "x"), nil, nil); err == nil {
 		t.Fatal("WriteSegment must reject empty page list")
 	}
 }
@@ -240,7 +240,7 @@ func TestWriteSegment_RejectsMismatchedBatchLen(t *testing.T) {
 	v := vector.NewVec(vector.VecInt64, 10)
 	bad := vector.Batch{Len: 20, Columns: []vector.Column{{Name: "id", Type: schema.Int64, V: v}}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{bad}, nil); err == nil {
+	if err := WriteSegment(path, []vector.Batch{bad}, nil); err == nil {
 		t.Fatal("WriteSegment must reject Batch.Len != Vec.Len")
 	}
 }
@@ -250,7 +250,7 @@ func TestWriteSegment_RejectsTypeDrift(t *testing.T) {
 	v := vector.NewVec(vector.VecInt32, 10)
 	second := vector.Batch{Len: 10, Columns: []vector.Column{{Name: "id", Type: schema.Int32, V: v}}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{first, second}, nil); err == nil {
+	if err := WriteSegment(path, []vector.Batch{first, second}, nil); err == nil {
 		t.Fatal("WriteSegment must reject type drift across batches")
 	}
 }
@@ -259,7 +259,7 @@ func TestWriteSegment_RejectsKindMismatchVsType(t *testing.T) {
 	v := vector.NewVec(vector.VecInt32, 5)
 	bad := vector.Batch{Len: 5, Columns: []vector.Column{{Name: "id", Type: schema.Int64, V: v}}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{bad}, nil); err == nil {
+	if err := WriteSegment(path, []vector.Batch{bad}, nil); err == nil {
 		t.Fatal("WriteSegment must reject Vec.Kind that does not match Column.Type")
 	}
 }
@@ -274,7 +274,7 @@ func TestWriteSegment_AtomicNoFinalOnFailure(t *testing.T) {
 	// Force a failure via Vec.Kind that does not match the declared Type.
 	v := vector.NewVec(vector.VecInt32, 4)
 	bad := vector.Batch{Len: 4, Columns: []vector.Column{{Name: "id", Type: schema.Int64, V: v}}}
-	if _, err := WriteSegment(path, []vector.Batch{bad}, nil); err == nil {
+	if err := WriteSegment(path, []vector.Batch{bad}, nil); err == nil {
 		t.Fatal("WriteSegment must reject kind mismatch")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -288,7 +288,7 @@ func TestWriteSegment_AtomicNoFinalOnFailure(t *testing.T) {
 func TestWriteSegment_AtomicRenamesTmpToFinal(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 16)}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 16)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -309,7 +309,7 @@ func TestWriteSegment_RejectsEnumLabelDrift(t *testing.T) {
 		{Name: "k", Type: schema.Named("status"), EnumLabels: []string{"a", "b", "c"}, V: v2},
 	}}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{first, second}, nil); err == nil {
+	if err := WriteSegment(path, []vector.Batch{first, second}, nil); err == nil {
 		t.Fatal("WriteSegment must reject enum-label drift across batches")
 	}
 }

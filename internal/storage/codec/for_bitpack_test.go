@@ -1,4 +1,4 @@
-﻿// FOR+bitpack round-trip + estimate tests across FOR-packable kinds and width edges.
+// FOR+bitpack round-trip + estimate tests across FOR-packable kinds and width edges.
 package codec
 
 import (

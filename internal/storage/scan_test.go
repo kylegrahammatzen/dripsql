@@ -1,10 +1,11 @@
-// Scan tests: enumerate without predicate, filtered scan, segment-prune skipping,
-// per-segment column-order tolerance, cross-segment kind mismatch detection.
+// Scan tests covering enumerate without predicate, filtered scan, segment-prune skipping,
+// per-segment column-order tolerance, and cross-segment kind mismatch detection.
 package storage
 
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
@@ -14,7 +15,7 @@ import (
 func openWrittenSegment(t *testing.T, dir, name string, pages []vector.Batch) *Segment {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	if _, err := WriteSegment(path, pages, nil); err != nil {
+	if err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -48,15 +49,6 @@ func makeNullableIntValuesBatch(t *testing.T, name string, vals []int64, nullRow
 		t.Fatalf("NewBatch: %v", err)
 	}
 	return b
-}
-
-func containsInt64(vals []int64, want int64) bool {
-	for _, v := range vals {
-		if v == want {
-			return true
-		}
-	}
-	return false
 }
 
 func TestScan_EnumerateAll_NoPredicate(t *testing.T) {
@@ -149,7 +141,7 @@ func TestScan_TopKPushdownKeepsMixedRangeCandidatePage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if !containsInt64(seen, 99) {
+	if !slices.Contains(seen, 99) {
 		t.Fatalf("top-K pushdown pruned a page needed for final sorting; saw %v, want value 99", seen)
 	}
 }
@@ -186,7 +178,7 @@ func TestScan_TopKPushdownDoesNotPruneNullablePages(t *testing.T) {
 func TestScan_TopKPushdownDoesNotPruneWithDeletionVector(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{
+	if err := WriteSegment(path, []vector.Batch{
 		makeIntValuesBatch(t, "id", 100, 0),
 		makeIntValuesBatch(t, "id", 99, 98),
 	}, nil); err != nil {
@@ -215,14 +207,14 @@ func TestScan_TopKPushdownDoesNotPruneWithDeletionVector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if !containsInt64(seen, 99) {
+	if !slices.Contains(seen, 99) {
 		t.Fatalf("top-K pushdown must account for deleted rows before pruning; saw %v, want value 99", seen)
 	}
 }
 
 func TestScan_TopKPushdownPrunesClusteredPages(t *testing.T) {
-	// Pages laid out so per-page min/max are disjoint: [0..99], [100..199], [200..299], [300..399].
-	// DESC top-2 must scan only the last page; ASC top-2 must scan only the first.
+	// Pages are laid out with disjoint per-page min/max of [0..99], [100..199], [200..299], [300..399].
+	// DESC top-2 must scan only the last page and ASC top-2 only the first.
 	dir := t.TempDir()
 	mk := func(start int64) vector.Batch {
 		vals := make([]int64, 100)
@@ -233,7 +225,7 @@ func TestScan_TopKPushdownPrunesClusteredPages(t *testing.T) {
 	}
 	pages := []vector.Batch{mk(0), mk(100), mk(200), mk(300)}
 	path := filepath.Join(dir, "seg.dsv4")
-	if _, err := WriteSegment(path, pages, nil); err != nil {
+	if err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -429,7 +421,7 @@ func TestScan_ByColumnID_SurvivesRename(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	pages := []vector.Batch{makeIntBatch(t, "old_name", 0, 5)}
 	id := SegmentIdentity{TableID: 1, SchemaGeneration: 1, ColumnIDs: []uint64{77}}
-	if _, err := WriteSegmentWithIdentity(path, pages, nil, id); err != nil {
+	if err := WriteSegmentWithIdentity(path, pages, nil, id); err != nil {
 		t.Fatal(err)
 	}
 	seg, err := OpenSegment(path)
@@ -458,7 +450,7 @@ func TestScan_ByColumnID_SurvivesRename(t *testing.T) {
 func TestScan_ByColumnID_SynthesisesNullForUnknownID(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	id := SegmentIdentity{TableID: 1, SchemaGeneration: 1, ColumnIDs: []uint64{1}}
-	if _, err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 3)}, nil, id); err != nil {
+	if err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 3)}, nil, id); err != nil {
 		t.Fatal(err)
 	}
 	seg, err := OpenSegment(path)
@@ -497,7 +489,7 @@ func TestScan_ByColumnID_SynthesisesNullForUnknownID(t *testing.T) {
 
 func TestScan_LegacySegmentFallsBackToName(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatal(err)
 	}
 	seg, err := OpenSegment(path)
@@ -527,7 +519,7 @@ func TestScan_LegacySegmentFallsBackToName(t *testing.T) {
 func TestScan_PrunesSegmentForMissingColumnEq(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	id := SegmentIdentity{TableID: 1, SchemaGeneration: 1, ColumnIDs: []uint64{1}}
-	if _, err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
+	if err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
 		t.Fatal(err)
 	}
 	seg, err := OpenSegment(path)
@@ -564,7 +556,7 @@ func TestScan_PrunesSegmentForMissingColumnEq(t *testing.T) {
 func TestScan_DoesNotPruneWhenDefaultSatisfiesPredicate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	id := SegmentIdentity{TableID: 1, SchemaGeneration: 1, ColumnIDs: []uint64{1}}
-	if _, err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
+	if err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
 		t.Fatal(err)
 	}
 	seg, err := OpenSegment(path)
@@ -605,7 +597,7 @@ func TestScan_DoesNotPruneWhenDefaultSatisfiesPredicate(t *testing.T) {
 func TestScan_PrunesSegmentForMissingColumnIsNotNull(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	id := SegmentIdentity{TableID: 1, SchemaGeneration: 1, ColumnIDs: []uint64{1}}
-	if _, err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
+	if err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
 		t.Fatal(err)
 	}
 	seg, err := OpenSegment(path)
@@ -641,7 +633,7 @@ func TestScan_PrunesSegmentForMissingColumnIsNotNull(t *testing.T) {
 func TestScan_KeepsSegmentForMissingColumnIsNull(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	id := SegmentIdentity{TableID: 1, SchemaGeneration: 1, ColumnIDs: []uint64{1}}
-	if _, err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
+	if err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
 		t.Fatal(err)
 	}
 	seg, err := OpenSegment(path)
@@ -672,7 +664,7 @@ func TestScan_KeepsSegmentForMissingColumnIsNull(t *testing.T) {
 func TestScan_PrunesSegmentForAndOfMissingComparisons(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	id := SegmentIdentity{TableID: 1, SchemaGeneration: 1, ColumnIDs: []uint64{1}}
-	if _, err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
+	if err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
 		t.Fatal(err)
 	}
 	seg, err := OpenSegment(path)
@@ -709,7 +701,7 @@ func TestScan_PrunesSegmentForAndOfMissingComparisons(t *testing.T) {
 func TestScan_KeepsSegmentForOrWithIsNull(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	id := SegmentIdentity{TableID: 1, SchemaGeneration: 1, ColumnIDs: []uint64{1}}
-	if _, err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
+	if err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil, id); err != nil {
 		t.Fatal(err)
 	}
 	seg, err := OpenSegment(path)

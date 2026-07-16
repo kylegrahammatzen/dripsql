@@ -1,4 +1,4 @@
-﻿// FSST codec round-trip + cascade-preference test on repetitive URL-shaped strings.
+// FSST codec round-trip + cascade-preference test on repetitive URL-shaped strings.
 // Asserts decode is bitwise equal to input and that cascade picks FSST when it beats plain.
 package codec
 

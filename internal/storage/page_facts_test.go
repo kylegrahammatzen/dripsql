@@ -1,4 +1,4 @@
-// Pins the sink authority contract for columns whose pages interleave NULLs with live values.
+// Pins sink authority on NULL-interleaved pages and the distinct-key cap on the int filter.
 package storage
 
 import (
@@ -9,7 +9,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
-// Contract: mixed pages still feed the column sink, so the numeric sum sidecar,
+// Mixed pages still feed the column sink, so the numeric sum sidecar,
 // int filter, dict histogram, and footer stats are exact over valid rows only.
 func TestMixedPages_SinkStaysAuthoritative(t *testing.T) {
 	makePage := func(xs []int64, xNulls []int, gs []string, gNulls []int) vector.Batch {
@@ -54,7 +54,7 @@ func TestMixedPages_SinkStaysAuthoritative(t *testing.T) {
 		),
 	}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, pages, nil); err != nil {
+	if err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -117,5 +117,82 @@ func TestMixedPages_SinkStaysAuthoritative(t *testing.T) {
 	gs := UnmarshalVarBytesStats(seg.Cols[1].Stats[:], true)
 	if gs.MinLen != 3 || gs.MaxLen != 5 || gs.TotalBytes != 53 {
 		t.Fatalf("g stats minLen=%d maxLen=%d total=%d, want 3, 5, 53", gs.MinLen, gs.MaxLen, gs.TotalBytes)
+	}
+}
+
+// A column past intFilterMaxDistinct drops only its bloom filter while
+// the numeric sum and footer stats stay exact and a below-cap sibling keeps its filter.
+func TestIntFilterCap_SkipsBloomKeepsExactSidecars(t *testing.T) {
+	const batchRows = 2048
+	batches := intFilterMaxDistinct/batchRows + 1
+	rows := batches * batchRows
+
+	var wantHiSum, wantLoSum int64
+	pages := make([]vector.Batch, 0, batches)
+	for p := range batches {
+		hv := vector.NewVec(vector.VecInt64, batchRows)
+		lv := vector.NewVec(vector.VecInt64, batchRows)
+		hs, ls := hv.I64(), lv.I64()
+		for i := range batchRows {
+			x := int64(p*batchRows + i)
+			hs[i] = x
+			ls[i] = x % 7
+			wantHiSum += x
+			wantLoSum += x % 7
+		}
+		b, err := vector.NewBatch([]vector.Column{
+			{Name: "hi", Type: schema.Int64, V: hv},
+			{Name: "lo", Type: schema.Int64, V: lv},
+		})
+		if err != nil {
+			t.Fatalf("NewBatch: %v", err)
+		}
+		pages = append(pages, b)
+	}
+
+	path := filepath.Join(t.TempDir(), "seg.dsv4")
+	if err := WriteSegment(path, pages, nil); err != nil {
+		t.Fatalf("WriteSegment: %v", err)
+	}
+	seg, err := OpenSegment(path)
+	if err != nil {
+		t.Fatalf("OpenSegment: %v", err)
+	}
+	defer seg.Close()
+
+	filters, err := seg.IntFilterSet()
+	if err != nil {
+		t.Fatalf("IntFilterSet: %v", err)
+	}
+	if _, ok := filters["hi"]; ok {
+		t.Fatal("int filter present for column past intFilterMaxDistinct, want skipped")
+	}
+	f, ok := filters["lo"]
+	if !ok {
+		t.Fatal("int filter missing for below-cap column lo")
+	}
+	for v := range int64(7) {
+		if !f.Contains(v) {
+			t.Fatalf("int filter false negative for lo value %d", v)
+		}
+	}
+
+	sums, err := seg.NumericSums()
+	if err != nil {
+		t.Fatalf("NumericSums: %v", err)
+	}
+	if got := sums["hi"].Sum; got != wantHiSum {
+		t.Fatalf("hi sum = %d, want %d", got, wantHiSum)
+	}
+	if got := sums["lo"].Sum; got != wantLoSum {
+		t.Fatalf("lo sum = %d, want %d", got, wantLoSum)
+	}
+
+	if seg.Cols[0].Name != "hi" {
+		t.Fatalf("unexpected column order %q", seg.Cols[0].Name)
+	}
+	hiStats := UnmarshalNumericStats[int64](seg.Cols[0].Stats[:], true)
+	if hiStats.Min != 0 || hiStats.Max != int64(rows-1) {
+		t.Fatalf("hi stats min=%d max=%d, want 0 and %d", hiStats.Min, hiStats.Max, rows-1)
 	}
 }

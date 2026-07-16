@@ -1,6 +1,5 @@
-// UPDATE writes replacement segments and a new versioned DV per source segment, then
-// publishes the whole transaction via one atomic Commit. Until that record lands the
-// snapshot is unchanged, so readers never see either duplicate or hidden rows.
+// UPDATE writes replacement segments plus a new versioned DV per source segment and publishes via one atomic Commit.
+// Until that record lands the snapshot is unchanged, so readers never see duplicate or hidden rows.
 package engine
 
 import (
@@ -30,10 +29,11 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan, commit commitFn) (int6
 	if err != nil {
 		return 0, err
 	}
-	pending, err := newUpdateBuffer(uplan)
+	pendingCols, err := allocUpdateCols(uplan, vector.StandardBatchRows)
 	if err != nil {
 		return 0, err
 	}
+	pending := &updateBuffer{plan: uplan, cols: pendingCols}
 
 	stage := stagedUpdate{}
 	flush := func() error {
@@ -45,7 +45,7 @@ func (db *DB) update(ctx context.Context, plan *sql.Plan, commit commitFn) (int6
 			return err
 		}
 		path := db.nextSegmentPath(def.Name)
-		if _, err := storage.WriteSegmentWithIdentity(path, []vector.Batch{batch}, columnCodecs(def), db.segmentIdentity(def)); err != nil {
+		if err := storage.WriteSegmentWithIdentity(path, []vector.Batch{batch}, columnCodecs(def), db.segmentIdentity(def)); err != nil {
 			return err
 		}
 		stage.adds = append(stage.adds, storage.ManifestSegmentAdd{Path: filepath.Base(path), Rows: uint32(pending.rows), SchemaGeneration: uint64(db.catalog.Generation)})
@@ -213,14 +213,6 @@ type updateBuffer struct {
 	rows int
 }
 
-func newUpdateBuffer(up *updatePlan) (*updateBuffer, error) {
-	cols, err := allocUpdateCols(up, vector.StandardBatchRows)
-	if err != nil {
-		return nil, err
-	}
-	return &updateBuffer{plan: up, cols: cols}, nil
-}
-
 func allocUpdateCols(up *updatePlan, rows int) ([]vector.Column, error) {
 	cols := make([]vector.Column, len(up.cols))
 	for i, c := range up.cols {
@@ -232,10 +224,9 @@ func allocUpdateCols(up *updatePlan, rows int) ([]vector.Column, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Assigned columns get the same value in every row, so their validity is fully
-		// determined at allocation time: null assignment leaves the all-invalid zero
-		// bitmap, non-null nullable gets all-valid up front. Unassigned columns let
-		// CopyVecRow lazily allocate.
+		// Assigned columns hold one value in every row, so a null assignment keeps the
+		// all-invalid zero bitmap and a non-null nullable one gets all-valid up front.
+		// Unassigned columns let CopyVecRow lazily allocate.
 		if c.assigned {
 			if c.value.Kind == sql.ValueNull {
 				v.Valid = make(vector.Validity, vector.ValidityWords(rows))
@@ -278,10 +269,9 @@ func (b *updateBuffer) appendRow(src vector.Batch, srcRow int) error {
 	return nil
 }
 
-// materialize returns the buffered batch without a second copy. allocUpdateCols sized each
-// Vec at StandardBatchRows; setting Len to the actual row count makes the existing buffer
-// the output. reset allocates a fresh buffer for the next chunk so callers never see
-// overwrites after WriteSegment retains references.
+// materialize truncates each Vec to the actual row count so the existing buffer becomes
+// the output without a second copy. reset then allocates fresh buffers so callers never
+// see overwrites after WriteSegment retains references.
 func (b *updateBuffer) materialize() (vector.Batch, error) {
 	out := make([]vector.Column, len(b.cols))
 	for i, c := range b.cols {

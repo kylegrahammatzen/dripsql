@@ -1,4 +1,4 @@
-﻿// Encoding tags a Vec with its physical buffer layout where the wire byte equals the iota value.
+// Encoding tags a Vec with its physical buffer layout where the wire byte equals the iota value.
 // EncInvalid is a binder sentinel rejected at the wire boundary.
 package schema
 

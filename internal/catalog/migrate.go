@@ -8,14 +8,14 @@ import (
 )
 
 type legacyFile struct {
-	Version uint64          `json:"version"`
-	Types   []legacyTypeRec `json:"types"`
+	Version uint64           `json:"version"`
+	Types   []legacyTypeRec  `json:"types"`
 	Tables  []legacyTableRec `json:"tables"`
 }
 
 type legacyTypeRec struct {
-	ID   uint64          `json:"id"`
-	Spec legacyTypeSpec  `json:"spec"`
+	ID   uint64         `json:"id"`
+	Spec legacyTypeSpec `json:"spec"`
 }
 
 type legacyTypeSpec struct {
@@ -37,10 +37,10 @@ type legacyTableSpec struct {
 }
 
 type legacyColumnSpec struct {
-	Name     string      `json:"Name"`
-	Type     legacyType  `json:"Type"`
-	Nullable bool        `json:"Nullable"`
-	Codec    uint8       `json:"Codec"`
+	Name     string     `json:"Name"`
+	Type     legacyType `json:"Type"`
+	Nullable bool       `json:"Nullable"`
+	Codec    uint8      `json:"Codec"`
 }
 
 type legacyType struct {
@@ -209,9 +209,15 @@ func migrateTable(lt legacyTableRec, gen Generation) (Table, error) {
 	colByName := make(map[string]ColumnID, len(lt.Spec.Columns))
 	for i, lc := range lt.Spec.Columns {
 		colID := ColumnID(i + 1)
-		typeStr, err := migrateType(lc.Type)
-		if err != nil {
-			return Table{}, fmt.Errorf("column %q: %w", lc.Name, err)
+		typeStr, ok := v1Kinds[lc.Type.Kind]
+		if !ok {
+			return Table{}, fmt.Errorf("column %q: unknown legacy kind %d", lc.Name, lc.Type.Kind)
+		}
+		if typeStr == "named" {
+			if lc.Type.Name == "" {
+				return Table{}, fmt.Errorf("column %q: named type missing name", lc.Name)
+			}
+			typeStr = "named:" + lc.Type.Name
 		}
 		tab.Columns = append(tab.Columns, Column{
 			ColumnID:          colID,
@@ -277,18 +283,4 @@ func migrateTable(lt legacyTableRec, gen Generation) (Table, error) {
 		ColumnCodecs: codecs,
 	}
 	return tab, nil
-}
-
-func migrateType(lt legacyType) (string, error) {
-	name, ok := v1Kinds[lt.Kind]
-	if !ok {
-		return "", fmt.Errorf("unknown legacy kind %d", lt.Kind)
-	}
-	if name == "named" {
-		if lt.Name == "" {
-			return "", fmt.Errorf("named type missing name")
-		}
-		return "named:" + lt.Name, nil
-	}
-	return name, nil
 }

@@ -1,4 +1,4 @@
-// Linux targeted-read open: posix_fadvise(POSIX_FADV_RANDOM) tells the kernel to skip
+// Linux targeted-read open where posix_fadvise(POSIX_FADV_RANDOM) tells the kernel to skip
 // read-ahead so cold-open issues only the bytes ReadAt actually requests.
 //go:build linux
 
@@ -25,7 +25,7 @@ func OpenRandomAccess(path string) (*os.File, error) {
 		0, 0,
 	)
 	if errno != 0 {
-		// Hint failure is non-fatal: file is still readable.
+		// Hint failure is non-fatal because the file is still readable.
 		_ = errno
 	}
 	return f, nil

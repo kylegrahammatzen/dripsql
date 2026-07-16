@@ -1,4 +1,4 @@
-// Segment cache LRU bound: the cache never exceeds defaultSegCacheLimit after a query, even when
+// The segment cache never exceeds defaultSegCacheLimit after a query, even when
 // the table has more segments than the cap, and reused segments keep working across the cap.
 package engine
 

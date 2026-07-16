@@ -1,4 +1,4 @@
-﻿// Pcodec round-trip and skip-precondition tests across int64 and int32 kinds.
+// Pcodec round-trip and skip-precondition tests across int64 and int32 kinds.
 // Verifies multimodal data round-trips and that small pages bypass the codec.
 package codec
 

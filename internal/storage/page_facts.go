@@ -11,38 +11,22 @@ import (
 
 // One per column, allocated for the lifetime of a WriteSegment call.
 type colSink struct {
-	intDedup     map[uint64]struct{}
-	intKeys      []uint64
-	intSum       int64
-	intOverflow  bool
-	intAny       bool
-	intMin       int64
-	intMax       int64
-	intRangeSeen bool
-	varHist      DictHistogram
-	varHistSkip  bool
-	varAny       bool
-	varMinLen    uint32
-	varMaxLen    uint32
-	varTotal     uint64
-	varPageKeys  [][]uint64
-}
-
-// rowsHint sizes the int-dedup map and key slice up front so the typical
-// id-like column (one new key per row) avoids the O(log n) growth churn.
-// Capped at 1024 because monotonically distinct columns can be huge and the
-// hint is just an opener; the map still grows as needed beyond it.
-func newColSink(kind vector.VecKind, rowsHint int) *colSink {
-	s := &colSink{}
-	if kindEligibleForIntFilter(kind) {
-		hint := max(min(rowsHint, 1024), 8)
-		s.intDedup = make(map[uint64]struct{}, hint)
-		s.intKeys = make([]uint64, 0, hint)
-	}
-	if kind.IsVarBytes() {
-		s.varHist = make(DictHistogram, 8)
-	}
-	return s
+	intDedup      map[uint64]struct{}
+	intKeys       []uint64
+	intFilterSkip bool
+	intSum        int64
+	intOverflow   bool
+	intAny        bool
+	intMin        int64
+	intMax        int64
+	intRangeSeen  bool
+	varHist       DictHistogram
+	varHistSkip   bool
+	varAny        bool
+	varMinLen     uint32
+	varMaxLen     uint32
+	varTotal      uint64
+	varPageKeys   [][]uint64
 }
 
 // facts may be nil for sink-only accumulation on mixed pages that keep the Plain wire layout.
@@ -99,10 +83,18 @@ func analyzeIntPage(v vector.Vec, rows int, facts *codec.PageFacts, sink *colSin
 					sink.intAny = true
 				}
 			}
-			k := uint64(x)
-			if _, dup := sink.intDedup[k]; !dup {
-				sink.intDedup[k] = struct{}{}
-				sink.intKeys = append(sink.intKeys, k)
+			if !sink.intFilterSkip {
+				k := uint64(x)
+				if _, dup := sink.intDedup[k]; !dup {
+					sink.intDedup[k] = struct{}{}
+					sink.intKeys = append(sink.intKeys, k)
+					// Past the cap the bloom is skipped and both trackers are released.
+					if len(sink.intKeys) > intFilterMaxDistinct {
+						sink.intFilterSkip = true
+						sink.intDedup = nil
+						sink.intKeys = nil
+					}
+				}
 			}
 		}
 		if first {
@@ -209,7 +201,7 @@ func analyzeIntPage(v vector.Vec, rows int, facts *codec.PageFacts, sink *colSin
 }
 
 // Writes col stats from sink data for kinds the analyzer summarizes.
-// Returns false when the sink does not cover the kind; caller falls back to scan.
+// Returns false when the sink does not cover the kind so the caller falls back to scan.
 func marshalColumnStatsFromSink(kind vector.VecKind, sink *colSink, dst []byte) bool {
 	switch kind {
 	case vector.VecInt16:
@@ -358,8 +350,8 @@ func analyzeVarBytesPage(v vector.Vec, rows int, facts *codec.PageFacts, sink *c
 			}
 			pageFits = false
 		}
-		// pageFits=false: page dict gave up. Still track sink.varHist row by row so the
-		// segment-level histogram stays correct (subject to dictHistMaxDistinct).
+		// The page dict gave up, so track sink.varHist row by row to keep the
+		// segment-level histogram correct subject to dictHistMaxDistinct.
 		if sink != nil && !sink.varHistSkip {
 			if _, exists := sink.varHist[string(b)]; exists {
 				sink.varHist[string(b)]++
@@ -373,8 +365,7 @@ func analyzeVarBytesPage(v vector.Vec, rows int, facts *codec.PageFacts, sink *c
 		}
 	}
 
-	// Fold per-page dict counts into the segment histogram. Reusing entry bytes as the
-	// map key string avoids one alloc per distinct value (vs alloc per row).
+	// Folding per-page dict counts through string(entry) keys allocs once per distinct value instead of once per row.
 	if sink != nil && !sink.varHistSkip && len(pageEntries) > 0 {
 		for i, entry := range pageEntries {
 			sink.varHist[string(entry)] += pageCounts[i]

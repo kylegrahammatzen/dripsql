@@ -1,4 +1,4 @@
-﻿// Constant codec invariant tests: Estimate rejects non-constant, round-trip per kind class.
+// Constant codec invariant tests covering Estimate rejecting non-constant input and round-trip per kind class.
 // Wire payload size is the contract. Rows=0 and varying-row inputs both covered.
 package codec
 
@@ -121,8 +121,7 @@ func TestConstant_VarBytesBroadcastIsCompact(t *testing.T) {
 	if err := (constantCodec{}).Decode(payload, vector.VecText, 1000, 0, &dst); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	// Each row sees 200 bytes; data buffer should hold the value once, not 1000 copies.
-	// 200000 would mean per-row copy; the Broadcast path stores 200.
+	// Each row sees 200 bytes while the data buffer holds the value once, since 200000 would mean the per-row copy path ran instead of Broadcast.
 	internal := dst.Var()
 	for i := range 1000 {
 		if internal.Len(i) != 200 {

@@ -59,13 +59,24 @@ type VarBytesFacts struct {
 // Codecs may mutate trial, u64s, and dictMap. Best is reserved for the
 // cascade. Returned payloads must alias trial or fresh bytes, never best.
 type ScratchPool struct {
-	trial   []byte
-	best    []byte
-	u64s    []uint64
-	dictMap map[string]uint8
+	trial       []byte
+	best        []byte
+	u64s        []uint64
+	dictMap     map[string]uint8
+	fsstTrained bool
+	fsstCoder   *fsstCoder
 }
 
 func NewScratchPool() *ScratchPool { return &ScratchPool{} }
+
+// ResetColumn drops per-column codec state so the next column's pages train fresh.
+func (s *ScratchPool) ResetColumn() {
+	if s == nil {
+		return
+	}
+	s.fsstTrained = false
+	s.fsstCoder = nil
+}
 
 func (s *ScratchPool) Trial() []byte {
 	if s == nil {

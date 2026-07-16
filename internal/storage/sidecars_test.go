@@ -36,7 +36,7 @@ func TestBoundEqInt64_PruneSegment_UsesIntFilterWhenInRange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := WriteSegment(path, []vector.Batch{batch}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{batch}, nil); err != nil {
 		t.Fatal(err)
 	}
 	seg, err := OpenSegment(path)
@@ -70,7 +70,7 @@ func TestBoundEqInt64_PruneSegment_UsesIntFilterWhenInRange(t *testing.T) {
 	}
 }
 
-// Contract: group sums count only rows whose group key is valid, and the empty
+// Group sums count only rows whose group key is valid, and the empty
 // string bucket holds only real empty string rows.
 func TestGroupSums_SkipsNullGroupRows(t *testing.T) {
 	makeBatch := func(gs []string, gValid vector.Validity, xs []int64) vector.Batch {
@@ -102,7 +102,7 @@ func TestGroupSums_SkipsNullGroupRows(t *testing.T) {
 		makeBatch([]string{"a", "c", "", "c"}, nil, []int64{5, 6, 7, 8}),
 	}
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, pages, nil); err != nil {
+	if err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -155,7 +155,7 @@ func TestVarBloom_PrunesAbsentPerPage(t *testing.T) {
 		makePage([]string{"beta", "beta"}),
 		makePage([]string{"gamma", "gamma", "gamma", "gamma"}),
 	}
-	if _, err := WriteSegment(path, pages, nil); err != nil {
+	if err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	defer os.Remove(path)

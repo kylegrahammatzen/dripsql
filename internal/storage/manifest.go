@@ -235,9 +235,9 @@ func (m *Manifest) Snapshot() ManifestView {
 	return ManifestView{Version: m.version, Entries: m.resolveLocked(m.version)}
 }
 
-// SnapshotAt returns the per-segment view containing only records whose CommitTs is at most
-// maxCommitTs. Legacy records (CommitTs == 0, written before PR-V1) are treated as committed
-// at time 0 and are always visible -- they predate the timestamp regime.
+// SnapshotAt returns the per-segment view containing only records whose CommitTs is at
+// most maxCommitTs. Legacy records with CommitTs zero predate the timestamp regime and
+// are treated as committed at time 0, so they are always visible.
 func (m *Manifest) SnapshotAt(maxCommitTs uint64) ManifestView {
 	m.mu.Lock()
 	defer m.mu.Unlock()

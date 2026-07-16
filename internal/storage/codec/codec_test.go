@@ -1,4 +1,4 @@
-﻿// codec.go invariant tests: registry lookup found/unknown and EncInvalid rejection.
+// codec.go invariant tests covering registry lookup found/unknown and EncInvalid rejection.
 // Self-registration is exercised indirectly by plain_test.go via init().
 package codec
 

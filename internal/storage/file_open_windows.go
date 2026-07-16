@@ -1,5 +1,5 @@
-// Windows targeted-read open: passes FILE_FLAG_RANDOM_ACCESS to CreateFile so the
-// cache manager skips read-ahead and tracks footer/page hits as random accesses.
+// Windows targeted-read open passes FILE_FLAG_RANDOM_ACCESS to CreateFile so the
+// cache manager skips read-ahead and tracks footer and page hits as random accesses.
 //go:build windows
 
 package storage

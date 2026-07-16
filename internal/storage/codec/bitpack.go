@@ -1,7 +1,5 @@
-// Bitpack: FastLanes 1024-bit transposed layout for shared FOR / Delta packing.
-// Each 1024-element block emits W groups of 64 bits (one bit-position per group),
-// so a scalar loop processes 64 elements per uint64 without inter-lane carries.
-// Reference: Afroozeh et al., PVLDB 18 (2025), https://www.vldb.org/pvldb/vol18/p4629-afroozeh.pdf
+// Bitpack implements the FastLanes 1024-bit transposed layout for shared FOR and Delta packing (Afroozeh et al., PVLDB 2025).
+// Each 1024-element block emits W groups of 64 bits so a scalar loop handles 64 elements per uint64 without inter-lane carries.
 package codec
 
 import (
@@ -164,7 +162,7 @@ func unpackBlockW16(width int, src []byte, block []uint64) {
 		for lane := range 8 {
 			shift := uint(lane * 8)
 			var lo, hi uint64
-			for i := 0; i < 8; i++ {
+			for i := range 8 {
 				lo |= tbl[i][byte(words[i]>>shift)]
 			}
 			for i := 8; i < width; i++ {

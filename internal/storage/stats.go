@@ -1,6 +1,5 @@
-// Stats live in the column directory at 16B each. Readers cast to the right type via Kind.
-// NumericStats is generic over int32 | int64. FloatStats, BoolStats, VarBytesStats use
-// kind-specific layouts that also fit in 16B.
+// Stats live in the column directory at 16B each and readers cast to the right type via Kind.
+// NumericStats is generic over int32 | int64 while FloatStats, BoolStats, and VarBytesStats use kind-specific 16B layouts.
 package storage
 
 import (

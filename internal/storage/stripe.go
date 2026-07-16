@@ -24,10 +24,6 @@ type stripeSet struct {
 	cols   []colStripe
 }
 
-func newStripeSet(seg *Segment, needed []bool) *stripeSet {
-	return &stripeSet{seg: seg, needed: needed, cols: make([]colStripe, len(seg.Cols))}
-}
-
 // raw returns the full payload bytes for one page, loading a coalesced stripe on miss.
 // The slice aliases the stripe buffer and stays valid until the column's next load.
 func (ss *stripeSet) raw(ci, pi int) ([]byte, error) {

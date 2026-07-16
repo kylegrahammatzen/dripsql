@@ -1,4 +1,4 @@
-// Engine round-trip smoke tests: CREATE -> INSERT -> SELECT through the Open/Exec/Query API.
+// Engine round-trip smoke tests running CREATE -> INSERT -> SELECT through the Open/Exec/Query API.
 // Each test gets a fresh temp dir so catalog and manifest start clean.
 package engine
 

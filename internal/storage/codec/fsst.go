@@ -1,8 +1,9 @@
-﻿// FSST varbytes codec. Single-round symbol-table training over the input, then
+// FSST varbytes codec. Single-round symbol-table training over the input, then
 // greedy longest-prefix encoding with code 0xFF reserved as the escape byte.
 package codec
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"sort"
@@ -49,11 +50,26 @@ func (fsstCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 		return nil, ErrSkip
 	}
 
-	symbols := trainFSST(raw)
-	if len(symbols) == 0 {
+	var sp *ScratchPool
+	if ctx != nil {
+		sp = ctx.Scratch
+	}
+	var codes *fsstCoder
+	if sp != nil && sp.fsstTrained {
+		codes = sp.fsstCoder
+	} else {
+		if symbols := trainFSST(raw); len(symbols) > 0 {
+			codes = newFSSTCoder(symbols)
+		}
+		if sp != nil {
+			// One symbol table per column, later pages reuse it and skip training.
+			sp.fsstTrained, sp.fsstCoder = true, codes
+		}
+	}
+	if codes == nil {
 		return nil, ErrSkip
 	}
-	codes := newFSSTCoder(symbols)
+	symbols := codes.symbols
 
 	// Encode each row separately so the decoder can rebuild per-row lengths
 	// without scanning the entire payload for delimiters.
@@ -68,8 +84,7 @@ func (fsstCodec) Encode(v vector.Vec, ctx *EncodeContext) ([]byte, error) {
 		pos = end
 	}
 
-	// Wire: magic(4) | nsyms(1) | for each symbol: len(1) + bytes |
-	// rows(u32) | for each row: enc_len(u32) + enc_bytes
+	// Wire layout is magic(4) | nsyms(1) | per-symbol len(1)+bytes | rows(u32) | per-row enc_len(u32)+enc_bytes.
 	hdr := fsstMagicLen + 1
 	for _, s := range symbols {
 		hdr += 1 + len(s)
@@ -176,39 +191,62 @@ func trainFSST(raw []byte) [][]byte {
 	if len(sample) > sampleCap {
 		sample = sample[:sampleCap]
 	}
-	counts := make(map[string]int, 1024)
-	for L := 2; L <= fsstMaxSymLen; L++ {
-		if L > len(sample) {
-			break
+	if len(sample) < 2 {
+		return nil
+	}
+	// Substrings pack big endian into one uint64 per length so counting never allocates keys.
+	var counts [fsstMaxSymLen + 1]map[uint64]int
+	for l := 2; l <= fsstMaxSymLen; l++ {
+		counts[l] = make(map[uint64]int, 1024)
+	}
+	for i := 0; i+2 <= len(sample); i++ {
+		var w uint64
+		if i+8 <= len(sample) {
+			w = binary.BigEndian.Uint64(sample[i:])
+		} else {
+			for j := range len(sample) - i {
+				w |= uint64(sample[i+j]) << (56 - 8*j)
+			}
 		}
-		end := len(sample) - L + 1
-		for i := range end {
-			counts[string(sample[i:i+L])]++
+		maxL := min(fsstMaxSymLen, len(sample)-i)
+		for l := 2; l <= maxL; l++ {
+			counts[l][w&(^uint64(0)<<(64-8*l))]++
 		}
 	}
 	type cand struct {
-		s    string
+		w    uint64
+		l    uint8
 		gain int
 	}
-	cands := make([]cand, 0, len(counts))
-	for s, c := range counts {
-		if c < 2 {
-			continue
+	var cands []cand
+	for l := 2; l <= fsstMaxSymLen; l++ {
+		for w, c := range counts[l] {
+			if c < 2 {
+				continue
+			}
+			cands = append(cands, cand{w: w, l: uint8(l), gain: c * (l - 1)})
 		}
-		cands = append(cands, cand{s: s, gain: c * (len(s) - 1)})
 	}
+	// Big endian packing makes (w asc, l asc) reproduce the previous string tie break.
 	sort.Slice(cands, func(i, j int) bool {
 		if cands[i].gain != cands[j].gain {
 			return cands[i].gain > cands[j].gain
 		}
-		return cands[i].s < cands[j].s
+		if cands[i].w != cands[j].w {
+			return cands[i].w < cands[j].w
+		}
+		return cands[i].l < cands[j].l
 	})
 	if len(cands) > fsstMaxSymbols {
 		cands = cands[:fsstMaxSymbols]
 	}
 	out := make([][]byte, len(cands))
 	for i, c := range cands {
-		out[i] = []byte(c.s)
+		s := make([]byte, c.l)
+		for j := range s {
+			s[j] = byte(c.w >> (56 - 8*j))
+		}
+		out[i] = s
 	}
 	return out
 }
@@ -242,7 +280,7 @@ func (c *fsstCoder) encode(in []byte) []byte {
 		matched := false
 		for _, id := range c.byHead[head] {
 			s := c.symbols[id]
-			if i+len(s) <= len(in) && bytesEqual(in[i:i+len(s)], s) {
+			if i+len(s) <= len(in) && bytes.Equal(in[i:i+len(s)], s) {
 				if id == fsstEscape {
 					continue
 				}
@@ -293,19 +331,7 @@ func ParseFSSTHeader(payload []byte) (symbols [][]byte, rowsOff int, rowCount in
 	return symbols, pos + 4, rowCount, nil
 }
 
-// EncodeFSSTLiteral encodes literal against the page symbol table; result aliases the coder buffer.
+// EncodeFSSTLiteral encodes literal against the page symbol table and the result aliases the coder buffer.
 func EncodeFSSTLiteral(symbols [][]byte, literal []byte) []byte {
 	return newFSSTCoder(symbols).encode(literal)
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

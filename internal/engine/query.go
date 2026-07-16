@@ -24,10 +24,9 @@ func (db *DB) runQuery(ctx context.Context, plan *sql.Plan) (*Rows, error) {
 	} else if ok {
 		return rows, nil
 	}
-	// PR-V2c: pin a snapshot timestamp at the start of the statement so every scan,
-	// including joins across multiple tables, sees the same committed view. ^uint64(0)
-	// would also work (latest), but using nextCommitTs.Load lets us layer time-travel
-	// (AS OF) on top without changing this code path.
+	// Pinning a snapshot timestamp at statement start gives every scan, including
+	// multi-table joins, the same committed view. Using nextCommitTs.Load instead of
+	// ^uint64(0) lets AS OF time travel layer on top without changing this path.
 	readTs := db.nextCommitTs.Load()
 	return db.runQueryWith(ctx, plan, func(d sql.BoundTableDef) ([]*storage.Segment, error) {
 		ts := readTs

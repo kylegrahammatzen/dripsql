@@ -1,4 +1,4 @@
-﻿// ALP-RD round-trip + cascade selection for irrational/scientific floats.
+// ALP-RD round-trip + cascade selection for irrational/scientific floats.
 package codec
 
 import (
@@ -70,9 +70,8 @@ func TestALPRD_PreservesNaNAndInf(t *testing.T) {
 }
 
 func TestALPRD_CascadePicksRDForIrrationals(t *testing.T) {
-	// 2048 irrationals: ALP-decimal won't round-trip the irrational base, and at
-	// this page size the FastLanes block rounding doesn't bury ALP-RD's win.
-	// The cascade should pick ALP-RD over Plain.
+	// ALP-decimal won't round-trip 2048 irrationals, and at this page size the FastLanes
+	// block rounding doesn't bury ALP-RD's win, so the cascade should pick ALP-RD over Plain.
 	src := vector.NewVec(vector.VecFloat64, 2048)
 	for i := range src.F64() {
 		// Vary mantissa via Ldexp on Pi so the top-16 head dict stays small

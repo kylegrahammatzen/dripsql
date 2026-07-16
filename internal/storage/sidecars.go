@@ -326,6 +326,9 @@ func accumulateGroupSums(pages []vector.Batch, gi int, nums []int, cols []writer
 const (
 	intFilterMagic      = "FFV1"
 	intFilterFileSuffix = ".bf"
+	// Distinct-key cap for the seal-time bloom, past it the filter is skipped so
+	// high-cardinality columns in large segments do not hold hundreds of MB.
+	intFilterMaxDistinct = 1 << 20
 )
 
 type IntFilter struct {
@@ -518,8 +521,10 @@ func materializeSidecarsFromSinks(cols []writerColumn, sinks []*colSink) (DictHi
 			if s.intAny && !s.intOverflow {
 				numSums[name] = NumericSum{Sum: s.intSum}
 			}
-			if b := newBloomFilter(s.intKeys); b != nil {
-				intFilters[name] = &IntFilter{bloom: b}
+			if !s.intFilterSkip {
+				if b := newBloomFilter(s.intKeys); b != nil {
+					intFilters[name] = &IntFilter{bloom: b}
+				}
 			}
 		}
 	}

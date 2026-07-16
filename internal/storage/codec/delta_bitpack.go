@@ -1,5 +1,5 @@
-// Delta + bitpack codec: stores PackFirst (vals[0]), bitpacks (vals[i]-vals[i-1]) - min(deltas).
-// Wire: [u64 LE PackFirst][u64 LE PackBase][u8 PackWidth][bitpack payload of rows-1 residuals].
+// Delta plus bitpack codec stores PackFirst (vals[0]) and bitpacks (vals[i]-vals[i-1]) - min(deltas).
+// Wire layout is [u64 LE PackFirst][u64 LE PackBase][u8 PackWidth][bitpack payload of rows-1 residuals].
 package codec
 
 import (

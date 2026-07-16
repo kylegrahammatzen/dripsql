@@ -1,4 +1,4 @@
-// Plain codec: zero-transform byte layout per Vec kind plus the varbytes wire helpers shared with dict and compressed_text.
+// Plain codec, a zero-transform byte layout per Vec kind plus the varbytes wire helpers shared with dict and compressed_text.
 // Wire is native little-endian for fixed widths and length-prefixed bytes for varbytes. Project targets are amd64/arm64.
 package codec
 

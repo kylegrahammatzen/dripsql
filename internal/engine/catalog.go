@@ -120,18 +120,6 @@ func decodeColumnDefault(col catalog.Column, t schema.Type) sql.BoundDefault {
 	return sql.BoundDefault{}
 }
 
-func codecForColumn(p catalog.StoragePolicy, id catalog.ColumnID) schema.Encoding {
-	for _, cc := range p.ColumnCodecs {
-		if cc.ColumnID != id {
-			continue
-		}
-		if v, ok := schema.ParseEncodingStrict(cc.Codec); ok {
-			return v
-		}
-	}
-	return schema.EncInvalid
-}
-
 func buildTable(file *catalog.File, spec schema.TableSpec, gen catalog.Generation) (catalog.Table, error) {
 	tab := catalog.Table{
 		TableID:             file.NextTableID,

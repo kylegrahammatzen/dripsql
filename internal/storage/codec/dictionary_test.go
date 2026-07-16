@@ -1,4 +1,4 @@
-﻿// Dictionary codec round-trip + boundary tests.
+// Dictionary codec round-trip + boundary tests.
 package codec
 
 import (

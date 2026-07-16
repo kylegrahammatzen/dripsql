@@ -1,4 +1,4 @@
-﻿// WriteSegment serializes pages column-major as one Batch per page.
+// WriteSegment serializes pages column-major as one Batch per page.
 // Atomic via tmp file, fsync, rename, and a parent-directory fsync on POSIX.
 package storage
 
@@ -51,35 +51,25 @@ type writerColumn struct {
 }
 
 // WriteSegmentWithIdentity stamps a SegmentIdentity sidecar into the file so the
-// reader can resolve columns by stable catalog identity rather than ordinal. Callers
-// that have no identity to stamp should keep calling WriteSegment; this function is
-// the engine's write path once stable ids are wired in.
-func WriteSegmentWithIdentity(path string, pages []vector.Batch, codecs map[string]schema.Encoding, id SegmentIdentity) (*Span, error) {
+// reader can resolve columns by stable catalog identity rather than ordinal.
+// Callers that have no identity to stamp should keep calling WriteSegment.
+func WriteSegmentWithIdentity(path string, pages []vector.Batch, codecs map[string]schema.Encoding, id SegmentIdentity) error {
 	return writeSegmentImpl(path, pages, codecs, id)
 }
 
 // codecs may be nil to use the cascade. A non-nil entry per column overrides
-// EncInvalid and bypasses Pick. The span is always returned, even on error,
-// so partial timings remain visible.
-func WriteSegment(path string, pages []vector.Batch, codecs map[string]schema.Encoding) (*Span, error) {
+// EncInvalid and bypasses Pick.
+func WriteSegment(path string, pages []vector.Batch, codecs map[string]schema.Encoding) error {
 	return writeSegmentImpl(path, pages, codecs, SegmentIdentity{})
 }
 
-func writeSegmentImpl(path string, pages []vector.Batch, codecs map[string]schema.Encoding, id SegmentIdentity) (*Span, error) {
-	root := NewSpan("write")
-	defer root.End()
-
+func writeSegmentImpl(path string, pages []vector.Batch, codecs map[string]schema.Encoding, id SegmentIdentity) error {
 	tmpPath := path + ".tmp"
 	_ = os.Remove(tmpPath)
 
-	prep := root.Child("prepare")
 	cols, err := prepareWriterColumns(pages)
-	prep.End()
 	if err != nil {
-		return root, err
-	}
-	for _, p := range pages {
-		root.AddRows(int64(p.Len))
+		return err
 	}
 
 	totalRows := 0
@@ -88,81 +78,78 @@ func writeSegmentImpl(path string, pages []vector.Batch, codecs map[string]schem
 	}
 	sinks := make([]*colSink, len(cols))
 	for i, c := range cols {
-		sinks[i] = newColSink(c.Kind, totalRows)
+		s := &colSink{}
+		if kindEligibleForIntFilter(c.Kind) {
+			// The 1024 cap keeps huge distinct columns from oversizing the opener, the map still grows past it.
+			hint := max(min(totalRows, 1024), 8)
+			s.intDedup = make(map[uint64]struct{}, hint)
+			s.intKeys = make([]uint64, 0, hint)
+		}
+		if c.Kind.IsVarBytes() {
+			s.varHist = make(DictHistogram, 8)
+		}
+		sinks[i] = s
 	}
 
-	body := root.Child("body")
-	err = writeSegmentBody(tmpPath, pages, cols, codecs, sinks, root, id)
-	body.End()
+	f, err := os.Create(tmpPath)
 	if err != nil {
+		return err
+	}
+	bw := bufio.NewWriterSize(f, segmentWriteBufferSize)
+	if err := writeSegmentStream(bw, pages, cols, codecs, sinks, id); err != nil {
+		f.Close()
 		os.Remove(tmpPath)
-		return root, err
+		return err
+	}
+	if err := finishSegmentFile(f, bw); err != nil {
+		os.Remove(tmpPath)
+		return err
 	}
 
-	pub := root.Child("publish")
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
-		pub.End()
-		return root, err
+		return err
 	}
-	if err := syncDir(filepath.Dir(path)); err != nil {
-		pub.End()
-		return root, err
-	}
-	pub.End()
-
-	return root, nil
+	return syncDir(filepath.Dir(path))
 }
 
 // materializeSidecarBytes builds the sidecar container body to be appended inside the
 // segment file. Returns nil when there's nothing to write. All work is done now so the
 // segment write streams it in one bufio path with the column data and footer.
-func materializeSidecarBytes(root *Span, cols []writerColumn, sinks []*colSink, id SegmentIdentity, groupSums GroupSumsMap) []byte {
+func materializeSidecarBytes(cols []writerColumn, sinks []*colSink, id SegmentIdentity, groupSums GroupSumsMap) []byte {
 	hists, filters, sums, varBlooms := materializeSidecarsFromSinks(cols, sinks)
 	identityBytes := encodeIdentitySidecar(id)
 	if hists == nil && filters == nil && sums == nil && varBlooms == nil && identityBytes == nil && groupSums == nil {
 		return nil
 	}
-	sc := root.Child("sidecars")
-	defer sc.End()
 	sections := make(map[uint8][]byte, 6)
 	if groupSums != nil {
-		gs := sc.Child("groupsums")
 		if b, err := groupSumsSidecar.Encode(map[string]GroupSumsCol(groupSums)); err == nil && b != nil {
 			sections[sidecarSectionGroupSums] = b
 		}
-		gs.End()
 	}
 	if identityBytes != nil {
 		sections[sidecarSectionIdentity] = identityBytes
 	}
 	if hists != nil {
-		dh := sc.Child("dicthist")
 		if b, err := dictHistSidecar.Encode(map[string]DictHistogram(hists)); err == nil && b != nil {
 			sections[sidecarSectionDictHist] = b
 		}
-		dh.End()
 	}
 	if filters != nil {
-		bf := sc.Child("intfilter")
 		if b, err := intFilterSidecar.Encode(map[string]*IntFilter(filters)); err == nil && b != nil {
 			sections[sidecarSectionIntFilter] = b
 		}
-		bf.End()
 	}
 	if sums != nil {
-		sm := sc.Child("numsum")
 		if b, err := numSumSidecar.Encode(map[string]NumericSum(sums)); err == nil && b != nil {
 			sections[sidecarSectionNumSum] = b
 		}
-		sm.End()
 	}
 	if varBlooms != nil {
-		vb := sc.Child("varbloom")
 		if b, err := varBloomSidecar.Encode(map[string]*VarBloom(varBlooms)); err == nil && b != nil {
 			sections[sidecarSectionVarBloom] = b
 		}
-		vb.End()
 	}
 	if len(sections) == 0 {
 		return nil
@@ -170,21 +157,7 @@ func materializeSidecarBytes(root *Span, cols []writerColumn, sinks []*colSink, 
 	return EncodeSidecarContainer(sections)
 }
 
-func writeSegmentBody(path string, pages []vector.Batch, cols []writerColumn, codecs map[string]schema.Encoding, sinks []*colSink, root *Span, id SegmentIdentity) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	bw := bufio.NewWriterSize(f, segmentWriteBufferSize)
-
-	if err := writeSegmentStream(bw, pages, cols, codecs, sinks, root, id); err != nil {
-		f.Close()
-		return err
-	}
-	return finishSegmentFile(f, bw)
-}
-
-func writeSegmentStream(bw *bufio.Writer, pages []vector.Batch, cols []writerColumn, codecs map[string]schema.Encoding, sinks []*colSink, root *Span, id SegmentIdentity) error {
+func writeSegmentStream(bw *bufio.Writer, pages []vector.Batch, cols []writerColumn, codecs map[string]schema.Encoding, sinks []*colSink, id SegmentIdentity) error {
 	if _, err := bw.Write([]byte(Magic)); err != nil {
 		return err
 	}
@@ -205,7 +178,7 @@ func writeSegmentStream(bw *bufio.Writer, pages []vector.Batch, cols []writerCol
 	}
 	// Sidecars must materialize AFTER writePayloads since the colSinks are filled
 	// during the analyzer pass that walks each page during body encoding.
-	sidecarBytes := materializeSidecarBytes(root, cols, sinks, id, buildGroupSums(pages, cols, sinks))
+	sidecarBytes := materializeSidecarBytes(cols, sinks, id, buildGroupSums(pages, cols, sinks))
 	if len(sidecarBytes) > 0 {
 		if _, err := bw.Write(sidecarBytes); err != nil {
 			return err
@@ -293,7 +266,14 @@ func prepareWriterColumns(pages []vector.Batch) ([]writerColumn, error) {
 	}
 	for ci := range cols {
 		cols[ci].Rows = uint32(rows)
-		cols[ci].NullCount = totalNullCount(pages, ci)
+		var nulls uint32
+		for _, page := range pages {
+			v := page.Columns[ci].V
+			if v.Valid != nil {
+				nulls += uint32(v.Valid.NullCount(int(v.Len)))
+			}
+		}
+		cols[ci].NullCount = nulls
 		switch {
 		case cols[ci].Rows > 0 && cols[ci].NullCount == cols[ci].Rows:
 			cols[ci].Marker = columnMarkerAllNull
@@ -336,18 +316,6 @@ func marshalPageStats(k vector.VecKind, v vector.Vec, dst []byte) {
 	default:
 		clear(dst[:StatsWireSize])
 	}
-}
-
-func totalNullCount(pages []vector.Batch, ci int) uint32 {
-	var n uint32
-	for _, page := range pages {
-		v := page.Columns[ci].V
-		if v.Valid == nil {
-			continue
-		}
-		n += uint32(v.Valid.NullCount(int(v.Len)))
-	}
-	return n
 }
 
 func isValidRow(v vector.Vec, row int) bool {
@@ -454,6 +422,7 @@ func writePayloads(w io.Writer, pages []vector.Batch, cols []writerColumn, codec
 	var facts codec.PageFacts
 	ctx := &codec.EncodeContext{Scratch: codec.NewScratchPool(), Facts: &facts}
 	for ci := range cols {
+		ctx.Scratch.ResetColumn()
 		override := schema.EncInvalid
 		if codecs != nil {
 			override = codecs[schema.NormalizeName(cols[ci].Schema.Name)]
@@ -477,12 +446,12 @@ func writePayloads(w io.Writer, pages []vector.Batch, cols []writerColumn, codec
 
 			switch {
 			case pageRows > 0 && pageNulls == pageRows:
-				// All-null page. No codec payload; encoding marked Flat.
+				// An all-null page carries no codec payload.
 				page.PayloadLength = 0
 				page.Encoding = schema.EncPlain.Wire()
 				page.Flags = PageFlagAllNull
 			case pageNulls == 0:
-				// All-valid: cascade chooser by default, user override when set.
+				// All-valid pages run the cascade chooser by default and the user override when set.
 				analyzePage(col.V, &facts, sinks[ci], pageIdx)
 				marshalPageStatsFromFacts(col.V.Kind, &facts, col.V, cols[ci].PageStats[pageIdx][:])
 				var (

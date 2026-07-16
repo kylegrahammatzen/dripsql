@@ -1,5 +1,5 @@
-// Non-Windows, non-Linux fallback: no kernel hint, just open read-only.
-// macOS would use fcntl F_RDADVISE which is range-based, not a mode flag.
+// Non-Windows, non-Linux fallback that opens read-only with no kernel hint.
+// macOS would use fcntl F_RDADVISE which is range-based rather than a mode flag.
 //go:build !windows && !linux
 
 package storage

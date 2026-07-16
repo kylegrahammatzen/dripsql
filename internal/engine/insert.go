@@ -16,7 +16,7 @@ import (
 // writeSegmentAdd writes batches to a fresh segment file and returns the matching manifest entry plus a cleanup func that removes the file when called.
 func (db *DB) writeSegmentAdd(def sql.BoundTableDef, batches []vector.Batch, rows uint32) (storage.ManifestSegmentAdd, func(), error) {
 	path := db.nextSegmentPath(def.Name)
-	if _, err := storage.WriteSegmentWithIdentity(path, batches, columnCodecs(def), db.segmentIdentity(def)); err != nil {
+	if err := storage.WriteSegmentWithIdentity(path, batches, columnCodecs(def), db.segmentIdentity(def)); err != nil {
 		os.Remove(path)
 		return storage.ManifestSegmentAdd{}, nil, err
 	}

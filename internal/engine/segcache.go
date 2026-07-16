@@ -23,14 +23,6 @@ type segmentCache struct {
 	limitFn func() int
 }
 
-func newSegmentCache(limitFn func() int) *segmentCache {
-	return &segmentCache{
-		byKey:   make(map[segCacheKey]*list.Element),
-		lru:     list.New(),
-		limitFn: limitFn,
-	}
-}
-
 // touch returns the cached segment and moves the entry to the back of the LRU.
 func (c *segmentCache) touch(key segCacheKey) (*storage.Segment, bool) {
 	elem, ok := c.byKey[key]

@@ -203,9 +203,8 @@ func TypeString(t Type) (string, error) {
 	return s, nil
 }
 
-// ParseType parses the canonical persisted form back into a Type. Caller is responsible
-// for resolving named:<x> against the catalog's registered types; this function only
-// validates the grammar.
+// ParseType parses the canonical persisted form back into a Type, validating only the
+// grammar. The caller resolves named types against the catalog's registered types.
 func ParseType(s string) (Type, error) {
 	trimmed := strings.ToLower(strings.TrimSpace(s))
 	if trimmed == "" {
@@ -227,4 +226,3 @@ func ParseType(s string) (Type, error) {
 	}
 	return Type{Kind: k}, nil
 }
-

@@ -1,4 +1,4 @@
-﻿// Delta+bitpack round-trip + estimate tests for monotonic and near-monotonic series.
+// Delta+bitpack round-trip + estimate tests for monotonic and near-monotonic series.
 package codec
 
 import (

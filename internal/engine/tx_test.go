@@ -1,6 +1,5 @@
-// PR-V3: BeginTx + Exec/Query/Commit/Rollback. Reads inside the txn see staged writes,
-// reads outside don't. Commit lands every staged table under one commit_ts. Rollback
-// discards files and leaves the manifest untouched.
+// Multi-statement txn tests where reads inside the txn see staged writes and reads outside don't.
+// Commit lands every staged table under one commit_ts while Rollback discards files and leaves the manifest untouched.
 package engine
 
 import (

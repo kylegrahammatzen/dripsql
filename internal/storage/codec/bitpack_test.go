@@ -1,4 +1,4 @@
-// Bitpack round-trip tests: pack-unpack identity across widths and row counts,
+// Bitpack round-trip tests covering pack-unpack identity across widths and row counts,
 // edge widths (1, 64), and non-block-aligned row counts.
 package codec
 

@@ -1,4 +1,4 @@
-// OpenSegment cold-opens a segment via targeted ReadAt: only the footer suffix and body are read up front.
+// OpenSegment cold-opens a segment via targeted ReadAt, reading only the footer suffix and body up front.
 // Page payloads stream on demand through ReadPage. The file handle stays open until Close.
 package storage
 
@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
@@ -79,14 +80,10 @@ type SegmentColumn struct {
 	Pages      []Page
 	PageStats  [][StatsWireSize]byte
 
-	// ColumnID is the stable catalog id for this column. Zero on legacy dsv4
-	// segments written before the identity sidecar landed; callers must fall back
-	// to positional mapping when zero.
+	// ColumnID is the stable catalog id, zero on legacy dsv4 segments so callers must fall back to positional mapping.
 	ColumnID uint64
 
-	// SinkTrusted is false only on formatVersion 0 columns with a mixed page, whose
-	// writer-side sink may have skipped those pages. Untrusted columns serve no
-	// segment-level stats and no sidecar sections; page zone maps stay valid.
+	// SinkTrusted is false only on formatVersion 0 columns with a mixed page, which serve no segment-level stats or sidecar sections while page zone maps stay valid.
 	SinkTrusted bool
 
 	// Lazily inflated into PageStats on first prune call. Skips the per-column
@@ -101,10 +98,9 @@ type Segment struct {
 	sidecarLen int64
 	Cols       []SegmentColumn
 	DV         vector.Validity
-	// CommitTs is the manifest record's commit timestamp; set by the engine when opening
-	// the segment so the scan visibility filter can skip segments newer than a reader's
-	// ReadTs. Zero on standalone OpenSegment paths (tests, tooling), which treat the
-	// segment as committed at time 0 -- always visible.
+	// CommitTs is the manifest record's commit timestamp so the scan visibility filter
+	// can skip segments newer than a reader's ReadTs. Zero on standalone OpenSegment
+	// paths (tests, tooling) means committed at time 0 and always visible.
 	CommitTs uint64
 
 	// TableID and SchemaGeneration are populated from the identity sidecar when present.
@@ -149,6 +145,18 @@ type Segment struct {
 	validateOnce sync.Once
 	validateErr  error
 	bodyEndCache int64
+}
+
+// ColumnIndex returns the position of the column whose name matches under
+// Unicode case folding, or -1 when absent. Column names are written already
+// trimmed and normalized, so folding the probe is the whole comparison.
+func (s *Segment) ColumnIndex(name string) int {
+	for i := range s.Cols {
+		if strings.EqualFold(s.Cols[i].Name, name) {
+			return i
+		}
+	}
+	return -1
 }
 
 func (s *Segment) sidecarSection(tag uint8) ([]byte, error) {
@@ -308,9 +316,9 @@ func OpenSegment(path string) (*Segment, error) {
 	return OpenSegmentWithDV(path, "")
 }
 
-// OpenSegmentWithDV opens a segment with an explicit DV file path. An empty dvPath falls
-// back to the default convention (<path>.dv); a manifest-driven path lets transaction
-// commits switch the visible DV atomically with the manifest record.
+// OpenSegmentWithDV opens a segment with an explicit DV file path, since a manifest-driven
+// path lets transaction commits switch the visible DV atomically with the manifest record.
+// An empty dvPath falls back to the default <path>.dv convention.
 func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
 	f, err := OpenRandomAccess(path)
 	if err != nil {
@@ -333,7 +341,7 @@ func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
 		f.Close()
 		return nil, fmt.Errorf("OpenSegment: load DV: %w", err)
 	}
-	// Sidecar container lives inline between footer and suffix; lazily read on first access.
+	// The sidecar container lives inline between footer and suffix and is lazily read on first access.
 	seg := &Segment{
 		f:             f,
 		path:          path,
@@ -520,7 +528,9 @@ func decodePageBytes(page Page, raw []byte, dst *vector.Vec) error {
 	kind := vector.VecKind(page.Kind)
 	if page.Flags&PageFlagAllNull != 0 {
 		*dst = allocVecForKind(kind, rows)
-		dst.Valid = allInvalidValidity(rows)
+		if rows > 0 {
+			dst.Valid = make(vector.Validity, vector.ValidityWords(rows))
+		}
 		return nil
 	}
 	innerPayload, validity, _, err := parsePageBytes(page, raw)
@@ -604,16 +614,8 @@ func allocVecForKind(k vector.VecKind, rows int) vector.Vec {
 	return vector.NewVec(k, rows)
 }
 
-func allInvalidValidity(rows int) vector.Validity {
-	if rows == 0 {
-		return nil
-	}
-	return make(vector.Validity, vector.ValidityWords(rows))
-}
-
-// footerLayout captures the trailer offsets parsed from the suffix: where the
-// column footer starts, where (and how big) the optional sidecar trailer is, and
-// the segment body's exclusive end (also footerStart).
+// footerLayout captures the trailer offsets parsed from the suffix, covering the column
+// footer start, the optional sidecar trailer position and size, and the body's exclusive end.
 type footerLayout struct {
 	cols          []SegmentColumn
 	bodyEnd       int64

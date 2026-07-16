@@ -1,4 +1,4 @@
-// Deterministic SQLsmith-style fuzz: emit valid grammar, run end-to-end, fail only on panics or unexpected errors.
+// Deterministic SQLsmith-style fuzz that emits valid grammar, runs end-to-end, and fails only on panics or unexpected errors.
 // Default 300 iterations per run. Override with DRIPSQL_SMITH_ITERS.
 package engine
 
@@ -37,7 +37,7 @@ func TestSQLSmith_RandomQueriesSurviveExec(t *testing.T) {
 			}()
 			_, err := db.Query(ctx, q)
 			if err != nil {
-				// Unexpected grammar drift: report a few then bail to keep output bounded.
+				// On unexpected grammar drift report a few then bail to keep output bounded.
 				if bad++; bad < 5 {
 					t.Errorf("unexpected error iter %d %q: %v", i, q, err)
 				} else if bad == 5 {

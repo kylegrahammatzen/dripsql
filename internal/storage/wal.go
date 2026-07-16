@@ -1,4 +1,4 @@
-﻿// WAL is a single-writer append-only log of opaque byte records framed with a per-record crc32.
+// WAL is a single-writer append-only log of opaque byte records framed with a per-record crc32.
 // Open replays records up to the first truncated or corrupt frame, truncating the tail.
 package storage
 
@@ -16,12 +16,12 @@ import (
 
 // Each record and the file header occupy a walPageSize slot so a torn write at boundary N plus 1 cannot corrupt the durable slot N.
 const (
-	walMagic           = "DWAL"
-	walVersion  uint16 = 2
-	walHeaderLen       = len(walMagic) + 2
-	walFrameHdrLen     = 1 + 4
-	walFrameTailLen    = 4
-	walPageSize        = 4096
+	walMagic               = "DWAL"
+	walVersion      uint16 = 2
+	walHeaderLen           = len(walMagic) + 2
+	walFrameHdrLen         = 1 + 4
+	walFrameTailLen        = 4
+	walPageSize            = 4096
 )
 
 func walPaddedFrameSize(payloadLen int) int64 {
@@ -83,9 +83,8 @@ func (w *WAL) Append(rec WALRecord) (int64, error) {
 	return w.append(rec, true)
 }
 
-// AppendNoSync writes the record without fsync. Use for advisory records whose
-// loss is recoverable: e.g. ManifestCommit, where a missing record on restart
-// just makes recovery re-check the manifest for the intent's paths.
+// AppendNoSync writes the record without fsync for advisory records like ManifestCommit,
+// whose loss just makes recovery re-check the manifest for the intent's paths.
 func (w *WAL) AppendNoSync(rec WALRecord) (int64, error) {
 	return w.append(rec, false)
 }
@@ -226,12 +225,10 @@ func (w *WAL) Size() int64 {
 	return w.size
 }
 
-// TruncateToHeader drops every record, leaving only the magic+version header.
-// Safe to call when the caller knows there are no in-flight intents that the
-// WAL is still protecting -- typically right after a successful commit when the
-// single-writer DB mutex is held. Does not fsync the truncate: if a crash happens
-// before the truncation hits disk, the stale records replay through recovery
-// and resolve harmlessly via manifest checks.
+// TruncateToHeader drops every record, leaving only the magic+version header, and is
+// safe once no in-flight intents remain, typically right after a successful commit
+// under the single-writer DB mutex. The truncate is not fsynced because stale records
+// that survive a crash replay through recovery and resolve harmlessly via manifest checks.
 func (w *WAL) TruncateToHeader() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()

@@ -61,7 +61,19 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 			liveCount = rows - seg.DV.NullCount(rows)
 		}
 		halfDeleted := seg.DV != nil && liveCount*2 <= rows
-		hasDroppedColumn := segmentHasInactiveColumn(seg, activeIDs)
+		// A tombstoned column id still in the footer forces a rewrite on this pass.
+		hasDroppedColumn := false
+		if seg.TableID != 0 {
+			for _, c := range seg.Cols {
+				if c.ColumnID == 0 {
+					continue
+				}
+				if _, ok := activeIDs[c.ColumnID]; !ok {
+					hasDroppedColumn = true
+					break
+				}
+			}
+		}
 		isLegacy := seg.TableID == 0
 		if !halfDeleted && !hasDroppedColumn && !isLegacy {
 			continue
@@ -75,7 +87,7 @@ func (db *DB) Compact(ctx context.Context, table string) (int, error) {
 		}
 		newPath := db.nextSegmentPath(table)
 		if liveCount > 0 {
-			if _, err := storage.WriteSegmentWithIdentity(newPath, liveBatches, codecs, db.segmentIdentity(def)); err != nil {
+			if err := storage.WriteSegmentWithIdentity(newPath, liveBatches, codecs, db.segmentIdentity(def)); err != nil {
 				return rewritten, err
 			}
 		}
@@ -267,23 +279,6 @@ func (db *DB) vacuumTableLocked(table string) (int, error) {
 		removed++
 	}
 	return removed, nil
-}
-
-// segmentHasInactiveColumn flags segments whose footer still carries a column id that
-// the current catalog has tombstoned, so they get rewritten next compaction pass.
-func segmentHasInactiveColumn(seg *storage.Segment, activeIDs map[uint64]struct{}) bool {
-	if seg.TableID == 0 {
-		return false
-	}
-	for _, c := range seg.Cols {
-		if c.ColumnID == 0 {
-			continue
-		}
-		if _, ok := activeIDs[c.ColumnID]; !ok {
-			return true
-		}
-	}
-	return false
 }
 
 // readSegmentLiveRows re-materializes every live row of seg into page-capped batches

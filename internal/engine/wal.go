@@ -1,5 +1,5 @@
-// WAL plumbing: open at <root>/wal, replay pending intents, delete orphan segment files
-// whose paths never reached the matching manifest. Used by UPDATE's atomic commit.
+// WAL plumbing for UPDATE's atomic commit, opened at <root>/wal.
+// Replays pending intents and deletes orphan segment files whose paths never reached the matching manifest.
 package engine
 
 import (
@@ -29,10 +29,9 @@ func (db *DB) openWAL() error {
 	return nil
 }
 
-// recoverTxnGroup handles all intents for one TxnID atomically. If ANY intent's adds are
-// already present in their table's manifest, the txn partially committed -- forward-roll
-// the remaining tables so the txn lands fully. Otherwise nothing committed: delete the
-// orphan segment + DV files for every intent in the group.
+// recoverTxnGroup handles all intents for one TxnID atomically. When any intent's adds
+// already reached their table's manifest the txn partially committed, so the remaining
+// tables forward-roll to land it fully, and otherwise every staged file is deleted.
 func (db *DB) recoverTxnGroup(group []storage.ManifestIntent) error {
 	if len(group) == 0 {
 		return nil
@@ -69,7 +68,7 @@ func (db *DB) recoverTxnGroup(group []storage.ManifestIntent) error {
 		states[i] = st
 	}
 	if anyCommitted {
-		// Forward-roll: apply uncommitted intents under the txn's shared (TxnID, CommitTs).
+		// Apply uncommitted intents under the txn's shared (TxnID, CommitTs).
 		for _, st := range states {
 			if st.committed {
 				if err := db.markIntentResolved(st.intent, 0); err != nil {
@@ -83,7 +82,7 @@ func (db *DB) recoverTxnGroup(group []storage.ManifestIntent) error {
 		}
 		return nil
 	}
-	// Nothing committed: delete every staged file across the group.
+	// Nothing committed, so delete every staged file across the group.
 	for _, st := range states {
 		for _, a := range st.intent.Adds {
 			p := db.resolveTablePath(st.intent.Table, a.Path)

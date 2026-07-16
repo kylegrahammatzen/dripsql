@@ -72,8 +72,8 @@ func TestWAL_RecoverDeletesOrphanSegment(t *testing.T) {
 	}
 	db.Close()
 
-	// Simulate a crashed UPDATE: an orphan segment file exists, and the WAL has an
-	// intent for it with no matching commit. Recovery should delete the file.
+	// Simulate a crashed UPDATE where an orphan segment file exists and the WAL has an
+	// intent for it with no matching commit, so recovery should delete the file.
 	tableDir := filepath.Join(dir, "tables", "0000000000000001")
 	orphan := filepath.Join(tableDir, "999999.dsv4")
 	if err := os.WriteFile(orphan, []byte("garbage"), 0o644); err != nil {
@@ -224,7 +224,7 @@ func writeSingleInt(t *testing.T, path string, val int64) {
 	if err != nil {
 		t.Fatalf("NewBatch: %v", err)
 	}
-	if _, err := storage.WriteSegment(path, []vector.Batch{batch}, nil); err != nil {
+	if err := storage.WriteSegment(path, []vector.Batch{batch}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 }

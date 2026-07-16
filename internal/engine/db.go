@@ -1,8 +1,9 @@
-﻿// DB wires the parser/binder, plan cache, exec operators, and storage manifests behind Open/Exec/Query.
+// DB wires the parser/binder, plan cache, exec operators, and storage manifests behind Open/Exec/Query.
 // One sync.Mutex serializes catalog and table state. The plan cache carries its own internal lock.
 package engine
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,13 +31,13 @@ var (
 )
 
 type DB struct {
-	root          string
-	mu            sync.Mutex
-	catalog       *catalog.File
-	types         map[string]*catalog.Type
-	tables        map[string]*catalog.Table
-	version       sql.SchemaVersion
-	plans         *sql.PlanCache
+	root         string
+	mu           sync.Mutex
+	catalog      *catalog.File
+	types        map[string]*catalog.Type
+	tables       map[string]*catalog.Table
+	version      sql.SchemaVersion
+	plans        *sql.PlanCache
 	manifests    map[string]*storage.Manifest
 	segCount     map[string]uint64
 	segments     *segmentCache
@@ -93,10 +94,10 @@ type Result struct {
 	RowsAffected int64
 }
 
-// Seam between DB's auto-commit path and Tx's staged path; DB binds db.commitManifestTxn, Tx binds tx.commit.
+// Seam between DB's auto-commit path and Tx's staged path, where DB binds db.commitManifestTxn and Tx binds tx.commit.
 type commitFn func(table string, adds []storage.ManifestSegmentAdd, dvUpdates []storage.ManifestDVUpdate) error
 
-// lockOpen acquires db.mu and rejects when the DB has been closed; on success the caller must defer db.mu.Unlock.
+// lockOpen acquires db.mu and rejects when the DB has been closed, so on success the caller must defer db.mu.Unlock.
 func (db *DB) lockOpen() error {
 	db.mu.Lock()
 	if db.closed {
@@ -158,7 +159,11 @@ func newDB(path string, file *catalog.File) *DB {
 		segCount:     make(map[string]uint64),
 		pinnedReadTs: make(map[uint64]int),
 	}
-	db.segments = newSegmentCache(db.segCacheLimit)
+	db.segments = &segmentCache{
+		byKey:   make(map[segCacheKey]*list.Element),
+		lru:     list.New(),
+		limitFn: db.segCacheLimit,
+	}
 	return db
 }
 
@@ -239,21 +244,15 @@ func (db *DB) manifestFor(name string) (*storage.Manifest, error) {
 	db.manifests[key] = m
 	view := m.Snapshot()
 	for _, entry := range view.Entries {
-		base := filepath.Base(entry.Path)
-		if id, ok := parseSegmentID(base); ok && id >= db.segCount[key] {
+		base, ok := strings.CutSuffix(filepath.Base(entry.Path), ".dsv4")
+		if !ok {
+			continue
+		}
+		if id, err := strconv.ParseUint(base, 10, 64); err == nil && id >= db.segCount[key] {
 			db.segCount[key] = id + 1
 		}
 	}
 	return m, nil
-}
-
-func parseSegmentID(filename string) (uint64, bool) {
-	base, ok := strings.CutSuffix(filename, ".dsv4")
-	if !ok {
-		return 0, false
-	}
-	id, err := strconv.ParseUint(base, 10, 64)
-	return id, err == nil
 }
 
 func (db *DB) nextSegmentPath(name string) string {
@@ -339,6 +338,16 @@ func (db *DB) boundTable(entry *catalog.Table) sql.BoundTableDef {
 				labels = append([]string(nil), tt.Labels...)
 			}
 		}
+		enc := schema.EncInvalid
+		for _, cc := range entry.StoragePolicy.ColumnCodecs {
+			if cc.ColumnID != col.ColumnID {
+				continue
+			}
+			if v, ok := schema.ParseEncodingStrict(cc.Codec); ok {
+				enc = v
+				break
+			}
+		}
 		cols = append(cols, sql.BoundColumnDef{
 			ID:       sql.ColumnID(col.ColumnID),
 			Ordinal:  col.Ordinal,
@@ -346,7 +355,7 @@ func (db *DB) boundTable(entry *catalog.Table) sql.BoundTableDef {
 			Type:     t,
 			Nullable: col.Nullable,
 			Labels:   labels,
-			Codec:    codecForColumn(entry.StoragePolicy, col.ColumnID),
+			Codec:    enc,
 			Default:  decodeColumnDefault(col, t),
 		})
 	}

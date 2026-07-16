@@ -1,4 +1,4 @@
-// Manifest tests: open-empty, append, reload, snapshot/At semantics, CRC tail truncation.
+// Manifest tests covering open-empty, append, reload, snapshot/At semantics, and CRC tail truncation.
 package storage
 
 import (
@@ -244,4 +244,3 @@ func TestManifest_AppendAfterClose_Errors(t *testing.T) {
 		t.Fatal("Append after Close must error")
 	}
 }
-

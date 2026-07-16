@@ -1,5 +1,5 @@
-﻿// Sequence codec invariant tests: arithmetic progression detection, kind scope,
-// round-trip across width-8 FOR-packable kinds, decode bounds.
+// Sequence codec invariant tests covering arithmetic progression detection, kind scope,
+// round-trip across width-8 FOR-packable kinds, and decode bounds.
 package codec
 
 import (

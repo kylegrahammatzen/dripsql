@@ -19,7 +19,7 @@ func TestOpenSegment_RoundTrip_IntColumn(t *testing.T) {
 		makeIntBatch(t, "id", 0, 100),
 		makeIntBatch(t, "id", 100, 100),
 	}
-	if _, err := WriteSegment(path, pages, nil); err != nil {
+	if err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -66,7 +66,7 @@ func TestOpenSegment_RoundTrip_TwoColumns(t *testing.T) {
 		makeTwoColumnBatch(t, 0, 64),
 		makeTwoColumnBatch(t, 64, 64),
 	}
-	if _, err := WriteSegment(path, pages, nil); err != nil {
+	if err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -112,7 +112,7 @@ func TestOpenSegment_TooSmallErrors(t *testing.T) {
 
 func TestOpenSegment_BadTailMagicErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -125,7 +125,7 @@ func TestOpenSegment_BadTailMagicErrors(t *testing.T) {
 
 func TestOpenSegment_BadHeadMagicErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -138,7 +138,7 @@ func TestOpenSegment_BadHeadMagicErrors(t *testing.T) {
 
 func TestSegment_ReadPage_OutOfRange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 10)}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 10)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -157,7 +157,7 @@ func TestSegment_ReadPage_OutOfRange(t *testing.T) {
 func TestSegment_StatsMarshaledIntoFooter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	pages := []vector.Batch{makeIntBatch(t, "id", 5, 100)}
-	if _, err := WriteSegment(path, pages, nil); err != nil {
+	if err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -204,7 +204,7 @@ func TestParseFooter_RejectsAbsurdLabelCount(t *testing.T) {
 
 func TestParseFooter_RejectsTrailingBytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -219,7 +219,7 @@ func TestParseFooter_RejectsTrailingBytes(t *testing.T) {
 
 func TestOpenSegment_RejectsCorruptPageOffset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -240,14 +240,14 @@ func TestOpenSegment_RejectsCorruptPageOffset(t *testing.T) {
 
 func TestOpenSegment_RejectsPageFlagAllNull(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 5)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
 	_, footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
 	footerStart := len(data) - FooterSuffixSize - int(sidecarLen) - int(footerLen)
-	// Footer ends with [page-entries...][page-stats...]; single column with one page means
-	// the page entry is at footerEnd - 1*StatsWireSize - PageEntrySize.
+	// The footer ends with [page-entries...][page-stats...], so a single column with one
+	// page puts the page entry at footerEnd - 1*StatsWireSize - PageEntrySize.
 	pageDirOff := footerStart + int(footerLen) - StatsWireSize - PageEntrySize
 	data[pageDirOff+30] = PageFlagAllValid | PageFlagAllNull
 	_ = os.WriteFile(path, data, 0o644)
@@ -308,7 +308,7 @@ func TestSegmentIdentity_RoundTrip(t *testing.T) {
 		SchemaGeneration: 13,
 		ColumnIDs:        []uint64{101},
 	}
-	if _, err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 4)}, nil, id); err != nil {
+	if err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 4)}, nil, id); err != nil {
 		t.Fatalf("WriteSegmentWithIdentity: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -326,7 +326,7 @@ func TestSegmentIdentity_RoundTrip(t *testing.T) {
 
 func TestSegmentIdentity_AbsentOnLegacyWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
-	if _, err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 4)}, nil); err != nil {
+	if err := WriteSegment(path, []vector.Batch{makeIntBatch(t, "id", 0, 4)}, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -350,7 +350,7 @@ func TestSegmentIdentity_RejectsColumnCountMismatch(t *testing.T) {
 		SchemaGeneration: 1,
 		ColumnIDs:        []uint64{1, 2},
 	}
-	if _, err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 4)}, nil, id); err != nil {
+	if err := WriteSegmentWithIdentity(path, []vector.Batch{makeIntBatch(t, "id", 0, 4)}, nil, id); err != nil {
 		t.Fatalf("WriteSegmentWithIdentity: %v", err)
 	}
 	if _, err := OpenSegment(path); err == nil {
@@ -398,12 +398,12 @@ func makeTrustProbeBatch(t *testing.T, start int64) vector.Batch {
 	return b
 }
 
-// Contract: a freshly written segment reopens as format version 1 with every
+// A freshly written segment reopens as format version 1 with every
 // column trusted, exact stats on mixed columns, and all sidecar sections served.
 func TestOpenSegment_V4RoundTripAllTrusted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	pages := []vector.Batch{makeTrustProbeBatch(t, 0), makeTrustProbeBatch(t, 8)}
-	if _, err := WriteSegment(path, pages, nil); err != nil {
+	if err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	seg, err := OpenSegment(path)
@@ -419,7 +419,7 @@ func TestOpenSegment_V4RoundTripAllTrusted(t *testing.T) {
 			t.Fatalf("col %q untrusted on a v4 file", seg.Cols[i].Name)
 		}
 	}
-	xIdx, _ := findSegmentColumnIdx(seg, "x")
+	xIdx := seg.ColumnIndex("x")
 	stats, present := numericStatsFromCol(&seg.Cols[xIdx])
 	if !present || !stats.HasNonNull || stats.Min != 1000 || stats.Max != 1014 {
 		t.Fatalf("x stats = %+v present=%v, want exact min 1000 max 1014", stats, present)
@@ -447,14 +447,13 @@ func TestOpenSegment_V4RoundTripAllTrusted(t *testing.T) {
 	}
 }
 
-// Contract: a legacy v3 suffix reads as format version 0, mixed-page columns lose
+// A legacy v3 suffix reads as format version 0, mixed-page columns lose
 // sink trust with stats absent and sidecar sections dropped, and fully valid
-// columns in the same file keep exact stats and sidecars. Pins new behavior, no
-// fail-before exists since v3 discrimination did not exist.
+// columns in the same file keep exact stats and sidecars.
 func TestOpenSegment_V3LegacySuffixSoftDisablesMixedColumns(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "seg.dsv4")
 	pages := []vector.Batch{makeTrustProbeBatch(t, 0), makeTrustProbeBatch(t, 8)}
-	if _, err := WriteSegment(path, pages, nil); err != nil {
+	if err := WriteSegment(path, pages, nil); err != nil {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, err := os.ReadFile(path)
@@ -484,9 +483,9 @@ func TestOpenSegment_V3LegacySuffixSoftDisablesMixedColumns(t *testing.T) {
 	if seg.FormatVersion != 0 {
 		t.Fatalf("FormatVersion = %d, want 0", seg.FormatVersion)
 	}
-	xIdx, _ := findSegmentColumnIdx(seg, "x")
-	gIdx, _ := findSegmentColumnIdx(seg, "g")
-	idIdx, _ := findSegmentColumnIdx(seg, "id")
+	xIdx := seg.ColumnIndex("x")
+	gIdx := seg.ColumnIndex("g")
+	idIdx := seg.ColumnIndex("id")
 	if seg.Cols[xIdx].SinkTrusted || seg.Cols[gIdx].SinkTrusted {
 		t.Fatal("mixed-page columns must lose sink trust on v3 files")
 	}
@@ -550,7 +549,7 @@ func TestScanOpts_ReadTs_SkipsNewerSegments(t *testing.T) {
 		v := vector.NewVec(vector.VecInt64, 1)
 		v.I64()[0] = val
 		batch, _ := vector.NewBatch([]vector.Column{{Name: "id", Type: schema.Int64, V: v}})
-		if _, err := WriteSegment(path, []vector.Batch{batch}, nil); err != nil {
+		if err := WriteSegment(path, []vector.Batch{batch}, nil); err != nil {
 			t.Fatalf("WriteSegment: %v", err)
 		}
 		s, err := OpenSegment(path)
