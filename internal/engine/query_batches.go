@@ -1,5 +1,5 @@
-// Columnar query results. QueryBatches drains the operator tree into dense engine-owned
-// batches so embedding callers read typed column slices instead of boxed [][]any rows.
+// Columnar query results. QueryBatches answers from metadata when eligible or drains the
+// operator tree into dense engine-owned batches of typed column slices instead of boxed rows.
 package engine
 
 import (
@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/kylegrahammatzen/dripsql/internal/exec"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/sql"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
@@ -34,6 +35,78 @@ func (db *DB) QueryBatches(ctx context.Context, sqlText string, args ...any) (*B
 	}
 	if bound != nil && bound.Kind == sql.PlanExplain {
 		return nil, fmt.Errorf("engine: QueryBatches does not support EXPLAIN")
+	}
+	if mrows, ok, err := db.answerFromMetadata(bound); err != nil {
+		return nil, err
+	} else if ok {
+		out := &BatchRows{Columns: mrows.Columns}
+		outputs := bound.Rel.Outputs
+		for start := 0; start < len(mrows.Values); start += vector.StandardBatchRows {
+			chunk := mrows.Values[start:min(start+vector.StandardBatchRows, len(mrows.Values))]
+			n := len(chunk)
+			cols := make([]vector.Column, len(outputs))
+			for ci := range outputs {
+				// Runtime values pick the vec kind because narrowed min and max plus float avg override the planner's int64 label, an all-null column keeps it.
+				t := outputs[ci].Expr.Type
+				for _, r := range chunk {
+					switch r[ci].(type) {
+					case nil:
+						continue
+					case int64:
+						t = schema.Int64
+					case int32:
+						t = schema.Int32
+					case int16:
+						t = schema.Int16
+					case float64:
+						t = schema.Float64
+					}
+					break
+				}
+				vk, err := vector.VecKindOf(t)
+				if err != nil {
+					return nil, fmt.Errorf("engine: metadata batch column %q: %w", mrows.Columns[ci], err)
+				}
+				v, err := vector.NewVecForKind(vk, n)
+				if err != nil {
+					return nil, fmt.Errorf("engine: metadata batch column %q: %w", mrows.Columns[ci], err)
+				}
+				var valid vector.Validity
+				for r := range n {
+					switch x := chunk[r][ci].(type) {
+					case int64:
+						v.I64()[r] = x
+					case int32:
+						v.I32()[r] = x
+					case int16:
+						v.I16()[r] = x
+					case float64:
+						v.F64()[r] = x
+					case string:
+						v.Var().AppendString(r, x)
+					case nil:
+						if valid == nil {
+							valid = vector.NewAllValid(n)
+						}
+						valid.SetInvalid(r)
+						if vk.IsVarBytes() {
+							v.Var().AppendBytes(r, nil)
+						}
+					default:
+						return nil, fmt.Errorf("engine: metadata batch column %q value %T unsupported", mrows.Columns[ci], x)
+					}
+				}
+				v.Valid = valid
+				cols[ci] = vector.Column{Name: mrows.Columns[ci], Type: t, V: v}
+			}
+			batch, err := vector.NewBatch(cols)
+			if err != nil {
+				return nil, fmt.Errorf("engine: metadata batch: %w", err)
+			}
+			out.Batches = append(out.Batches, batch)
+			out.Rows += n
+		}
+		return out, nil
 	}
 	readTs := db.nextCommitTs.Load()
 	resolve := cachedSegmentResolver(func(d sql.BoundTableDef) ([]*storage.Segment, error) {

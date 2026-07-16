@@ -7,7 +7,9 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/storage"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func TestEngine_MetadataAggregate_CountStarAndMinMax(t *testing.T) {
@@ -220,6 +222,89 @@ func TestEngine_DictHistogram_GroupBy_CountStar(t *testing.T) {
 	for _, k := range keys {
 		if got[k] != want[k] {
 			t.Errorf("group %q: got %d, want %d", k, got[k], want[k])
+		}
+	}
+}
+
+// ingestLabelBatch builds one Ingest page for table t with schema id int64, label text, v int64.
+func ingestLabelBatch(t *testing.T, idStart int, labels []string, vals []int64, labelsNull bool) vector.Batch {
+	t.Helper()
+	n := len(labels)
+	idVec := vector.NewVec(vector.VecInt64, n)
+	labelVec := vector.NewVarVec(vector.VecText, n, 0)
+	vVec := vector.NewVec(vector.VecInt64, n)
+	lb := labelVec.Var()
+	for i := range n {
+		idVec.I64()[i] = int64(idStart + i)
+		lb.AppendString(i, labels[i])
+		vVec.I64()[i] = vals[i]
+	}
+	if labelsNull {
+		valid := vector.NewAllValid(n)
+		for i := range n {
+			valid.SetInvalid(i)
+		}
+		labelVec.Valid = valid
+	}
+	batch, err := vector.NewBatch([]vector.Column{
+		{Name: "id", Type: schema.Int64, V: idVec},
+		{Name: "label", Type: schema.Text, V: labelVec},
+		{Name: "v", Type: schema.Int64, V: vVec},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return batch
+}
+
+func TestEngine_DictHistogram_GroupBy_BailsOnNullGroupKey(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	if _, err := db.Exec(ctx, "CREATE TABLE t (id int64 NOT NULL, label text, v int64 NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	// One segment holding a normal page where '' is a real group plus an all-null label page.
+	normal := ingestLabelBatch(t, 0, []string{"a", "", "a", ""}, []int64{10, 5, 20, 7}, false)
+	nulls := ingestLabelBatch(t, 4, []string{"", ""}, []int64{100, 200}, true)
+	if _, err := db.Ingest(ctx, IngestConfig{Table: "t", Batches: []vector.Batch{normal, nulls}}); err != nil {
+		t.Fatal(err)
+	}
+	// The histogram cannot represent a NULL group, so stored NULLs must force the scan path outright.
+	if err := db.lockOpen(); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := db.planForQuery("SELECT label, sum(v) AS s, count(*) AS c FROM t GROUP BY label")
+	if err != nil {
+		db.mu.Unlock()
+		t.Fatal(err)
+	}
+	rows, ok, err := db.answerFromMetadata(plan)
+	db.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("grouped aggregate over a group column with stored NULLs must bail to the scan path, got metadata answer %v", rows.Values)
+	}
+	type sc struct {
+		sum   int64
+		count int64
+	}
+	collect := func(rows [][]any) map[any]sc {
+		m := make(map[any]sc, len(rows))
+		for _, r := range rows {
+			m[r[0]] = sc{sum: r[1].(int64), count: r[2].(int64)}
+		}
+		return m
+	}
+	got := collect(mustValues(t, db, "SELECT label, sum(v) AS s, count(*) AS c FROM t GROUP BY label"))
+	want := collect(mustValues(t, db, "SELECT label, sum(v) AS s, count(*) AS c FROM t WHERE id >= 0 GROUP BY label"))
+	if len(got) != len(want) {
+		t.Fatalf("got %d groups want %d (got=%v want=%v)", len(got), len(want), got, want)
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("group %v: got %+v want %+v", k, got[k], w)
 		}
 	}
 }

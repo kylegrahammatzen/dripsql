@@ -3,26 +3,28 @@
 package engine
 
 import (
-	"context"
 	"fmt"
+	"strings"
 	"testing"
 )
 
 func seedGroupSums(t *testing.T, db *DB) [][]any {
 	t.Helper()
 	mustExec(t, db, "CREATE TABLE t (cat text NOT NULL, price int64 NOT NULL, opt int64)")
-	var stmts []string
+	var ins strings.Builder
+	ins.WriteString("INSERT INTO t (cat, price, opt) VALUES ")
 	for i := range 400 {
+		if i > 0 {
+			ins.WriteString(",")
+		}
 		cat := []string{"a", "b", "c"}[i%3]
 		opt := fmt.Sprintf("%d", i)
 		if i%7 == 0 {
 			opt = "NULL"
 		}
-		stmts = append(stmts, fmt.Sprintf("INSERT INTO t (cat, price, opt) VALUES ('%s', %d, %s)", cat, i*3, opt))
+		fmt.Fprintf(&ins, "('%s', %d, %s)", cat, i*3, opt)
 	}
-	if _, err := db.BulkInsert(context.Background(), stmts); err != nil {
-		t.Fatalf("BulkInsert: %v", err)
-	}
+	mustExec(t, db, ins.String())
 	var wantA, wantB, wantC int64
 	for i := range 400 {
 		v := int64(i * 3)
