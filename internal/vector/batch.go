@@ -18,8 +18,7 @@ type Column struct {
 	Dict       *DictCol
 }
 
-// DictCol carries a dictionary page through the scan without materializing per-row
-// strings. When set, V is a kind-only placeholder and consumers must read Codes/Entries.
+// DictCol carries a dictionary page through the scan without materializing per-row strings, making V a kind-only placeholder whose consumers must read Codes/Entries.
 type DictCol struct {
 	Codes   []byte
 	Entries [][]byte
@@ -138,11 +137,20 @@ func ForVisible(batch Batch, fn func(row int) error) error {
 }
 
 func (b Batch) ColumnByName(name string) (*Column, bool) {
+	if i := b.ColumnIndexByName(name); i >= 0 {
+		return &b.Columns[i], true
+	}
+	return nil, false
+}
+
+// ColumnIndexByName returns the position of the named column under the batch's
+// trimmed case-insensitive matching, or -1 when absent.
+func (b Batch) ColumnIndexByName(name string) int {
 	trimmed := strings.TrimSpace(name)
 	for i := range b.Columns {
 		if strings.EqualFold(b.Columns[i].Name, trimmed) {
-			return &b.Columns[i], true
+			return i
 		}
 	}
-	return nil, false
+	return -1
 }

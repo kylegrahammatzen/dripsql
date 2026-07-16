@@ -1,4 +1,4 @@
-﻿// Vec is the slim runtime vector. One unsafe.Pointer replaces nine typed slice headers.
+// Vec is the slim runtime vector. One unsafe.Pointer replaces nine typed slice headers.
 // When Enc is not Flat the data pointer addresses a codec-specific struct (dictState, packState, ...) instead of raw bytes.
 package vector
 
@@ -11,8 +11,7 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 )
 
-// UUID16 is the 16-byte UUID value used everywhere DripSQL handles a UUID.
-// ParseUUID accepts canonical 36-char hyphenated form and bare 32-char hex.
+// UUID16 is the 16-byte UUID value used everywhere DripSQL handles a UUID, parsed by ParseUUID from canonical 36-char hyphenated form or bare 32-char hex.
 type UUID16 [16]byte
 
 func ParseUUID(s string) (UUID16, error) {
@@ -224,9 +223,7 @@ func (v *Vec) UUID() []UUID16   { return vecSlice[UUID16](v) }
 func (v *Vec) BoolBits() []byte { return vecBytes(v, (int(v.Len)+7)/8) }
 func (v *Vec) Var() *VarBytes   { return (*VarBytes)(v.data) }
 
-// Truncate shrinks the logical row count of v to rows. Fixed-width vectors just lower Len;
-// varbytes additionally slice the views slice so VarBytes.Rows() agrees with Vec.Len. Caller
-// is responsible for ensuring rows <= current Len.
+// Truncate shrinks the logical row count of v to rows, which the caller must keep at or below the current Len, additionally slicing a varbytes views slice so VarBytes.Rows() agrees with Vec.Len.
 func (v *Vec) Truncate(rows int) {
 	if rows < 0 || rows > int(v.Len) {
 		return

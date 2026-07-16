@@ -1,4 +1,4 @@
-// VarBytes invariant tests: inline-vs-offset boundary at 12/13 bytes, prefix populated.
+// VarBytes invariant tests covering the inline-vs-offset boundary at 12/13 bytes and prefix population.
 // These pin the German Strings layout that codec dictionaries depend on.
 package vector
 

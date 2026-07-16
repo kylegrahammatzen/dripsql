@@ -1,5 +1,5 @@
 // SelectionMask is a packed row-selection bitmap.
-// Tail-bit invariant: bits beyond rows are always zero, maintained by FillAll/NotCount/Resize/Clear so the other ops can trust it.
+// Bits beyond rows are always zero, maintained by FillAll/NotCount/Resize/Clear so the other ops can trust it.
 package vector
 
 import "math/bits"
@@ -71,8 +71,7 @@ func (s *SelectionMask) Unset(row int) {
 	s.allSet = false
 }
 
-// SetRange sets bits [start, end). Clamps to [0, rows). Middle words are filled at once
-// so contiguous range marking is cheap for large selections.
+// SetRange sets bits [start, end) clamped to [0, rows), filling middle words at once so contiguous range marking is cheap for large selections.
 func (s *SelectionMask) SetRange(start, end int) {
 	if start < 0 {
 		start = 0
@@ -108,9 +107,7 @@ func NewSelectionRange(rows, start, end int) SelectionMask {
 	return out
 }
 
-// Limit walks set rows once, skipping the first `skip` and emitting up to `take` into a
-// fresh mask. `take < 0` means unlimited. Returns the new mask plus visible-row counts
-// (seen, sent) so callers avoid a second PopCount pass.
+// Limit walks set rows once, skipping the first skip and emitting up to take (negative means unlimited) into a fresh mask, returning (seen, sent) counts so callers avoid a second PopCount pass.
 func (s SelectionMask) Limit(rows int, skip int64, take int64) (SelectionMask, int64, int64) {
 	out := NewSelectionMask(rows)
 	var seen, sent int64
@@ -179,8 +176,7 @@ func (s *SelectionMask) AndNotCount(other SelectionMask) int {
 	return count
 }
 
-// AndNotValidity keeps only rows whose validity bit is zero.
-// A nil validity means every row is valid so the mask clears to empty.
+// AndNotValidity keeps only rows whose validity bit is zero, so a nil validity meaning every row is valid clears the mask to empty.
 func (s *SelectionMask) AndNotValidity(v Validity) {
 	if v == nil {
 		s.Clear()
@@ -192,8 +188,7 @@ func (s *SelectionMask) AndNotValidity(v Validity) {
 	s.allSet = false
 }
 
-// AndValidity masks s by a Validity bitmap using word-level AND.
-// A nil validity means all rows are valid and is a no-op.
+// AndValidity masks s by a Validity bitmap using word-level AND, where a nil validity means all rows are valid and is a no-op.
 func (s *SelectionMask) AndValidity(v Validity) {
 	if v == nil {
 		return

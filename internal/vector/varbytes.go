@@ -1,4 +1,4 @@
-// VarBytes is German Strings for text/bytes/JSON: 16-byte StringView per row.
+// VarBytes is German Strings for text/bytes/JSON with a 16-byte StringView per row.
 // bufId 0 references own data, bufId >= 1 references extras[bufId-1] (dict-shared).
 package vector
 
@@ -11,7 +11,7 @@ import (
 
 const StringViewInlineMax = 12
 
-// Length+Prefix+Body. Body is inline tail bytes when Length <= 12, otherwise (bufId, offset).
+// Length+Prefix+Body where Body is inline tail bytes when Length <= 12 and (bufId, offset) otherwise.
 type StringView struct {
 	Length uint32
 	Prefix [4]byte

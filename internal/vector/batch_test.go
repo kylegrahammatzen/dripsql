@@ -1,5 +1,5 @@
-// Batch validation tests: shape consistency, dup name (case-insensitive) detection,
-// malformed-Vec rejection, EnumLabels defensive clone, SelectionMask shape match.
+// Batch validation tests covering shape consistency, case-insensitive dup name detection,
+// malformed-Vec rejection, the EnumLabels defensive clone, and SelectionMask shape match.
 package vector
 
 import (

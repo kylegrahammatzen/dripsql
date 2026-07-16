@@ -185,8 +185,7 @@ func VecKindOf(t schema.Type) (VecKind, error) {
 	return VecInvalid, fmt.Errorf("VecKindOf: invalid kind %v", t.Kind)
 }
 
-// VecKindOfMust returns the physical VecKind for a logical schema.Type.
-// Panics if the type is invalid. Use for internal validation where the type is known valid.
+// VecKindOfMust returns the physical VecKind for a logical schema.Type, panicking on an invalid type, for internal sites where the type is known valid.
 func VecKindOfMust(t schema.Type) VecKind {
 	k, err := VecKindOf(t)
 	if err != nil {
