@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"math/rand/v2"
 
+	"github.com/kylegrahammatzen/dripsql/cmd/bench/ingest"
 	"github.com/kylegrahammatzen/dripsql/internal/engine"
-	"github.com/kylegrahammatzen/dripsql/internal/ingest"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
@@ -64,53 +64,32 @@ var queries = map[string]query{
 // 128 pages of 2048 rows seals ~262k-row segments so scans amortize per-segment open and sidecar cost.
 const bulkPagesPerSegment = 128
 
-func setupUsers(ctx context.Context, db *engine.DB, rows int, segmentRows int) error {
-	if _, err := db.Exec(ctx, "CREATE TABLE users (id int64 NOT NULL, name text NOT NULL, age int64 NOT NULL, category text NOT NULL, price float64 NOT NULL)"); err != nil {
-		return err
-	}
+// seedTable drives the chunked seed loop shared by every dataset and calls fill once per page with the base row and row count.
+func seedTable(ctx context.Context, db *engine.DB, table string, rows, segmentRows int, fill func(b *ingest.BatchBuilder, base, n int)) error {
 	if segmentRows <= 0 || segmentRows > vector.StandardBatchRows {
 		segmentRows = vector.StandardBatchRows
 	}
-
-	def, err := db.BoundTableByName("users")
+	def, err := db.BoundTableByName(table)
 	if err != nil {
 		return err
 	}
 	builder := ingest.NewBatchBuilder(def)
-
-	cats := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
-	r := rand.New(rand.NewPCG(1, 2))
-	id := 0
 	pending := make([]vector.Batch, 0, bulkPagesPerSegment)
 	flush := func() error {
 		if len(pending) == 0 {
 			return nil
 		}
-		if _, err := db.Ingest(ctx, engine.IngestConfig{Table: "users", Batches: pending}); err != nil {
+		if _, err := db.Ingest(ctx, engine.IngestConfig{Table: table, Batches: pending}); err != nil {
 			return err
 		}
 		pending = pending[:0]
 		return nil
 	}
-	for id < rows {
+	for id := 0; id < rows; {
 		end := min(id+segmentRows, rows)
 		n := end - id
 		builder.Reset(n)
-		ids := make([]int64, n)
-		names := make([]string, n)
-		ages := make([]int64, n)
-		catsSlice := make([]string, n)
-		prices := make([]float64, n)
-		for i := 0; i < n; i++ {
-			row := id + i
-			cents := r.IntN(100000)
-			ids[i] = int64(row)
-			names[i] = fmt.Sprintf("user%d", row)
-			ages[i] = int64(r.IntN(100))
-			catsSlice[i] = cats[r.IntN(len(cats))]
-			prices[i] = float64(cents) / 100.0
-		}
-		builder.Int64("id", ids).Text("name", names).Int64("age", ages).Text("category", catsSlice).Float64("price", prices)
+		fill(builder, id, n)
 		batch, err := builder.Build()
 		if err != nil {
 			return err
@@ -124,6 +103,31 @@ func setupUsers(ctx context.Context, db *engine.DB, rows int, segmentRows int) e
 		id = end
 	}
 	return flush()
+}
+
+func setupUsers(ctx context.Context, db *engine.DB, rows int, segmentRows int) error {
+	if _, err := db.Exec(ctx, "CREATE TABLE users (id int64 NOT NULL, name text NOT NULL, age int64 NOT NULL, category text NOT NULL, price float64 NOT NULL)"); err != nil {
+		return err
+	}
+	cats := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
+	r := rand.New(rand.NewPCG(1, 2))
+	return seedTable(ctx, db, "users", rows, segmentRows, func(b *ingest.BatchBuilder, base, n int) {
+		ids := make([]int64, n)
+		names := make([]string, n)
+		ages := make([]int64, n)
+		catsSlice := make([]string, n)
+		prices := make([]float64, n)
+		for i := 0; i < n; i++ {
+			row := base + i
+			cents := r.IntN(100000)
+			ids[i] = int64(row)
+			names[i] = fmt.Sprintf("user%d", row)
+			ages[i] = int64(r.IntN(100))
+			catsSlice[i] = cats[r.IntN(len(cats))]
+			prices[i] = float64(cents) / 100.0
+		}
+		b.Int64("id", ids).Text("name", names).Int64("age", ages).Text("category", catsSlice).Float64("price", prices)
+	})
 }
 
 // Days since 1992-01-01 for the date windows TPC-H Q1 and Q6 reference.
@@ -147,35 +151,10 @@ func setupLineitem(ctx context.Context, db *engine.DB, rows int, segmentRows int
 	if _, err := db.Exec(ctx, ddl); err != nil {
 		return err
 	}
-	if segmentRows <= 0 || segmentRows > vector.StandardBatchRows {
-		segmentRows = vector.StandardBatchRows
-	}
-
-	def, err := db.BoundTableByName("lineitem")
-	if err != nil {
-		return err
-	}
-	builder := ingest.NewBatchBuilder(def)
-
 	flags := []string{"A", "N", "R"}
 	stats := []string{"F", "O"}
 	r := rand.New(rand.NewPCG(42, 7))
-	id := 0
-	pending := make([]vector.Batch, 0, bulkPagesPerSegment)
-	flush := func() error {
-		if len(pending) == 0 {
-			return nil
-		}
-		if _, err := db.Ingest(ctx, engine.IngestConfig{Table: "lineitem", Batches: pending}); err != nil {
-			return err
-		}
-		pending = pending[:0]
-		return nil
-	}
-	for id < rows {
-		end := min(id+segmentRows, rows)
-		n := end - id
-		builder.Reset(n)
+	return seedTable(ctx, db, "lineitem", rows, segmentRows, func(b *ingest.BatchBuilder, base, n int) {
 		orderkeys := make([]int64, n)
 		quantities := make([]int64, n)
 		extprices := make([]float64, n)
@@ -186,27 +165,22 @@ func setupLineitem(ctx context.Context, db *engine.DB, rows int, segmentRows int
 		lineStatuses := make([]string, n)
 		shipdates := make([]int64, n)
 		for i := 0; i < n; i++ {
-			row := id + i
+			row := base + i
 			qty := int64(r.IntN(50) + 1)
 			priceCents := int64(r.IntN(10_000_000) + 100)
 			ext := float64(priceCents) / 100.0
 			disc := float64(r.IntN(11)) / 100.0
-			discRev := ext * (1.0 - disc)
-			discPrice := ext * disc
-			rf := flags[r.IntN(len(flags))]
-			ls := stats[r.IntN(len(stats))]
-			ship := int64(r.IntN(2557))
 			orderkeys[i] = int64(row)
 			quantities[i] = qty
 			extprices[i] = ext
 			discounts[i] = disc
-			discRevs[i] = discRev
-			discPrices[i] = discPrice
-			returnFlags[i] = rf
-			lineStatuses[i] = ls
-			shipdates[i] = ship
+			discRevs[i] = ext * (1.0 - disc)
+			discPrices[i] = ext * disc
+			returnFlags[i] = flags[r.IntN(len(flags))]
+			lineStatuses[i] = stats[r.IntN(len(stats))]
+			shipdates[i] = int64(r.IntN(2557))
 		}
-		builder.Int64("l_orderkey", orderkeys).
+		b.Int64("l_orderkey", orderkeys).
 			Int64("l_quantity", quantities).
 			Float64("l_extprice", extprices).
 			Float64("l_discount", discounts).
@@ -215,19 +189,7 @@ func setupLineitem(ctx context.Context, db *engine.DB, rows int, segmentRows int
 			Text("l_returnflag", returnFlags).
 			Text("l_linestatus", lineStatuses).
 			Int64("l_shipdate", shipdates)
-		batch, err := builder.Build()
-		if err != nil {
-			return err
-		}
-		pending = append(pending, batch)
-		if len(pending) >= bulkPagesPerSegment {
-			if err := flush(); err != nil {
-				return fmt.Errorf("seed flush ending at row %d: %w", end, err)
-			}
-		}
-		id = end
-	}
-	return flush()
+	})
 }
 
 func setupHits(ctx context.Context, db *engine.DB, rows int, segmentRows int) error {
@@ -244,35 +206,10 @@ func setupHits(ctx context.Context, db *engine.DB, rows int, segmentRows int) er
 	if _, err := db.Exec(ctx, ddl); err != nil {
 		return err
 	}
-	if segmentRows <= 0 || segmentRows > vector.StandardBatchRows {
-		segmentRows = vector.StandardBatchRows
-	}
-
-	def, err := db.BoundTableByName("hits")
-	if err != nil {
-		return err
-	}
-	builder := ingest.NewBatchBuilder(def)
-
 	urls := []string{"/", "/index", "/home", "/search", "/cart", "/product", "/about", "/contact"}
 	phrases := []string{"", "buy", "sale", "review", "best", "cheap", "near me", "tutorial"}
 	r := rand.New(rand.NewPCG(11, 13))
-	id := 0
-	pending := make([]vector.Batch, 0, bulkPagesPerSegment)
-	flush := func() error {
-		if len(pending) == 0 {
-			return nil
-		}
-		if _, err := db.Ingest(ctx, engine.IngestConfig{Table: "hits", Batches: pending}); err != nil {
-			return err
-		}
-		pending = pending[:0]
-		return nil
-	}
-	for id < rows {
-		end := min(id+segmentRows, rows)
-		n := end - id
-		builder.Reset(n)
+	return seedTable(ctx, db, "hits", rows, segmentRows, func(b *ingest.BatchBuilder, base, n int) {
 		watchIDs := make([]int64, n)
 		userIDs := make([]int64, n)
 		eventTimes := make([]int64, n)
@@ -283,27 +220,17 @@ func setupHits(ctx context.Context, db *engine.DB, rows int, segmentRows int) er
 		advEngineIDs := make([]int64, n)
 		searchPhrases := make([]string, n)
 		for i := 0; i < n; i++ {
-			row := id + i
-			watch := int64(row)
-			user := int64(r.IntN(1_000_000))
-			event := int64(1_500_000_000 + r.IntN(86400*365))
-			url := urls[r.IntN(len(urls))]
-			title := fmt.Sprintf("Page %d", r.IntN(10000))
-			region := int64(r.IntN(100))
-			seid := int64(r.IntN(10))
-			adv := int64(r.IntN(5))
-			ph := phrases[r.IntN(len(phrases))]
-			watchIDs[i] = watch
-			userIDs[i] = user
-			eventTimes[i] = event
-			urlSlice[i] = url
-			titleSlice[i] = title
-			regionIDs[i] = region
-			searchEngineIDs[i] = seid
-			advEngineIDs[i] = adv
-			searchPhrases[i] = ph
+			watchIDs[i] = int64(base + i)
+			userIDs[i] = int64(r.IntN(1_000_000))
+			eventTimes[i] = int64(1_500_000_000 + r.IntN(86400*365))
+			urlSlice[i] = urls[r.IntN(len(urls))]
+			titleSlice[i] = fmt.Sprintf("Page %d", r.IntN(10000))
+			regionIDs[i] = int64(r.IntN(100))
+			searchEngineIDs[i] = int64(r.IntN(10))
+			advEngineIDs[i] = int64(r.IntN(5))
+			searchPhrases[i] = phrases[r.IntN(len(phrases))]
 		}
-		builder.Int64("WatchID", watchIDs).
+		b.Int64("WatchID", watchIDs).
 			Int64("UserID", userIDs).
 			Int64("EventTime", eventTimes).
 			Text("URL", urlSlice).
@@ -312,17 +239,5 @@ func setupHits(ctx context.Context, db *engine.DB, rows int, segmentRows int) er
 			Int64("SearchEngineID", searchEngineIDs).
 			Int64("AdvEngineID", advEngineIDs).
 			Text("SearchPhrase", searchPhrases)
-		batch, err := builder.Build()
-		if err != nil {
-			return err
-		}
-		pending = append(pending, batch)
-		if len(pending) >= bulkPagesPerSegment {
-			if err := flush(); err != nil {
-				return fmt.Errorf("seed flush ending at row %d: %w", end, err)
-			}
-		}
-		id = end
-	}
-	return flush()
+	})
 }

@@ -23,26 +23,28 @@ import (
 const benchDir = "./bench-db"
 
 type runReport struct {
-	Query       string        `json:"query"`
-	Dataset     string        `json:"dataset"`
-	Rows        int           `json:"rows"`
-	SegmentRows int           `json:"segment_rows"`
-	Mode        string        `json:"mode"`
-	Cold        float64       `json:"cold_ms,omitempty"`
-	Runs        int           `json:"runs"`
-	Durations   []float64     `json:"durations_ms"`
-	Min         float64       `json:"min_ms"`
-	Median      float64       `json:"median_ms"`
-	P95         float64       `json:"p95_ms"`
-	Max         float64       `json:"max_ms"`
-	Mean        float64       `json:"mean_ms"`
-	StdDev      float64       `json:"stddev_ms"`
-	IOReadMs    float64       `json:"io_read_ms"`
-	DecodeMs    float64       `json:"decode_ms"`
-	ExecMs      float64       `json:"exec_ms"`
-	Env         envReport     `json:"env"`
-	Result      int           `json:"result_rows"`
-	WallSetup   time.Duration `json:"-"`
+	Query        string        `json:"query"`
+	Dataset      string        `json:"dataset"`
+	Rows         int           `json:"rows"`
+	SegmentRows  int           `json:"segment_rows"`
+	Mode         string        `json:"mode"`
+	Cold         float64       `json:"cold_ms,omitempty"`
+	Runs         int           `json:"runs"`
+	Durations    []float64     `json:"durations_ms"`
+	Min          float64       `json:"min_ms"`
+	Median       float64       `json:"median_ms"`
+	P95          float64       `json:"p95_ms"`
+	Max          float64       `json:"max_ms"`
+	Mean         float64       `json:"mean_ms"`
+	StdDev       float64       `json:"stddev_ms"`
+	IOReadMs     float64       `json:"io_read_ms"`
+	DecodeMs     float64       `json:"decode_ms"`
+	ExecMs       float64       `json:"exec_ms"`
+	IOReadMsRuns []float64     `json:"io_read_ms_runs"`
+	DecodeMsRuns []float64     `json:"decode_ms_runs"`
+	Env          envReport     `json:"env"`
+	Result       int           `json:"result_rows"`
+	WallSetup    time.Duration `json:"-"`
 }
 
 type envReport struct {
@@ -75,7 +77,7 @@ func runBench(args []string) {
 	runs := fs.Int("runs", 10, "number of timed query runs")
 	jsonOut := fs.Bool("json", false, "emit JSON summary on stdout instead of a benchstat-style line")
 	cpuProfile := fs.String("cpuprofile", "", "write a CPU profile to this path (captures the timed runs only)")
-	mode := fs.String("mode", "hot", "hot or cold-soft, cold-soft closes and reopens the DB between runs")
+	mode := fs.String("mode", "hot", "hot, cold-soft (close and reopen the DB between runs), or cold (also purge the OS standby list, needs elevation)")
 	reuse := fs.Bool("reuse", false, "reuse the existing bench-db when its manifest matches dataset, rows, and segment rows")
 	columnar := fs.Bool("columnar", false, "drain results through QueryBatches instead of Query to measure the columnar path")
 	fs.Parse(args)
@@ -94,10 +96,12 @@ func runBench(args []string) {
 		fmt.Fprintln(os.Stderr, "bench: -runs must be at least 1")
 		os.Exit(2)
 	}
-	if *mode != "hot" && *mode != "cold-soft" {
-		fmt.Fprintf(os.Stderr, "bench: -mode must be 'hot' or 'cold-soft' (got %q)\n", *mode)
+	if *mode != "hot" && *mode != "cold-soft" && *mode != "cold" {
+		fmt.Fprintf(os.Stderr, "bench: -mode must be 'hot', 'cold-soft', or 'cold' (got %q)\n", *mode)
 		os.Exit(2)
 	}
+	coldMode := *mode != "hot"
+	purgeCache := *mode == "cold"
 
 	segmentRows := *rows
 	if segmentRows > vector.StandardBatchRows {
@@ -145,8 +149,9 @@ func runBench(args []string) {
 	}
 
 	durations := make([]time.Duration, 0, *runs)
+	ioRuns := make([]float64, 0, *runs)
+	decodeRuns := make([]float64, 0, *runs)
 	var lastRows int
-	storage.ResetTimings()
 
 	if *cpuProfile != "" {
 		pf, err := os.Create(*cpuProfile)
@@ -167,10 +172,16 @@ func runBench(args []string) {
 		}()
 	}
 	for i := range *runs {
-		if *mode == "cold-soft" {
+		if coldMode {
 			if err := db.Close(); err != nil {
 				fmt.Fprintln(os.Stderr, "bench: close between runs", err)
 				os.Exit(1)
+			}
+			if purgeCache {
+				if err := purgeStandbyList(); err != nil {
+					fmt.Fprintln(os.Stderr, "bench: standby list purge failed, falling back to cold-soft (run from an elevated shell for true cold):", err)
+					purgeCache = false
+				}
 			}
 			db, err = engine.Open(benchDir)
 			if err != nil {
@@ -178,6 +189,7 @@ func runBench(args []string) {
 				os.Exit(1)
 			}
 		}
+		storage.ResetTimings()
 		start := time.Now()
 		var gotRows int
 		var runErr error
@@ -202,29 +214,29 @@ func runBench(args []string) {
 		}
 		durations = append(durations, elapsed)
 		lastRows = gotRows
-		if i == 0 && *mode == "cold-soft" {
-			storage.ResetTimings()
-		}
+		ioNs, decodeNs := storage.ReadTimings()
+		ioRuns = append(ioRuns, float64(ioNs)/1e6)
+		decodeRuns = append(decodeRuns, float64(decodeNs)/1e6)
 	}
 	db.Close()
 
 	statRuns := durations
+	statIO, statDecode := ioRuns, decodeRuns
 	var coldMs float64
-	if *mode == "cold-soft" && len(durations) > 1 {
+	if coldMode && len(durations) > 1 {
 		coldMs = float64(durations[0].Microseconds()) / 1000.0
 		statRuns = durations[1:]
+		statIO = ioRuns[1:]
+		statDecode = decodeRuns[1:]
 	}
-	denom := len(statRuns)
-	if denom < 1 {
-		denom = 1
-	}
-	ioNs, decodeNs := storage.ReadTimings()
 	rep := summarize(q.name, ds.name, *rows, segmentRows, durations, statRuns, lastRows)
 	rep.Mode = *mode
 	rep.WallSetup = setup
 	rep.Cold = coldMs
-	rep.IOReadMs = float64(ioNs) / 1e6 / float64(denom)
-	rep.DecodeMs = float64(decodeNs) / 1e6 / float64(denom)
+	rep.IOReadMsRuns = ioRuns
+	rep.DecodeMsRuns = decodeRuns
+	rep.IOReadMs = meanOf(statIO)
+	rep.DecodeMs = meanOf(statDecode)
 	rep.ExecMs = rep.Median - rep.IOReadMs - rep.DecodeMs
 	if rep.ExecMs < 0 {
 		rep.ExecMs = 0
@@ -323,6 +335,17 @@ func summarize(query, dataset string, rows, segmentRows int, allDurations, statR
 	}
 }
 
+func meanOf(vals []float64) float64 {
+	if len(vals) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, v := range vals {
+		sum += v
+	}
+	return sum / float64(len(vals))
+}
+
 func toMs(durations []time.Duration) []float64 {
 	out := make([]float64, len(durations))
 	for i, d := range durations {
@@ -366,6 +389,10 @@ func printBenchstatLine(w io.Writer, r runReport) {
 	name := fmt.Sprintf("Benchmark_%s/rows=%d-%d", r.Query, r.Rows, r.Env.GOMAXPROCS)
 	fmt.Fprintf(w, "%s  runs=%d  wall=%s (+/- %.2f%%)  io=%s  dec=%s  exec=%s  result=%d rows\n",
 		name, r.Runs, formatMs(r.Median), pct, formatMs(r.IOReadMs), formatMs(r.DecodeMs), formatMs(r.ExecMs), r.Result)
+	if r.Cold > 0 && len(r.IOReadMsRuns) > 0 {
+		fmt.Fprintf(w, "  cold run0  wall=%s  io=%s  dec=%s\n",
+			formatMs(r.Cold), formatMs(r.IOReadMsRuns[0]), formatMs(r.DecodeMsRuns[0]))
+	}
 }
 
 func formatMs(ms float64) string {
@@ -456,28 +483,18 @@ func loadReports(path string) (map[string]runReport, error) {
 		out[r.Query] = r
 	}
 	if len(out) == 0 {
-		f.Seek(0, 0)
-		var r runReport
-		if err := json.NewDecoder(f).Decode(&r); err != nil {
-			return nil, err
-		}
-		out[r.Query] = r
+		return nil, fmt.Errorf("no reports in %s", path)
 	}
 	return out, nil
 }
 
 func joinedQueryNames(a, b map[string]runReport) []string {
-	seen := make(map[string]struct{})
-	var out []string
+	out := make([]string, 0, len(a)+len(b))
 	for k := range a {
-		if _, ok := seen[k]; !ok {
-			seen[k] = struct{}{}
-			out = append(out, k)
-		}
+		out = append(out, k)
 	}
 	for k := range b {
-		if _, ok := seen[k]; !ok {
-			seen[k] = struct{}{}
+		if _, ok := a[k]; !ok {
 			out = append(out, k)
 		}
 	}

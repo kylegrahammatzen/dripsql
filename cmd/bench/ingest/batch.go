@@ -91,11 +91,6 @@ func (b *BatchBuilder) Text(name string, vals []string) *BatchBuilder {
 	return b
 }
 
-func (b *BatchBuilder) Enum32(name string, vals []uint32) *BatchBuilder {
-	copy(b.col(name, len(vals)).V.U32(), vals)
-	return b
-}
-
 func (b *BatchBuilder) UUID(name string, vals []vector.UUID16) *BatchBuilder {
 	copy(b.col(name, len(vals)).V.UUID(), vals)
 	return b

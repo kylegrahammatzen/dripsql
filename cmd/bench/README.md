@@ -21,10 +21,11 @@ go run ./cmd/bench -query <name> -rows <N> -runs <R> -mode hot -json
 | `-query` | Cataloged query name; see `go run ./cmd/bench list` |
 | `-rows` | Synthetic dataset row count |
 | `-runs` | Timed-run count for the median |
-| `-mode` | `hot` or `cold-soft` (close and reopen DB between runs) |
-| `-json` | Emit results as JSON for downstream tooling |
+| `-mode` | `hot`, `cold-soft` (close and reopen DB between runs), or `cold` (also purge the Windows standby list so run 0 hits disk, needs an elevated shell and falls back to `cold-soft` with a warning otherwise) |
+| `-json` | Emit results as JSON for downstream tooling, including per-run `io_read_ms_runs` and `decode_ms_runs` arrays |
 | `-reuse` | Skip reseeding when `bench-db.manifest.json` matches dataset, rows, and segment rows |
 | `-columnar` | Drain results through `QueryBatches` instead of `Query` to measure the columnar path |
+| `-cpuprofile` | Write a CPU profile of the timed runs to the given path |
 
 Seeding dominates wall time at 1M+ rows, so pass `-reuse` while iterating and drop it only when the write path itself changed.
 
@@ -63,6 +64,14 @@ Use fresh JSON or JSONL artifacts because `compare` reports median deltas agains
 - `<1 us` means the workload driver rounded the median below the microsecond measurement floor.
 - For parallel scans, `io` and `decode` are summed worker time rather than wall time.
 - Under parallel aggregation the summed `io` and `decode` can exceed the median wall time, which clamps the residual `exec` column to zero. Compare runs on median wall time.
+
+## Available but not snapshotted
+
+These cataloged queries run through the driver but have no rows in the snapshot above, so run them yourself before citing numbers.
+
+- `users` dataset queries `age_eq`, `select_star`, `price_sum`, `price_avg`, and `category_count`
+- `lineitem` dataset query `tpch_q6`
+- `hits` dataset queries `clickbench_q1`, `clickbench_q4`, `clickbench_q5`, `clickbench_q7`, and `clickbench_q9`
 
 ## Exec microbenchmarks
 
