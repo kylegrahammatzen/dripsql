@@ -1,4 +1,4 @@
-// PlanCache tests: hit, version miss, eviction at max, no-op repeat-put.
+// PlanCache tests covering hit, version miss, eviction at max, and no-op repeat-put.
 package sql
 
 import (

@@ -55,9 +55,7 @@ type BoundTableDef struct {
 	Options schema.TableOptions
 	Path    string
 	Version SchemaVersion
-	// AsOf carries the parsed `AS OF <commit_ts>` clause from the table reference. Zero
-	// means use the statement-level snapshot. The engine resolver uses this per-reference
-	// so different tables in one join can scan different snapshots.
+	// AsOf carries the parsed `AS OF <commit_ts>` clause, zero meaning the statement-level snapshot, applied per reference so different tables in one join can scan different snapshots.
 	AsOf uint64
 }
 
@@ -96,9 +94,7 @@ type JoinKey struct {
 	Right BoundExpr
 }
 
-// Rel is the relational tree node. Every Rel carries its output schema in Outputs and its
-// child rels in Inputs (left then right). Op-specific fields below are populated only for
-// the matching op; constructors enforce shape so consumers can rely on it.
+// Rel is the relational tree node carrying its output schema in Outputs and child rels in Inputs, with op-specific fields populated only for the matching op and constructors enforcing that shape.
 type Rel struct {
 	Op      RelOp
 	Outputs []BoundOutput
@@ -107,10 +103,7 @@ type Rel struct {
 	Table   BoundTableDef
 	Alias   string
 	Columns []ColumnID
-	// PredicateOnly lists Column IDs that are referenced only by Where, not by any
-	// downstream output. When the executor pushes Where into storage.Predicate, those
-	// columns do not need to be emitted; storage decodes them only as far as the
-	// predicate needs and can skip materialization entirely via EvalEncoded.
+	// PredicateOnly lists Column IDs referenced only by Where, so a pushed-down predicate decodes them just far enough and skips materialization via EvalEncoded.
 	PredicateOnly []ColumnID
 	Where         *BoundExpr
 
@@ -144,8 +137,7 @@ type WindowFunc struct {
 	Frame     *WindowFrameBounds
 }
 
-// Nil Frame means default semantics: full-partition without ORDER BY, running
-// aggregate with ORDER BY. IsRange switches to value-distance on the order key.
+// A nil Frame means full-partition without ORDER BY or a running aggregate with ORDER BY, and IsRange switches to value-distance on the order key.
 type WindowFrameBounds struct {
 	IsRange        bool
 	StartUnbounded bool
@@ -222,7 +214,7 @@ func (w WindowFuncKind) IsAggregate() bool {
 	return false
 }
 
-// Plan is the bound statement. Kind selects which payload is meaningful.
+// Plan is the bound statement whose Kind selects which payload is meaningful.
 type Plan struct {
 	Kind PlanKind
 
@@ -241,9 +233,7 @@ type Plan struct {
 	Assignments []BoundAssignment
 	Where       *BoundExpr
 
-	// OuterRefs lists outer column names referenced inside this plan (only set on
-	// subquery plans). When non-empty the executor cannot materialize the result
-	// once; it must re-run the plan per outer row with the named values bound in.
+	// OuterRefs lists outer column names referenced inside this subquery plan, and when non-empty the executor must re-run the plan per outer row instead of materializing once.
 	OuterRefs []string
 }
 
@@ -267,13 +257,6 @@ func scanRel(table BoundTableDef, alias string, cols []ColumnID, where *BoundExp
 		}
 	}
 	return &Rel{Op: RelScan, Outputs: outputs, Table: table, Alias: alias, Columns: cols, Where: where}
-}
-
-func joinRel(kind JoinKind, left, right *Rel, keys []JoinKey) *Rel {
-	outputs := make([]BoundOutput, 0, len(left.Outputs)+len(right.Outputs))
-	outputs = append(outputs, left.Outputs...)
-	outputs = append(outputs, right.Outputs...)
-	return &Rel{Op: RelJoin, Outputs: outputs, Inputs: []*Rel{left, right}, JoinKind: kind, JoinKeys: keys}
 }
 
 type AggregateFunc uint8
@@ -308,14 +291,14 @@ type BoundOutput struct {
 	Expr  BoundExpr
 }
 
-// ExprOp identifies a BoundExpr node. Each op fixes the meaning of Args:
+// ExprOp identifies a BoundExpr node and each op fixes the meaning of Args.
 //
-//	ExprColumn, ExprLiteral: leaf; Args empty.
-//	Unary ops (ExprNot, ExprLower, ExprUpper, ExprLength): Args = [operand].
-//	Binary comparison/arithmetic/concat/coalesce/JSON/AND/OR: Args = [left, right].
-//	ExprSubstring: Args = [text, start, length?].
-//	ExprBetween: Args = [target, low, high].
-//	ExprIn: Args = [target, val1, val2, ...]; Not negates the membership test.
+//	ExprColumn and ExprLiteral are leaves with empty Args.
+//	Unary ops (ExprNot, ExprLower, ExprUpper, ExprLength) take Args = [operand].
+//	Binary comparison/arithmetic/concat/coalesce/JSON/AND/OR take Args = [left, right].
+//	ExprSubstring takes Args = [text, start, length?].
+//	ExprBetween takes Args = [target, low, high].
+//	ExprIn takes Args = [target, val1, val2, ...] and Not negates the membership test.
 type ExprOp uint8
 
 const (
@@ -349,9 +332,7 @@ const (
 	ExprIn
 	ExprAbs
 	ExprNullIf
-	// ExprCase: Args = [when1, then1, when2, then2, ..., elseExpr]. Args has even length
-	// when no ELSE is present (binder synthesizes a NULL literal so length stays odd).
-	// Type is the common kind across all THEN/ELSE branches.
+	// ExprCase packs Args as [when1, then1, ..., elseExpr] where the binder synthesizes a NULL ELSE to keep the length odd and Type is the common kind across branches.
 	ExprCase
 	ExprSubquery
 	ExprInSubquery
@@ -373,14 +354,23 @@ type BoundExpr struct {
 	Parameter int
 	Not       bool
 	SubPlan   *Plan
-	// Outer marks an ExprColumn that resolves to a parent scope rather than the
-	// current batch. The evaluator reads its value from a runtime outer-row table
-	// keyed by Column name. Only meaningful for Op == ExprColumn.
+	// Outer marks an ExprColumn that resolves to a parent scope, read at eval time from an outer-row table keyed by Column name.
 	Outer bool
 }
 
-// PlanCache memoizes bound Plans keyed by SQL text plus the catalog SchemaVersion they were bound against.
-// Stale-version hits miss so DDL invalidates wholesale.
+// WalkExpr visits e and then its Args depth-first, pruning a node's children when
+// visit returns false, and never descends into SubPlan so callers that need subquery
+// traversal (parameter binding) recurse from inside visit via walkPlanExprs.
+func WalkExpr(e BoundExpr, visit func(BoundExpr) bool) {
+	if !visit(e) {
+		return
+	}
+	for _, a := range e.Args {
+		WalkExpr(a, visit)
+	}
+}
+
+// PlanCache memoizes bound Plans keyed by SQL text plus catalog SchemaVersion, so stale-version hits miss and DDL invalidates wholesale.
 type PlanCache struct {
 	mu      sync.Mutex
 	max     int

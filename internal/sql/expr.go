@@ -1,5 +1,5 @@
-// Scalar expression binding: AST Expr -> typed BoundExpr against a column index.
-// WHERE / HAVING rule sets live here so that the SELECT binder is a thin orchestrator.
+// Scalar expression binding from AST Expr to typed BoundExpr against a column index.
+// WHERE and HAVING rule sets live here so the SELECT binder stays a thin orchestrator.
 package sql
 
 import (
@@ -112,8 +112,7 @@ func bindExpr(columns map[string]BoundColumnDef, expr Expr) (BoundExpr, error) {
 	}
 }
 
-// Set by Planner.planSelect for the duration of one statement. Subquery
-// binding consults this since bindExpr otherwise has no planner reference.
+// activeBindPlanner is set by Planner.planSelect for one statement because subquery binding needs a planner and bindExpr otherwise has no reference to one.
 var activeBindPlanner *Planner
 
 func bindInSubqueryExpr(columns map[string]BoundColumnDef, target BoundExpr, e *SubqueryExpr, not bool) (BoundExpr, error) {
@@ -233,9 +232,16 @@ func bindBinaryExpr(columns map[string]BoundColumnDef, e *BinaryExpr) (BoundExpr
 	}
 	if isArithmeticOp(e.Op) {
 		op, _ := arithmeticOp(e.Op)
-		typ, err := arithmeticResultType(op, left, right)
-		if err != nil {
-			return BoundExpr{}, err
+		typ := schema.Int64
+		switch {
+		case op == ExprModulo || op == ExprIntDivide:
+			if !isIntegerExpr(left) || !isIntegerExpr(right) {
+				return BoundExpr{}, fmt.Errorf("MOD and DIV require integer operands")
+			}
+		case !isNumericExpr(left) || !isNumericExpr(right):
+			return BoundExpr{}, fmt.Errorf("arithmetic expressions require numeric operands")
+		case classOf(left)&cFloat != 0 || classOf(right)&cFloat != 0:
+			typ = schema.Float64
 		}
 		return BoundExpr{Op: op, Type: typ, Args: []BoundExpr{left, right}}, nil
 	}
@@ -480,51 +486,18 @@ func arithmeticOp(op BinaryOp) (ExprOp, bool) {
 }
 
 func literalExpr(value Value) BoundExpr {
-	expr := BoundExpr{Op: ExprLiteral, Literal: literalValue(value)}
+	expr := BoundExpr{Op: ExprLiteral}
 	switch value.Kind {
 	case ValueBool:
-		expr.Type = schema.Bool
+		expr.Type, expr.Literal = schema.Bool, value.Bool
 	case ValueInt:
-		expr.Type = schema.Int64
+		expr.Type, expr.Literal = schema.Int64, value.Int
 	case ValueFloat:
-		expr.Type = schema.Float64
+		expr.Type, expr.Literal = schema.Float64, value.Float
 	case ValueString:
-		expr.Type = schema.Text
+		expr.Type, expr.Literal = schema.Text, value.String
 	}
 	return expr
-}
-
-func literalValue(value Value) any {
-	switch value.Kind {
-	case ValueBool:
-		return value.Bool
-	case ValueInt:
-		return value.Int
-	case ValueFloat:
-		return value.Float
-	case ValueString:
-		return value.String
-	case ValueNull:
-		return nil
-	default:
-		return nil
-	}
-}
-
-func arithmeticResultType(op ExprOp, left BoundExpr, right BoundExpr) (schema.Type, error) {
-	if op == ExprModulo || op == ExprIntDivide {
-		if !isIntegerExpr(left) || !isIntegerExpr(right) {
-			return schema.Type{}, fmt.Errorf("MOD and DIV require integer operands")
-		}
-		return schema.Int64, nil
-	}
-	if !isNumericExpr(left) || !isNumericExpr(right) {
-		return schema.Type{}, fmt.Errorf("arithmetic expressions require numeric operands")
-	}
-	if classOf(left)&cFloat != 0 || classOf(right)&cFloat != 0 {
-		return schema.Float64, nil
-	}
-	return schema.Int64, nil
 }
 
 type cmpRules struct {
@@ -773,12 +746,12 @@ func normalizeBound(target BoundExpr, bound *BoundExpr) {
 	}
 	switch target.Type.Kind {
 	case schema.KindTimestamp:
-		if v, ok := normalizeTimestampString(value); ok {
-			bound.Literal = v
+		if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			bound.Literal = t.UTC().Format("2006-01-02T15:04:05.000000000Z")
 		}
 	case schema.KindUUID:
-		if v, ok := normalizeUUIDString(value); ok {
-			bound.Literal = v
+		if u, err := vector.ParseUUID(value); err == nil {
+			bound.Literal = vector.FormatUUID(u)
 		}
 	}
 }
@@ -786,22 +759,6 @@ func normalizeBound(target BoundExpr, bound *BoundExpr) {
 func normalizeComparison(left, right *BoundExpr) {
 	normalizeBound(*left, right)
 	normalizeBound(*right, left)
-}
-
-func normalizeTimestampString(s string) (string, bool) {
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		return "", false
-	}
-	return t.UTC().Format("2006-01-02T15:04:05.000000000Z"), true
-}
-
-func normalizeUUIDString(s string) (string, bool) {
-	u, err := vector.ParseUUID(s)
-	if err != nil {
-		return "", false
-	}
-	return vector.FormatUUID(u), true
 }
 
 func validateHavingUUIDBound(expr BoundExpr) error {
@@ -862,9 +819,7 @@ func classOf(e BoundExpr) tclass {
 func isIntegerExpr(e BoundExpr) bool { return classOf(e)&cInt != 0 }
 func isNumericExpr(e BoundExpr) bool { return classOf(e)&cNumeric != 0 }
 
-// textBound reports whether expr is comparable with a target-kind expression.
-// Non-literal exprs must match the target kind exactly. Text literals accept the target
-// only if their value parses (date, timestamp) or the kind is bytes/uuid/named (string-shape).
+// textBound reports whether expr is comparable with a target-kind expression, requiring non-literals to match the kind exactly while text literals pass when their value parses or the kind is string-shaped (bytes, uuid, named).
 func textBound(target schema.Kind, expr BoundExpr) bool {
 	if expr.Type.Kind == target {
 		return true
@@ -925,10 +880,7 @@ func buildColumnIndex(columns []BoundColumnDef) map[string]BoundColumnDef {
 	return index
 }
 
-// buildColumnIndexQualified is buildColumnIndex plus `<qualifier>.<col>` aliases
-// for each given qualifier (table name and/or alias). Lets single-table scopes
-// accept the standard `tbl.col` and `alias.col` syntax that joined scopes already
-// require. Bare names still resolve.
+// buildColumnIndexQualified is buildColumnIndex plus qualifier.col aliases so single-table scopes accept the tbl.col and alias.col syntax joined scopes already require, with bare names still resolving.
 func buildColumnIndexQualified(columns []BoundColumnDef, qualifiers ...string) map[string]BoundColumnDef {
 	index := buildColumnIndex(columns)
 	for _, q := range qualifiers {
@@ -949,9 +901,7 @@ type joinedSource struct {
 	Def   BoundTableDef
 }
 
-// buildJoinedColumnIndex maps `alias.col` to its BoundColumnDef. Each column's Name is rewritten
-// to its qualified form so the joined batch and the binder agree. Unqualified base names are added
-// when unique; lookups for an ambiguous bare name return ok=false to force qualification.
+// buildJoinedColumnIndex maps alias.col to its BoundColumnDef with Name rewritten to the qualified form, adding bare names only when unique so ambiguous lookups force qualification.
 func buildJoinedColumnIndex(sources []joinedSource) map[string]BoundColumnDef {
 	index := make(map[string]BoundColumnDef)
 	seenBare := make(map[string]int)

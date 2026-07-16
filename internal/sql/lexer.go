@@ -1,5 +1,5 @@
-// Hand-written lexer over a SQL source string. ASCII fast-path dispatches operators by byte;
-// non-ASCII bytes fall back to UTF-8 decode for identifier-start validation.
+// Hand-written lexer over a SQL source string.
+// An ASCII fast path dispatches operators by byte and non-ASCII bytes fall back to UTF-8 decode for identifier starts.
 package sql
 
 import (
@@ -87,9 +87,7 @@ func (l *lexer) next() (token, error) {
 	return token{}, fmt.Errorf("unexpected character %q at byte %d", r, start)
 }
 
-// scanASCIIOperator handles ASCII punctuation and operators. Returns (token, true, nil) on a
-// recognized operator. Returns (_, false, nil) if the byte starts an identifier, string, number,
-// or unrecognized input — the caller dispatches further.
+// scanASCIIOperator handles ASCII punctuation, returning (token, true, nil) on a recognized operator and (_, false, nil) when the byte starts an identifier, string, number, or unrecognized input for the caller to dispatch.
 func (l *lexer) scanASCIIOperator(b byte, start int) (token, bool, error) {
 	switch b {
 	case ',':
@@ -202,10 +200,7 @@ func (l *lexer) skipSpaceAndComments() {
 	}
 }
 
-// scanIdent reads an identifier and lowercases only when needed. Pure-lowercase ASCII
-// identifiers (the common case for column names and most SQL after parsing) return their
-// source slice directly. Mixed-case ASCII goes through a byte-level lowercase that skips
-// the Unicode tables. Non-ASCII identifiers still route through strings.ToLower.
+// scanIdent reads an identifier and lowercases only when needed, returning pure-lowercase ASCII source slices directly, lowercasing mixed-case ASCII byte-wise without Unicode tables, and routing non-ASCII through strings.ToLower.
 func (l *lexer) scanIdent() (token, error) {
 	start := l.pos
 	ascii, upper := true, false
@@ -246,9 +241,7 @@ func (l *lexer) scanIdent() (token, error) {
 	return token{typ: tokIdent, lit: lit, pos: start}, nil
 }
 
-// scanDelimited reads a delimited literal where the same delimiter doubled is an escape.
-// Returns a token of `typ`. The common case (no doubled delimiter, ASCII bytes) slices the
-// source string directly; only escaped or non-ASCII inputs allocate a string builder.
+// scanDelimited reads a delimited literal of typ where a doubled delimiter escapes, slicing the source directly unless escapes or non-ASCII bytes force a string builder.
 func (l *lexer) scanDelimited(delim byte, typ tokenType, quoted bool, label string) (token, error) {
 	start := l.pos
 	l.pos++

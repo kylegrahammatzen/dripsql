@@ -1,5 +1,5 @@
-// Planner microbenches. Cold path covers parse + bind + plan; warm path covers the cache
-// hit only. Targets a sub-millisecond cold plan and near-noise warm path.
+// Planner microbenches where the cold path covers parse plus bind plus plan and the warm path covers only the cache hit.
+// Targets a sub-millisecond cold plan and a near-noise warm path.
 package sql
 
 import (

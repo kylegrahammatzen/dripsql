@@ -4,6 +4,7 @@ package sql
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -243,8 +244,7 @@ func (p *parser) peek() (token, error) {
 	return tok, nil
 }
 
-// peek2 returns the token after peek without consuming either. Used at sites needing
-// disambiguation between `AS <alias>` and `AS OF <int>`.
+// peek2 returns the token after peek without consuming either, needed to disambiguate `AS <alias>` from `AS OF <int>`.
 func (p *parser) peek2() (token, error) {
 	if _, err := p.peek(); err != nil {
 		return token{}, err
@@ -473,8 +473,7 @@ func tokenName(typ tokenType) string {
 	}
 }
 
-// DDL recursive descent: CREATE TYPE AS ENUM (...) and CREATE TABLE name (cols...) WITH (opts...).
-// Only enum types and column-level NOT NULL are supported; other constraints raise a clear error.
+// DDL recursive descent for CREATE TYPE AS ENUM and CREATE TABLE, supporting only enum types and column-level NOT NULL so other constraints raise a clear error.
 
 func (p *parser) parseCreateType() (*CreateTypeStmt, error) {
 	ifNotExists, err := p.parseIfNotExists()
@@ -641,9 +640,7 @@ func (p *parser) parseType() (string, error) {
 		if tok.typ != tokIdent {
 			break
 		}
-		// "with" terminates the type only when followed by "(" — that's our column
-		// option marker. Bare "with" inside multi-word types like
-		// `timestamp with time zone` keeps flowing into the type name.
+		// A "with" followed by "(" is the column option marker, while a bare "with" inside multi-word types like `timestamp with time zone` keeps flowing into the type name.
 		if tok.lit == "with" {
 			state := p.mark()
 			_, _ = p.next()
@@ -653,7 +650,7 @@ func (p *parser) parseType() (string, error) {
 				break
 			}
 		}
-		if tok.lit != "with" && isColumnConstraintStart(tok.lit) {
+		if tok.lit != "with" && (tok.lit == "not" || tok.lit == "null" || tok.lit == "default" || tok.lit == "references" || isUnsupportedTableConstraint(tok.lit)) {
 			break
 		}
 		_, _ = p.next()
@@ -676,8 +673,7 @@ func (p *parser) parseOptionalTableOptions() ([]TableOption, error) {
 	return p.parseColumnOptions()
 }
 
-// parseColumnOptions reads `( name = scalar [, ...] )` starting at the opening paren.
-// Used by both table-level WITH (already consumed the keyword) and per-column WITH.
+// parseColumnOptions reads `( name = scalar [, ...] )` starting at the opening paren, serving both table-level WITH (keyword already consumed) and per-column WITH.
 func (p *parser) parseColumnOptions() ([]TableOption, error) {
 	if _, err := p.expect(tokLParen); err != nil {
 		return nil, err
@@ -739,10 +735,6 @@ func (p *parser) parseOptionScalar() (Value, error) {
 	}
 }
 
-func isColumnConstraintStart(word string) bool {
-	return word == "not" || word == "null" || word == "default" || word == "references" || word == "with" || isUnsupportedTableConstraint(word)
-}
-
 func isUnsupportedTableConstraint(word string) bool {
 	switch word {
 	case "primary", "unique", "check", "constraint", "foreign", "family", "index":
@@ -752,8 +744,7 @@ func isUnsupportedTableConstraint(word string) bool {
 	}
 }
 
-// INSERT recursive descent: INSERT INTO t (cols...) VALUES (vals...), (vals...).
-// Column list is optional; row count is implicit by the VALUES tuples.
+// INSERT recursive descent where the column list is optional and the row count is implicit in the VALUES tuples.
 
 func (p *parser) parseInsert() (*InsertStmt, error) {
 	if err := p.expectWord("into"); err != nil {
@@ -836,8 +827,7 @@ columnsDone:
 	}
 }
 
-// DELETE FROM table [WHERE expr]. No table aliases or joins in the DELETE surface yet.
-// Empty WHERE means delete all rows in the table.
+// DELETE FROM table with an optional WHERE, where no aliases or joins exist yet and an empty WHERE deletes every row.
 
 func (p *parser) parseDelete() (*DeleteStmt, error) {
 	if err := p.expectWord("from"); err != nil {
@@ -854,8 +844,7 @@ func (p *parser) parseDelete() (*DeleteStmt, error) {
 	return &DeleteStmt{Table: tableName, Where: where}, nil
 }
 
-// UPDATE table SET col = lit [, col = lit ...] [WHERE expr]. Assignment values are literals only.
-// Empty WHERE rewrites every row in the table with the supplied assignments.
+// UPDATE table SET assignments with literal-only values, where an empty WHERE rewrites every row in the table.
 
 func (p *parser) parseUpdate() (*UpdateStmt, error) {
 	tableName, err := p.parseName()
@@ -905,7 +894,7 @@ func (p *parser) parseAssignments() ([]Assignment, error) {
 	return out, nil
 }
 
-// EXPLAIN [ANALYZE] SELECT ... wraps an inner SelectStmt; only SELECT is allowed for now.
+// EXPLAIN and EXPLAIN ANALYZE wrap an inner SelectStmt, and only SELECT is allowed for now.
 
 func (p *parser) parseExplain() (Stmt, error) {
 	analyze, err := p.maybeWord("analyze")
@@ -930,8 +919,7 @@ func (p *parser) parseExplain() (Stmt, error) {
 	return &ExplainStmt{Analyze: analyze, Inner: inner}, nil
 }
 
-// SELECT recursive descent: projection, WHERE (or/and/not), GROUP BY, HAVING, ORDER BY, LIMIT/OFFSET.
-// Scalar precedence ladder: path-op > term (mul/div/mod/div) > expr (concat/plus/minus).
+// SELECT recursive descent covering projection, WHERE, GROUP BY, HAVING, ORDER BY, and LIMIT/OFFSET, with JSON path ops binding tighter than mul/div/mod which bind tighter than concat/plus/minus.
 
 func (p *parser) parseWithSelect() (*SelectStmt, error) {
 	ctes, err := p.parseCTEs()
@@ -1078,8 +1066,7 @@ func (p *parser) parseSelectBody() (*SelectStmt, error) {
 	}, nil
 }
 
-// parseFrom reads a base table plus a left-deep chain of JOINs. Each successive JOIN wraps the
-// current tree as Left and the new TableName as Right.
+// parseFrom reads a base table plus a left-deep chain of JOINs, each wrapping the current tree as Left and the new TableName as Right.
 func (p *parser) parseFrom() (TableExpr, error) {
 	base, err := p.parseTableName()
 	if err != nil {
@@ -1259,8 +1246,7 @@ func (p *parser) parseSelectList() ([]SelectExpr, error) {
 	}
 }
 
-// parseScalarExpr drives one precedence-climbing loop instead of a function per level.
-// Precedence: 1 = add/sub/concat, 2 = mul/div/mod, 3 = JSON path ops. Higher binds tighter.
+// parseScalarExpr drives one precedence-climbing loop instead of a function per level, with add/sub/concat lowest, mul/div/mod above, and JSON path ops binding tightest.
 func (p *parser) parseScalarExpr() (Expr, string, error) {
 	return p.parseScalarPrecedence(1)
 }
@@ -1663,9 +1649,7 @@ func (p *parser) parseFrameBound(frame *WindowFrame, isStart bool) error {
 	return nil
 }
 
-// parseOptionalAlias accepts an optional alias after an expression or table reference.
-// `as` makes the next token a name unconditionally; without `as`, a bare ident is taken as an
-// alias unless it is one of `stops` (the keywords that legitimately follow at this site).
+// parseOptionalAlias accepts an optional alias where `as` forces the next token to be a name and a bare ident counts as an alias unless it is one of the stops keywords that legitimately follow.
 func (p *parser) parseOptionalAlias(stops ...string) (string, error) {
 	ok, err := p.maybeWord("as")
 	if err != nil {
@@ -1678,10 +1662,8 @@ func (p *parser) parseOptionalAlias(stops ...string) (string, error) {
 	if err != nil || tok.typ != tokIdent || tok.quoted {
 		return "", err
 	}
-	for _, s := range stops {
-		if tok.lit == s {
-			return "", nil
-		}
+	if slices.Contains(stops, tok.lit) {
+		return "", nil
 	}
 	_, _ = p.next()
 	return tok.lit, nil

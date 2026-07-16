@@ -1,5 +1,5 @@
-// Scalar bindExpr tests: column resolution, literal typing, arithmetic result type,
-// JSON path typing, scalar function arity/typing, NOT/AND/OR shape, aggregate rejection.
+// Scalar bindExpr tests covering column resolution, literal and arithmetic typing, JSON path typing,
+// scalar function arity, NOT/AND/OR shape, and aggregate rejection.
 package sql
 
 import (

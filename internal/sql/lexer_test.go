@@ -1,5 +1,5 @@
-// Lexer smoke tests: token type/lit per opcode, identifier casefolding, string/quoted-ident escapes,
-// number forms, comment skipping, error positions.
+// Lexer smoke tests covering token type and literal per opcode, identifier casefolding,
+// string and quoted-ident escapes, number forms, comment skipping, and error positions.
 package sql
 
 import "testing"

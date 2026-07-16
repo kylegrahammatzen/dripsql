@@ -12,8 +12,22 @@ func BindParameters(plan *Plan, args []any) (*Plan, error) {
 	if plan == nil {
 		return nil, nil
 	}
-	if len(args) == 0 && !planHasParameters(plan) {
-		return plan, nil
+	if len(args) == 0 {
+		found := false
+		var visit func(BoundExpr) bool
+		visit = func(e BoundExpr) bool {
+			if e.Op == ExprParameter {
+				found = true
+			}
+			if !found && e.SubPlan != nil {
+				walkPlanExprs(e.SubPlan, visit)
+			}
+			return !found
+		}
+		walkPlanExprs(plan, visit)
+		if !found {
+			return plan, nil
+		}
 	}
 	if err := validateParamIndexes(plan, len(args)); err != nil {
 		return nil, err
@@ -21,105 +35,28 @@ func BindParameters(plan *Plan, args []any) (*Plan, error) {
 	return clonePlan(plan, args)
 }
 
-func planHasParameters(plan *Plan) bool {
-	if plan == nil {
-		return false
-	}
-	if plan.Rel != nil && relHasParameters(plan.Rel) {
-		return true
-	}
-	if plan.Where != nil && exprHasParameters(*plan.Where) {
-		return true
-	}
-	if plan.Inner != nil && planHasParameters(plan.Inner) {
-		return true
-	}
-	return false
-}
-
-func relHasParameters(rel *Rel) bool {
-	if rel == nil {
-		return false
-	}
-	if rel.Where != nil && exprHasParameters(*rel.Where) {
-		return true
-	}
-	if exprHasParameters(rel.Predicate) {
-		return true
-	}
-	if rel.Having != nil && exprHasParameters(*rel.Having) {
-		return true
-	}
-	for _, g := range rel.GroupBy {
-		if exprHasParameters(g) {
-			return true
-		}
-	}
-	for _, o := range rel.Projection {
-		if exprHasParameters(o.Expr) {
-			return true
-		}
-	}
-	for _, o := range rel.Outputs {
-		if exprHasParameters(o.Expr) {
-			return true
-		}
-	}
-	for _, k := range rel.SortKeys {
-		if exprHasParameters(k.Expr) {
-			return true
-		}
-	}
-	for _, jk := range rel.JoinKeys {
-		if exprHasParameters(jk.Left) || exprHasParameters(jk.Right) {
-			return true
-		}
-	}
-	for _, in := range rel.Inputs {
-		if relHasParameters(in) {
-			return true
-		}
-	}
-	return false
-}
-
-func exprHasParameters(expr BoundExpr) bool {
-	if expr.Op == ExprParameter {
-		return true
-	}
-	for _, a := range expr.Args {
-		if exprHasParameters(a) {
-			return true
-		}
-	}
-	if expr.SubPlan != nil && planHasParameters(expr.SubPlan) {
-		return true
-	}
-	return false
-}
-
 func validateParamIndexes(plan *Plan, argCount int) error {
 	maxIdx := 0
-	var walk func(BoundExpr)
-	walk = func(e BoundExpr) {
+	var visit func(BoundExpr) bool
+	visit = func(e BoundExpr) bool {
 		if e.Op == ExprParameter && e.Parameter > maxIdx {
 			maxIdx = e.Parameter
 		}
-		for _, a := range e.Args {
-			walk(a)
-		}
 		if e.SubPlan != nil {
-			walkPlanExprs(e.SubPlan, walk)
+			walkPlanExprs(e.SubPlan, visit)
 		}
+		return true
 	}
-	walkPlanExprs(plan, walk)
+	walkPlanExprs(plan, visit)
 	if maxIdx > argCount {
 		return fmt.Errorf("sql: query references parameter %d but only %d args supplied", maxIdx, argCount)
 	}
 	return nil
 }
 
-func walkPlanExprs(plan *Plan, visit func(BoundExpr)) {
+// walkPlanExprs runs WalkExpr over every expression slot in the plan tree, leaving
+// SubPlan descent to the visitor.
+func walkPlanExprs(plan *Plan, visit func(BoundExpr) bool) {
 	if plan == nil {
 		return
 	}
@@ -127,39 +64,39 @@ func walkPlanExprs(plan *Plan, visit func(BoundExpr)) {
 		walkRelExprs(plan.Rel, visit)
 	}
 	if plan.Where != nil {
-		visit(*plan.Where)
+		WalkExpr(*plan.Where, visit)
 	}
 	if plan.Inner != nil {
 		walkPlanExprs(plan.Inner, visit)
 	}
 }
 
-func walkRelExprs(rel *Rel, visit func(BoundExpr)) {
+func walkRelExprs(rel *Rel, visit func(BoundExpr) bool) {
 	if rel == nil {
 		return
 	}
 	if rel.Where != nil {
-		visit(*rel.Where)
+		WalkExpr(*rel.Where, visit)
 	}
-	visit(rel.Predicate)
+	WalkExpr(rel.Predicate, visit)
 	if rel.Having != nil {
-		visit(*rel.Having)
+		WalkExpr(*rel.Having, visit)
 	}
 	for _, g := range rel.GroupBy {
-		visit(g)
+		WalkExpr(g, visit)
 	}
 	for _, o := range rel.Projection {
-		visit(o.Expr)
+		WalkExpr(o.Expr, visit)
 	}
 	for _, o := range rel.Outputs {
-		visit(o.Expr)
+		WalkExpr(o.Expr, visit)
 	}
 	for _, k := range rel.SortKeys {
-		visit(k.Expr)
+		WalkExpr(k.Expr, visit)
 	}
 	for _, jk := range rel.JoinKeys {
-		visit(jk.Left)
-		visit(jk.Right)
+		WalkExpr(jk.Left, visit)
+		WalkExpr(jk.Right, visit)
 	}
 	for _, in := range rel.Inputs {
 		walkRelExprs(in, visit)

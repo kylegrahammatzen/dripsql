@@ -1,5 +1,5 @@
 // AST node definitions for DripSQL statements and expressions.
-// Stmt, Expr, TableExpr are sealed via unexported marker methods; binders type-switch on concrete types.
+// Stmt, Expr, and TableExpr are sealed via unexported marker methods so binders type-switch on concrete types.
 package sql
 
 import "errors"
@@ -25,11 +25,11 @@ type CreateTableStmt struct {
 }
 
 type AlterTableStmt struct {
-	Table    string
-	Rename   *AlterRenameColumn
-	Add      *AlterAddColumn
-	Drop     *AlterDropColumn
-	SetType  *AlterColumnType
+	Table   string
+	Rename  *AlterRenameColumn
+	Add     *AlterAddColumn
+	Drop    *AlterDropColumn
+	SetType *AlterColumnType
 }
 
 type AlterRenameColumn struct {
@@ -137,8 +137,7 @@ type JoinExpr struct {
 func (*TableName) isTableExpr() {}
 func (*JoinExpr) isTableExpr()  {}
 
-// flattenFrom walks a left-deep FROM tree and returns (primary, joins-in-source-order).
-// JoinExpr.Right is always *TableName in current grammar; nested-source joins are rejected.
+// flattenFrom walks a left-deep FROM tree into the primary table plus joins in source order, rejecting nested-source joins since JoinExpr.Right is always *TableName in the current grammar.
 func (s *SelectStmt) flattenFrom() (*TableName, []*JoinExpr, error) {
 	var rev []*JoinExpr
 	node := s.From

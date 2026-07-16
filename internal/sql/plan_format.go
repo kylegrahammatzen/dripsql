@@ -36,7 +36,15 @@ func (r *Rel) format(b *strings.Builder, depth int) {
 	case RelFilter:
 		fmt.Fprintf(b, "%sFilter %s\n", indent, r.Predicate.String())
 	case RelProject:
-		fmt.Fprintf(b, "%sProject %s\n", indent, formatOutputs(r.Projection))
+		parts := make([]string, len(r.Projection))
+		for i, o := range r.Projection {
+			s := o.Expr.String()
+			if o.Alias != "" {
+				s = s + " AS " + o.Alias
+			}
+			parts[i] = s
+		}
+		fmt.Fprintf(b, "%sProject [%s]\n", indent, strings.Join(parts, ", "))
 	case RelAggregate:
 		fmt.Fprintf(b, "%sAggregate", indent)
 		if len(r.GroupBy) > 0 {
@@ -112,18 +120,6 @@ func formatColIDs(r *Rel, ids []ColumnID) string {
 		}
 	}
 	return "[" + strings.Join(names, ", ") + "]"
-}
-
-func formatOutputs(outs []BoundOutput) string {
-	parts := make([]string, len(outs))
-	for i, o := range outs {
-		s := o.Expr.String()
-		if o.Alias != "" {
-			s = s + " AS " + o.Alias
-		}
-		parts[i] = s
-	}
-	return "[" + strings.Join(parts, ", ") + "]"
 }
 
 func (a AggSpec) String() string {

@@ -1,6 +1,5 @@
-// Planner turns a parsed Stmt into a bound *Plan. Single-table and joined SELECTs flow
-// through one planQuery tail; planFrom builds the source *Rel and scope for both shapes.
-// DDL/DML/SELECT/EXPLAIN binders all live in this file alongside the planner dispatcher.
+// Planner turns a parsed Stmt into a bound *Plan, with single-table and joined SELECTs flowing through one planQuery tail.
+// DDL, DML, SELECT, and EXPLAIN binders all live in this file alongside the planner dispatcher.
 package sql
 
 import (
@@ -17,9 +16,7 @@ import (
 type Planner struct {
 	resolve TableResolver
 	ctes    map[string]*cteEntry
-	// outerScopes is a stack of parent column indexes visible to nested subqueries.
-	// outerRefs is a parallel stack collecting the names actually referenced by the
-	// currently-binding subquery; the top map becomes Plan.OuterRefs when the sub binds.
+	// outerScopes stacks parent column indexes visible to nested subqueries while the parallel outerRefs stack collects the names each subquery actually references, its top map becoming Plan.OuterRefs when the sub binds.
 	outerScopes []map[string]BoundColumnDef
 	outerRefs   []map[string]bool
 }
@@ -44,9 +41,7 @@ func (p *Planner) popOuter() []string {
 	return out
 }
 
-// lookupOuter searches outerScopes from innermost-outer to outermost and returns
-// the first match. When found it also records the name in the current top of
-// outerRefs so the binding subquery can publish it on its Plan.OuterRefs.
+// lookupOuter searches outerScopes from innermost-outer to outermost, recording a match in the top of outerRefs so the binding subquery publishes it on Plan.OuterRefs.
 func (p *Planner) lookupOuter(name string) (BoundColumnDef, bool) {
 	if len(p.outerScopes) == 0 {
 		return BoundColumnDef{}, false
@@ -73,9 +68,7 @@ func NewPlanner(resolve TableResolver) *Planner {
 	return &Planner{resolve: resolve}
 }
 
-// scope tracks the source columns visible to expression binding within a SELECT. For a
-// single-table query columns are bare names; for a joined query columns are qualified
-// alias.col strings. The joined flag selects the appropriate output and ORDER BY rules.
+// scope tracks the source columns visible to expression binding, bare names for a single-table query and qualified alias.col strings for a joined one whose joined flag selects the output and ORDER BY rules.
 type scope struct {
 	sources []joinedSource
 	columns map[string]BoundColumnDef
@@ -174,57 +167,42 @@ func (p *Planner) planSelectUnion(stmt *SelectStmt) (*Plan, error) {
 	if leftPlan.Rel == nil || rightPlan.Rel == nil {
 		return nil, fmt.Errorf("UNION arm did not yield a query plan")
 	}
-	if err := checkUnionShape(leftPlan.Rel.Outputs, rightPlan.Rel.Outputs); err != nil {
-		return nil, err
+	lo, ro := leftPlan.Rel.Outputs, rightPlan.Rel.Outputs
+	if len(lo) != len(ro) {
+		return nil, fmt.Errorf("UNION arms must produce the same number of columns (%d vs %d)", len(lo), len(ro))
+	}
+	for i := range lo {
+		if lo[i].Expr.Type.Kind != ro[i].Expr.Type.Kind {
+			return nil, fmt.Errorf("UNION column %d types differ: %s vs %s", i+1, lo[i].Expr.Type, ro[i].Expr.Type)
+		}
 	}
 	root := &Rel{Op: RelUnion, Outputs: leftPlan.Rel.Outputs, Inputs: []*Rel{leftPlan.Rel, rightPlan.Rel}}
 	if !tail.All {
-		root = dedupRel(root)
+		group := make([]BoundExpr, 0, len(root.Outputs))
+		outputs := make([]BoundOutput, 0, len(root.Outputs))
+		for _, out := range root.Outputs {
+			name := outputExprName(out)
+			ref := BoundExpr{Op: ExprColumn, Type: out.Expr.Type, Column: name}
+			group = append(group, ref)
+			outputs = append(outputs, BoundOutput{Alias: name, Expr: ref})
+		}
+		root = &Rel{Op: RelAggregate, Outputs: outputs, Inputs: []*Rel{root}, GroupBy: group}
 	}
 	if len(stmt.OrderBy) > 0 || stmt.Limit != nil || stmt.Offset != nil {
-		outerCols := unionOutputColumns(root.Outputs)
+		outerCols := make(map[string]BoundColumnDef, len(root.Outputs))
+		for i, out := range root.Outputs {
+			name := outputExprName(out)
+			if name == "" {
+				name = fmt.Sprintf("col%d", i+1)
+			}
+			outerCols[schema.NormalizeName(name)] = BoundColumnDef{Name: name, Type: out.Expr.Type, ID: ColumnID(i + 1), Ordinal: i}
+		}
 		root, err = applyOrderLimit(root, stmt, root.Outputs, outerCols)
 		if err != nil {
 			return nil, err
 		}
 	}
 	return &Plan{Kind: PlanQuery, Rel: root}, nil
-}
-
-func checkUnionShape(left, right []BoundOutput) error {
-	if len(left) != len(right) {
-		return fmt.Errorf("UNION arms must produce the same number of columns (%d vs %d)", len(left), len(right))
-	}
-	for i := range left {
-		if left[i].Expr.Type.Kind != right[i].Expr.Type.Kind {
-			return fmt.Errorf("UNION column %d types differ: %s vs %s", i+1, left[i].Expr.Type, right[i].Expr.Type)
-		}
-	}
-	return nil
-}
-
-func dedupRel(src *Rel) *Rel {
-	group := make([]BoundExpr, 0, len(src.Outputs))
-	outputs := make([]BoundOutput, 0, len(src.Outputs))
-	for _, out := range src.Outputs {
-		name := outputExprName(out)
-		ref := BoundExpr{Op: ExprColumn, Type: out.Expr.Type, Column: name}
-		group = append(group, ref)
-		outputs = append(outputs, BoundOutput{Alias: name, Expr: ref})
-	}
-	return &Rel{Op: RelAggregate, Outputs: outputs, Inputs: []*Rel{src}, GroupBy: group}
-}
-
-func unionOutputColumns(outputs []BoundOutput) map[string]BoundColumnDef {
-	cols := make(map[string]BoundColumnDef, len(outputs))
-	for i, out := range outputs {
-		name := outputExprName(out)
-		if name == "" {
-			name = fmt.Sprintf("col%d", i+1)
-		}
-		cols[schema.NormalizeName(name)] = BoundColumnDef{Name: name, Type: out.Expr.Type, ID: ColumnID(i + 1), Ordinal: i}
-	}
-	return cols
 }
 
 func (p *Planner) planSelectWithCTEs(stmt *SelectStmt) (*Plan, error) {
@@ -341,9 +319,7 @@ func lowerDistinctToGroupBy(stmt *SelectStmt) (*SelectStmt, error) {
 	return &out, nil
 }
 
-// pruneJoinedScans walks the rel tree and narrows each joined RelScan to the columns its
-// alias is actually referenced under. The single-table scan already prunes through
-// scanProjectionColumnIDs; joined scans build with allColumnIDs and rely on this post-pass.
+// pruneJoinedScans narrows each joined RelScan to the columns its alias is referenced under, a post-pass joined scans need because they build with allColumnIDs while single-table scans prune through scanProjectionColumnIDs.
 func pruneJoinedScans(root *Rel) {
 	if root == nil {
 		return
@@ -395,15 +371,14 @@ func pruneJoinedScans(root *Rel) {
 			}
 		}
 	}
-	var walkExpr func(e BoundExpr)
-	walkExpr = func(e BoundExpr) {
-		if e.Op == ExprColumn {
-			addRef(e.Column)
-			return
-		}
-		for _, a := range e.Args {
-			walkExpr(a)
-		}
+	walkExpr := func(e BoundExpr) {
+		WalkExpr(e, func(n BoundExpr) bool {
+			if n.Op == ExprColumn {
+				addRef(n.Column)
+				return false
+			}
+			return true
+		})
 	}
 	var walkRel func(r *Rel)
 	walkRel = func(r *Rel) {
@@ -468,9 +443,7 @@ func pruneJoinedScans(root *Rel) {
 	}
 }
 
-// planFrom builds the source *Rel (RelScan for single-table, RelJoin chain for joined) and
-// the matching scope. The leftmost table is always resolved; joined sources are added
-// left-deep with alias-uniqueness and ON-clause splitting per step.
+// planFrom builds the source *Rel and matching scope, resolving the leftmost table and adding joined sources left-deep with alias uniqueness and ON-clause splitting per step.
 func (p *Planner) planFrom(stmt *SelectStmt) (*Rel, *scope, error) {
 	primaryName, joins, err := stmt.flattenFrom()
 	if err != nil {
@@ -533,7 +506,10 @@ func (p *Planner) planFrom(stmt *SelectStmt) (*Rel, *scope, error) {
 		for i := range leftKeys {
 			keys[i] = JoinKey{Left: leftKeys[i], Right: rightKeys[i]}
 		}
-		src = joinRel(join.Kind, src, rightScan, keys)
+		joined := make([]BoundOutput, 0, len(src.Outputs)+len(rightScan.Outputs))
+		joined = append(joined, src.Outputs...)
+		joined = append(joined, rightScan.Outputs...)
+		src = &Rel{Op: RelJoin, Outputs: joined, Inputs: []*Rel{src, rightScan}, JoinKind: join.Kind, JoinKeys: keys}
 		leftAliases[normRight] = true
 	}
 	sc := &scope{
@@ -556,9 +532,7 @@ func (p *Planner) resolveTable(name string) (BoundTableDef, error) {
 	return p.resolve(name)
 }
 
-// planQuery is the single SELECT tail. It applies WHERE, GROUP/aggregate/HAVING when
-// present, and finally projection + ORDER BY + LIMIT/OFFSET. Returns the root *Rel; the
-// caller wraps it in a *Plan with Kind=PlanQuery.
+// planQuery is the single SELECT tail that applies WHERE, GROUP/aggregate/HAVING, then projection plus ORDER BY and LIMIT/OFFSET, returning the root *Rel for the caller to wrap in a PlanQuery.
 func planQuery(stmt *SelectStmt, src *Rel, sc *scope) (*Rel, error) {
 	if stmt.Where != nil {
 		where, err := bindWhereLogicalExpr(sc.columns, stmt.Where)
@@ -612,7 +586,9 @@ func planAggregateTail(stmt *SelectStmt, src *Rel, sc *scope, groupExprs []Bound
 			if ge.Op != ExprColumn && stmt.Select[i].Alias == "" {
 				return nil, fmt.Errorf("GROUP BY computed expressions require a selected alias")
 			}
-			if !groupableKind(ge.Type.Kind) {
+			switch ge.Type.Kind {
+			case schema.KindText, schema.KindBytes, schema.KindUUID, schema.KindInt16, schema.KindInt32, schema.KindInt64, schema.KindBool, schema.KindDate, schema.KindTimestamp, schema.KindNamed:
+			default:
 				if sc.joined {
 					return nil, fmt.Errorf("GROUP BY expression is %s, want a groupable kind", ge.Type)
 				}
@@ -674,7 +650,11 @@ func planScanTail(stmt *SelectStmt, src *Rel, sc *scope) (*Rel, error) {
 	}
 	if len(windowFuncs) > 0 {
 		stmt = stmtCopy
-		src = windowRel(src, windowFuncs)
+		wOutputs := append([]BoundOutput{}, src.Outputs...)
+		for _, wf := range windowFuncs {
+			wOutputs = append(wOutputs, BoundOutput{Alias: wf.Alias, Expr: BoundExpr{Op: ExprColumn, Type: windowOutputType(wf), Column: wf.Alias}})
+		}
+		src = &Rel{Op: RelWindow, Outputs: wOutputs, Inputs: []*Rel{src}, WindowFuncs: windowFuncs}
 		// Synthetic columns become visible to subsequent bind passes.
 		for _, wf := range windowFuncs {
 			sc.columns[schema.NormalizeName(wf.Alias)] = BoundColumnDef{
@@ -789,19 +769,6 @@ func bindWindowSpec(columns map[string]BoundColumnDef, spec *WindowSpec) (boundW
 	return out, nil
 }
 
-func windowRel(src *Rel, funcs []WindowFunc) *Rel {
-	outputs := append([]BoundOutput{}, src.Outputs...)
-	for _, wf := range funcs {
-		outputs = append(outputs, BoundOutput{Alias: wf.Alias, Expr: BoundExpr{Op: ExprColumn, Type: windowOutputType(wf), Column: wf.Alias}})
-	}
-	return &Rel{
-		Op:          RelWindow,
-		Outputs:     outputs,
-		Inputs:      []*Rel{src},
-		WindowFuncs: funcs,
-	}
-}
-
 func windowOutputType(wf WindowFunc) schema.Type {
 	if wf.Func == WindowAvg {
 		return schema.Float64
@@ -815,8 +782,7 @@ func windowOutputType(wf WindowFunc) schema.Type {
 	return schema.Int64
 }
 
-// DDL binding lowers CREATE TYPE / CREATE TABLE statements into validated schema.TypeSpec / schema.TableSpec.
-// Option vocab (storage/profile/compression/segment_rows/sort_by/time_column) is enforced here, not at parse time.
+// DDL binding lowers CREATE TYPE and CREATE TABLE into validated schema specs, enforcing the option vocab here rather than at parse time.
 
 func BindCreateType(stmt *CreateTypeStmt) (*Plan, error) {
 	spec, err := BindCreateTypeSpec(stmt)
@@ -943,9 +909,14 @@ func BindCreateTableSpec(stmt *CreateTableStmt) (schema.TableSpec, error) {
 
 	columns := make([]schema.ColumnSpec, 0, len(stmt.Columns))
 	for _, col := range stmt.Columns {
-		codec, err := parseCodecName(col.Codec)
-		if err != nil {
-			return schema.TableSpec{}, fmt.Errorf("column %q: %w", col.Name, err)
+		// An unknown codec name is a binder error so typos surface before any catalog mutation lands.
+		codec := schema.EncInvalid
+		if col.Codec != "" {
+			enc, ok := schema.ParseEncoding(col.Codec)
+			if !ok {
+				return schema.TableSpec{}, fmt.Errorf("column %q: unknown codec %q", col.Name, col.Codec)
+			}
+			codec = enc
 		}
 		columns = append(columns, schema.ColumnSpec{
 			Name:     schema.NormalizeName(col.Name),
@@ -968,19 +939,6 @@ func BindCreateTableSpec(stmt *CreateTableStmt) (schema.TableSpec, error) {
 		return schema.TableSpec{}, err
 	}
 	return spec, nil
-}
-
-// Empty string means no override. Unknown names are a binder error so typos surface
-// before any catalog mutation lands.
-func parseCodecName(name string) (schema.Encoding, error) {
-	if name == "" {
-		return schema.EncInvalid, nil
-	}
-	enc, ok := schema.ParseEncoding(name)
-	if !ok {
-		return schema.EncInvalid, fmt.Errorf("unknown codec %q", name)
-	}
-	return enc, nil
 }
 
 func bindTableOptions(options []TableOption) (schema.TableOptions, error) {
@@ -1109,8 +1067,7 @@ func optionText(opt TableOption) (string, error) {
 	return text, nil
 }
 
-// INSERT binding validates VALUES rows against a catalog-resolved BoundTableDef.
-// Enum literals are validated as known labels; numeric/bool/null literals are range-checked per kind.
+// INSERT binding validates VALUES rows against a catalog-resolved BoundTableDef, checking enum literals as known labels and range-checking numeric, bool, and null literals per kind.
 
 type InsertValues struct {
 	Table    string
@@ -1316,8 +1273,7 @@ func validateLiteralForType(column string, lit Value, typ schema.Type) error {
 	return nil
 }
 
-// BindDelete validates DELETE against a BoundTableDef and binds the optional WHERE expression.
-// No-WHERE form means "delete every row in the table" and is allowed.
+// BindDelete validates DELETE against a BoundTableDef and binds the optional WHERE, whose absence means delete every row.
 
 func BindDelete(stmt *DeleteStmt, def BoundTableDef) (*Plan, error) {
 	if stmt == nil {
@@ -1338,8 +1294,7 @@ func BindDelete(stmt *DeleteStmt, def BoundTableDef) (*Plan, error) {
 	return plan, nil
 }
 
-// BindUpdate validates UPDATE against a BoundTableDef and binds assignments and WHERE.
-// Each SET target must be a distinct table column and the literal must match the column type.
+// BindUpdate validates UPDATE against a BoundTableDef and binds assignments and WHERE, requiring each SET target to be a distinct column with a type-matching literal.
 
 func BindUpdate(stmt *UpdateStmt, def BoundTableDef) (*Plan, error) {
 	if stmt == nil {
@@ -1394,35 +1349,34 @@ func BindUpdate(stmt *UpdateStmt, def BoundTableDef) (*Plan, error) {
 	return plan, nil
 }
 
-// Joined SELECT helpers: ON-clause splitting, qualified output expansion, and qualified
-// ORDER BY binding. The join chain itself is built in planner.go's planFrom.
+// Joined SELECT helpers for ON-clause splitting, qualified output expansion, and qualified ORDER BY binding, while planFrom builds the join chain itself.
 
 type TableResolver func(name string) (BoundTableDef, error)
 
-// splitJoinKeys requires ON to be one or more column = column equalities (AND-joined) with
-// each side from a different source. Returns (leftKeys, rightKeys) tagged so left references
-// the build-side alias set.
-// splitJoinKeys flattens AND conjuncts in ON and validates each is `col = col` with one
-// column from the build side and one from the new right side.
+// splitJoinKeys flattens AND conjuncts in ON and validates each is a col = col equality
+// with one column from the build-side alias set and one from the new right side.
 func splitJoinKeys(on BoundExpr, leftAliases map[string]bool, rightAlias string) ([]BoundExpr, []BoundExpr, error) {
 	var leftKeys, rightKeys []BoundExpr
-	var walk func(BoundExpr) error
-	walk = func(e BoundExpr) error {
+	var walkErr error
+	WalkExpr(on, func(e BoundExpr) bool {
+		if walkErr != nil {
+			return false
+		}
 		if e.Op == ExprAnd {
 			if len(e.Args) != 2 {
-				return fmt.Errorf("ON: malformed AND")
+				walkErr = fmt.Errorf("ON: malformed AND")
+				return false
 			}
-			if err := walk(e.Args[0]); err != nil {
-				return err
-			}
-			return walk(e.Args[1])
+			return true
 		}
 		if e.Op != ExprEqual || len(e.Args) != 2 {
-			return fmt.Errorf("ON conjuncts must be column equalities")
+			walkErr = fmt.Errorf("ON conjuncts must be column equalities")
+			return false
 		}
 		l, r := e.Args[0], e.Args[1]
 		if l.Op != ExprColumn || r.Op != ExprColumn {
-			return fmt.Errorf("ON must reference one column from each side")
+			walkErr = fmt.Errorf("ON must reference one column from each side")
+			return false
 		}
 		la, ra := columnAlias(l.Column), columnAlias(r.Column)
 		switch {
@@ -1433,12 +1387,12 @@ func splitJoinKeys(on BoundExpr, leftAliases map[string]bool, rightAlias string)
 			leftKeys = append(leftKeys, r)
 			rightKeys = append(rightKeys, l)
 		default:
-			return fmt.Errorf("ON columns must reference both join sides; got %q and %q", la, ra)
+			walkErr = fmt.Errorf("ON columns must reference both join sides; got %q and %q", la, ra)
 		}
-		return nil
-	}
-	if err := walk(on); err != nil {
-		return nil, nil, err
+		return false
+	})
+	if walkErr != nil {
+		return nil, nil, walkErr
 	}
 	if len(leftKeys) == 0 {
 		return nil, nil, fmt.Errorf("ON must contain at least one column equality")
@@ -1487,9 +1441,7 @@ func bindJoinedOutputs(stmt *SelectStmt, sources []joinedSource, columns map[str
 	return outputs, nil
 }
 
-// SELECT binding helpers: scan output expansion, WHERE/HAVING walkers, GROUP BY and
-// aggregate extraction, ORDER BY/LIMIT lowering. The single-table BindSelect wrapper exists
-// for tests that supply a known def directly; production planning runs through planner.go.
+// SELECT binding helpers for scan output expansion, WHERE/HAVING walking, aggregate extraction, and ORDER BY/LIMIT lowering, with the BindSelect wrapper kept for tests that supply a known def directly.
 
 func aggregateScanColumnIDs(group []BoundExpr, aggregates, hidden []AggSpec, where *BoundExpr) []ColumnID {
 	var s idSet
@@ -1516,9 +1468,7 @@ func aggregateScanColumnIDs(group []BoundExpr, aggregates, hidden []AggSpec, whe
 	return s.ids
 }
 
-// idSet collects deduped ColumnIDs from BoundExpr trees. Both scan-tail and aggregate-tail
-// column pruning use the same shape: walk one or more exprs, optionally tack on aggregate
-// arg IDs directly, and emit an ordered ID slice.
+// idSet collects deduped ColumnIDs from BoundExpr trees so scan-tail and aggregate-tail column pruning share one walk-and-emit shape.
 type idSet struct {
 	seen map[ColumnID]struct{}
 	ids  []ColumnID
@@ -1539,13 +1489,13 @@ func (s *idSet) add(id ColumnID) {
 }
 
 func (s *idSet) walk(expr BoundExpr) {
-	if expr.Op == ExprColumn {
-		s.add(expr.ColumnID)
-		return
-	}
-	for _, a := range expr.Args {
-		s.walk(a)
-	}
+	WalkExpr(expr, func(e BoundExpr) bool {
+		if e.Op == ExprColumn {
+			s.add(e.ColumnID)
+			return false
+		}
+		return true
+	})
 }
 
 func bindScanOutputs(stmt *SelectStmt, def BoundTableDef, columns map[string]BoundColumnDef) ([]BoundOutput, error) {
@@ -1683,9 +1633,7 @@ func bindWhereLogicalExpr(columns map[string]BoundColumnDef, expr Expr) (BoundEx
 	}
 }
 
-// hiddenAggs collects HAVING-only aggregates discovered while binding the HAVING expression.
-// The aggregateRel constructor takes the final slice; existing selected aggregates are
-// matched against the visible Aggregates list first so the binder never duplicates them.
+// hiddenAggs collects HAVING-only aggregates discovered while binding HAVING, matching against the visible Aggregates list first so the binder never duplicates a selected one.
 type hiddenAggs struct {
 	selected []AggSpec
 	hidden   []AggSpec
@@ -2010,16 +1958,15 @@ func bindSelectAggregate(sel SelectExpr, columns map[string]BoundColumnDef) (Agg
 
 // exprContainsSubquery guards aggregate arguments because AggregateOp has no subquery eval plumbing.
 func exprContainsSubquery(e BoundExpr) bool {
-	switch e.Op {
-	case ExprSubquery, ExprInSubquery, ExprExists:
-		return true
-	}
-	for _, a := range e.Args {
-		if exprContainsSubquery(a) {
-			return true
+	found := false
+	WalkExpr(e, func(n BoundExpr) bool {
+		switch n.Op {
+		case ExprSubquery, ExprInSubquery, ExprExists:
+			found = true
 		}
-	}
-	return false
+		return !found
+	})
+	return found
 }
 
 func columnRefKey(c *ColumnRef) string {
@@ -2045,9 +1992,7 @@ func validateAggregateColumn(agg AggregateFunc, column string, columns map[strin
 	}
 }
 
-// applyOrderLimit wraps src in Sort -> Project -> Limit as needed. Sort sits BELOW Project so
-// its key expressions resolve against base columns; LIMIT/OFFSET are fused into Sort.K/Offset
-// when both are present (single-table only), otherwise a separate Limit rel is added.
+// applyOrderLimit wraps src in Sort then Project then Limit, keeping Sort below Project so key expressions resolve against base columns and fusing single-table LIMIT/OFFSET into Sort.K/Offset instead of a separate Limit rel.
 func applyOrderLimit(src *Rel, stmt *SelectStmt, outputs []BoundOutput, columns map[string]BoundColumnDef) (*Rel, error) {
 	limit := int64(-1)
 	offset := int64(0)
@@ -2153,15 +2098,6 @@ func aggregateOutputName(spec AggSpec) string {
 	return defaultAggregateName(spec.Func)
 }
 
-func groupableKind(kind schema.Kind) bool {
-	switch kind {
-	case schema.KindText, schema.KindBytes, schema.KindUUID, schema.KindInt16, schema.KindInt32, schema.KindInt64, schema.KindBool, schema.KindDate, schema.KindTimestamp, schema.KindNamed:
-		return true
-	default:
-		return false
-	}
-}
-
 func boundExprEqual(left BoundExpr, right BoundExpr) bool {
 	if left.Op != right.Op || left.ColumnID != right.ColumnID {
 		return false
@@ -2183,11 +2119,7 @@ func boundExprEqual(left BoundExpr, right BoundExpr) bool {
 	return true
 }
 
-// scanProjectionColumnIDs collects ColumnIDs referenced by the SELECT outputs,
-// ORDER BY keys, and WHERE predicate of a single-table scan tail. Used to
-// narrow a RelScan to only the columns the rest of the plan actually reads.
-// predicateOnly lists IDs that come from WHERE alone so the executor can drop
-// them from the scan's emit set when the predicate pushes into storage.
+// scanProjectionColumnIDs collects the ColumnIDs a single-table scan tail reads across outputs, sort keys, and WHERE, with predicateOnly listing WHERE-only IDs the executor drops from the emit set when the predicate pushes into storage.
 func scanProjectionColumnIDs(outputs []BoundOutput, keys []SortKey, where *BoundExpr) (all, predicateOnly []ColumnID) {
 	var s idSet
 	for _, o := range outputs {
@@ -2206,9 +2138,7 @@ func scanProjectionColumnIDs(outputs []BoundOutput, keys []SortKey, where *Bound
 	return s.ids, predicateOnly
 }
 
-// narrowScanColumns trims a RelScan's Columns and Outputs to the given set
-// while preserving table order. A nil or empty ids slice leaves the scan
-// untouched so callers do not have to guard against the no-reference case.
+// narrowScanColumns trims a RelScan's Columns and Outputs to the given set preserving table order, leaving the scan untouched on a nil or empty ids slice so callers need not guard the no-reference case.
 func narrowScanColumns(rel *Rel, ids []ColumnID) {
 	if rel == nil || rel.Op != RelScan || len(ids) == 0 {
 		return
