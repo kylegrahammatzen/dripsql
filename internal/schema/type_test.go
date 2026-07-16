@@ -15,7 +15,7 @@ func TestType_ParseRoundTrip(t *testing.T) {
 
 func TestType_ParseUnknownReturnsNamed(t *testing.T) {
 	got := Parse("currency")
-	if !got.IsNamed() || got.Name != "currency" {
+	if got.Kind != KindNamed || got.Name != "currency" {
 		t.Fatalf("Parse(unknown): got %v", got)
 	}
 }

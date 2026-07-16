@@ -194,8 +194,8 @@ func TestScan_TopKPushdownDoesNotPruneWithDeletionVector(t *testing.T) {
 	}
 	dv := vector.NewValidity(4)
 	dv.SetInvalid(0)
-	if err := WriteDV(path, 4, dv); err != nil {
-		t.Fatalf("WriteDV: %v", err)
+	if err := WriteDVAtPath(DVPath(path), 4, dv); err != nil {
+		t.Fatalf("WriteDVAtPath: %v", err)
 	}
 	seg, err := OpenSegment(path)
 	if err != nil {

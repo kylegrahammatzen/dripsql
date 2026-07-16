@@ -39,27 +39,11 @@ func loadDVAtPath(dvPath string, rows int) (vector.Validity, error) {
 	return v, nil
 }
 
-// WriteDV serializes v atomically to <segmentPath>.dv. nil v removes the .dv file.
-// Used by DELETE which writes the conventional DV path.
-func WriteDV(segmentPath string, rows int, v vector.Validity) error {
-	dvPath := DVPath(segmentPath)
-	if v == nil {
-		err := os.Remove(dvPath)
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	return WriteDVAtPath(dvPath, rows, v)
-}
-
-// WriteDVAtPath writes a DV to a specific path (atomic via tmp+rename+dir-fsync). Used by
-// UPDATE which stages a versioned DV file alongside its segment before the transaction
-// manifest record makes it visible.
+// WriteDVAtPath atomically writes a DV via tmp+rename+dir-fsync so DELETE, UPDATE, and compaction can stage versioned DV files before the manifest makes them visible.
 func WriteDVAtPath(dvPath string, rows int, v vector.Validity) error {
 	want := vector.ValidityWords(rows)
 	if len(v) != want {
-		return fmt.Errorf("WriteDV: validity has %d words, want %d for %d rows", len(v), want, rows)
+		return fmt.Errorf("WriteDVAtPath: validity has %d words, want %d for %d rows", len(v), want, rows)
 	}
 	buf := make([]byte, want*8)
 	v.MarshalLE(buf)

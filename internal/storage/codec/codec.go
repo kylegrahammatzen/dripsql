@@ -152,16 +152,3 @@ func Lookup(e schema.Encoding) (Codec, error) {
 	}
 	return c, nil
 }
-
-// Test-only helper. Production code calls Encode directly via cascade.
-func Estimate(c Codec, v vector.Vec) (int, bool) {
-	ctx := &EncodeContext{Scratch: NewScratchPool()}
-	p, err := c.Encode(v, ctx)
-	if errors.Is(err, ErrSkip) {
-		return 0, false
-	}
-	if err != nil {
-		return 0, false
-	}
-	return len(p), true
-}

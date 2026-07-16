@@ -134,8 +134,6 @@ func (t Type) Valid() bool {
 	return t.Name == ""
 }
 
-func (t Type) IsNamed() bool { return t.Kind == KindNamed }
-
 func (t Type) String() string {
 	if t.Kind == KindNamed && t.Name != "" {
 		return t.Name

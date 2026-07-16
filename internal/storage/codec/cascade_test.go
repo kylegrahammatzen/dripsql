@@ -76,78 +76,78 @@ func TestCascade_Candidates_Bool(t *testing.T) {
 	}
 }
 
-func TestCascade_Pick_ConstantBeatsAll(t *testing.T) {
+func TestCascade_Encode_ConstantBeatsAll(t *testing.T) {
 	v := vector.NewVec(vector.VecInt64, 1000)
 	for i := range v.I64() {
 		v.I64()[i] = 42
 	}
-	c, _, ok := Pick(v)
-	if !ok {
-		t.Fatal("Pick must succeed")
+	enc, _, err := Encode(v, nil)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
 	}
-	if c.Encoding() != schema.EncConstant {
-		t.Fatalf("Pick should choose Constant for all-equal data, got %v", c.Encoding())
+	if enc != schema.EncConstant {
+		t.Fatalf("Encode should choose Constant for all-equal data, got %v", enc)
 	}
 }
 
-func TestCascade_Pick_SequenceBeatsForArithmetic(t *testing.T) {
+func TestCascade_Encode_SequenceBeatsForArithmetic(t *testing.T) {
 	v := vector.NewVec(vector.VecInt64, 1000)
 	for i := range v.I64() {
 		v.I64()[i] = int64(i)*5 + 7
 	}
-	c, _, ok := Pick(v)
-	if !ok {
-		t.Fatal("Pick must succeed")
+	enc, _, err := Encode(v, nil)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
 	}
-	if c.Encoding() != schema.EncSequence {
-		t.Fatalf("Pick should choose Sequence for arithmetic progression, got %v", c.Encoding())
+	if enc != schema.EncSequence {
+		t.Fatalf("Encode should choose Sequence for arithmetic progression, got %v", enc)
 	}
 }
 
-func TestCascade_Pick_DictionaryBeatsForLowCardinality(t *testing.T) {
+func TestCascade_Encode_DictionaryBeatsForLowCardinality(t *testing.T) {
 	v := vector.NewVarVec(vector.VecText, 1000, 0)
 	vb := v.Var()
 	tokens := []string{"alpha", "beta", "gamma"}
 	for i := range int(v.Len) {
 		vb.AppendString(i, tokens[i%len(tokens)])
 	}
-	c, _, ok := Pick(v)
-	if !ok {
-		t.Fatal("Pick must succeed")
+	enc, _, err := Encode(v, nil)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
 	}
-	if c.Encoding() != schema.EncDict {
-		t.Fatalf("Pick should choose Dictionary for low-cardinality text, got %v", c.Encoding())
+	if enc != schema.EncDict {
+		t.Fatalf("Encode should choose Dictionary for low-cardinality text, got %v", enc)
 	}
 }
 
-func TestCascade_Pick_PlainFallback(t *testing.T) {
+func TestCascade_Encode_PlainFallback(t *testing.T) {
 	v := vector.NewVec(vector.VecFloat64, 100)
 	for i := range v.F64() {
 		v.F64()[i] = float64(i) * 1.5
 	}
-	c, size, ok := Pick(v)
-	if !ok {
-		t.Fatal("Pick must succeed")
+	enc, payload, err := Encode(v, nil)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
 	}
-	if c.Encoding() != schema.EncPlain {
-		t.Fatalf("Pick should fall back to Flat for floats (no FOR), got %v", c.Encoding())
+	if enc != schema.EncPlain {
+		t.Fatalf("Encode should fall back to Flat for floats (no FOR), got %v", enc)
 	}
-	if size != 100*8 {
-		t.Fatalf("Flat float64 size = %d, want %d", size, 100*8)
+	if len(payload) != 100*8 {
+		t.Fatalf("Flat float64 size = %d, want %d", len(payload), 100*8)
 	}
 }
 
-func TestCascade_Pick_TieFavorsPlain_ZeroRows(t *testing.T) {
+func TestCascade_Encode_TieFavorsPlain_ZeroRows(t *testing.T) {
 	v := vector.NewVec(vector.VecInt64, 0)
-	c, size, ok := Pick(v)
-	if !ok {
-		t.Fatal("Pick must succeed on zero-row column")
+	enc, payload, err := Encode(v, nil)
+	if err != nil {
+		t.Fatalf("Encode on zero-row column: %v", err)
 	}
-	if c.Encoding() != schema.EncPlain {
-		t.Fatalf("zero-row tie should resolve to Plain (Flat), got %v", c.Encoding())
+	if enc != schema.EncPlain {
+		t.Fatalf("zero-row tie should resolve to Plain (Flat), got %v", enc)
 	}
-	if size != 0 {
-		t.Fatalf("zero-row size = %d, want 0", size)
+	if len(payload) != 0 {
+		t.Fatalf("zero-row size = %d, want 0", len(payload))
 	}
 }
 

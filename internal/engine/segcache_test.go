@@ -29,11 +29,11 @@ func TestSegCache_EvictsColdAfterQueryOnSmallTable(t *testing.T) {
 	if _, err := db.Query(ctx, "SELECT id FROM small"); err != nil {
 		t.Fatalf("query small: %v", err)
 	}
-	if db.segments.len() > defaultSegCacheLimit {
-		t.Fatalf("cache size = %d, want <= %d after cold table evicted", db.segments.len(), defaultSegCacheLimit)
+	if db.segments.lru.Len() > defaultSegCacheLimit {
+		t.Fatalf("cache size = %d, want <= %d after cold table evicted", db.segments.lru.Len(), defaultSegCacheLimit)
 	}
-	if len(db.segments.byKey) != db.segments.len() {
-		t.Fatalf("cache map size %d != lru list size %d", len(db.segments.byKey), db.segments.len())
+	if len(db.segments.byKey) != db.segments.lru.Len() {
+		t.Fatalf("cache map size %d != lru list size %d", len(db.segments.byKey), db.segments.lru.Len())
 	}
 }
 
@@ -49,7 +49,7 @@ func TestSegCache_RepeatedQueriesStable(t *testing.T) {
 			t.Fatalf("query: %v", err)
 		}
 	}
-	if db.segments.len() != 50 {
-		t.Fatalf("expected all 50 segments cached, got %d", db.segments.len())
+	if db.segments.lru.Len() != 50 {
+		t.Fatalf("expected all 50 segments cached, got %d", db.segments.lru.Len())
 	}
 }

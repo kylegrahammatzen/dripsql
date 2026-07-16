@@ -109,7 +109,7 @@ func TestWAL_RecoverDeletesOrphanSegment(t *testing.T) {
 		t.Fatalf("read wal: %v", err)
 	}
 	defer w2.Close()
-	pending, err := storage.PendingTxns(records)
+	pending, err := storage.PendingTxnGroups(records)
 	if err != nil {
 		t.Fatalf("pending: %v", err)
 	}

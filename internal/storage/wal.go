@@ -251,7 +251,6 @@ func (w *WAL) TruncateToHeader() error {
 const (
 	WALKindManifestIntent uint8 = 1
 	WALKindManifestCommit uint8 = 2
-	WALKindCheckpoint     uint8 = 3
 )
 
 // ManifestIntent is logged before any segment file in the transaction lands on disk.
@@ -273,14 +272,12 @@ type ManifestCommit struct {
 	ManifestVersion uint64 `json:"manifest_version"`
 }
 
-// Checkpoint marks that the WAL prefix up to Offset is no longer required for recovery
-// (all referenced state has been flushed). Replay can skip records before Offset.
-type Checkpoint struct {
-	Offset int64 `json:"offset"`
-}
-
 func (w *WAL) AppendManifestIntent(intent ManifestIntent) (int64, error) {
-	return w.appendJSON(WALKindManifestIntent, intent)
+	payload, err := json.Marshal(intent)
+	if err != nil {
+		return 0, fmt.Errorf("WAL intent: encode: %w", err)
+	}
+	return w.Append(WALRecord{Type: WALKindManifestIntent, Payload: payload})
 }
 
 // AppendManifestCommit logs the commit record without fsync. The intent before it is
@@ -292,18 +289,6 @@ func (w *WAL) AppendManifestCommit(commit ManifestCommit) (int64, error) {
 		return 0, fmt.Errorf("WAL commit: encode: %w", err)
 	}
 	return w.AppendNoSync(WALRecord{Type: WALKindManifestCommit, Payload: payload})
-}
-
-func (w *WAL) AppendCheckpoint(cp Checkpoint) (int64, error) {
-	return w.appendJSON(WALKindCheckpoint, cp)
-}
-
-func (w *WAL) appendJSON(kind uint8, v any) (int64, error) {
-	payload, err := json.Marshal(v)
-	if err != nil {
-		return 0, fmt.Errorf("WAL %d: encode: %w", kind, err)
-	}
-	return w.Append(WALRecord{Type: kind, Payload: payload})
 }
 
 func DecodeManifestIntent(rec WALRecord) (ManifestIntent, error) {
@@ -326,54 +311,6 @@ func DecodeManifestCommit(rec WALRecord) (ManifestCommit, error) {
 		return v, fmt.Errorf("WAL commit: decode: %w", err)
 	}
 	return v, nil
-}
-
-func DecodeCheckpoint(rec WALRecord) (Checkpoint, error) {
-	var v Checkpoint
-	if rec.Type != WALKindCheckpoint {
-		return v, fmt.Errorf("WAL: want checkpoint kind %d, got %d", WALKindCheckpoint, rec.Type)
-	}
-	if err := json.Unmarshal(rec.Payload, &v); err != nil {
-		return v, fmt.Errorf("WAL checkpoint: decode: %w", err)
-	}
-	return v, nil
-}
-
-// PendingTxns walks the replayed records and returns the intents whose matching
-// commit record has not been observed. These are the transactions whose segment
-// files may be orphans on disk. Order within a TxnID is preserved (append order).
-// Multi-table txns share a TxnID across N intents, callers group by TxnID.
-func PendingTxns(records []WALRecord) ([]ManifestIntent, error) {
-	intents := map[uint64][]ManifestIntent{}
-	order := []uint64{}
-	seen := map[uint64]bool{}
-	for _, rec := range records {
-		switch rec.Type {
-		case WALKindManifestIntent:
-			v, err := DecodeManifestIntent(rec)
-			if err != nil {
-				return nil, err
-			}
-			if !seen[v.TxnID] {
-				seen[v.TxnID] = true
-				order = append(order, v.TxnID)
-			}
-			intents[v.TxnID] = append(intents[v.TxnID], v)
-		case WALKindManifestCommit:
-			v, err := DecodeManifestCommit(rec)
-			if err != nil {
-				return nil, err
-			}
-			delete(intents, v.TxnID)
-		case WALKindCheckpoint:
-			// no-op for pending-txn calculation. Checkpoint affects truncation policy only.
-		}
-	}
-	out := make([]ManifestIntent, 0)
-	for _, id := range order {
-		out = append(out, intents[id]...)
-	}
-	return out, nil
 }
 
 // PendingTxnGroups returns pending intents grouped by TxnID, preserving WAL append order

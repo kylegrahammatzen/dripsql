@@ -29,23 +29,6 @@ func (s *NumericStats[T]) Update(v T) {
 	}
 }
 
-func (s NumericStats[T]) Merge(other NumericStats[T]) NumericStats[T] {
-	if !other.HasNonNull {
-		return s
-	}
-	if !s.HasNonNull {
-		return other
-	}
-	out := s
-	if other.Min < out.Min {
-		out.Min = other.Min
-	}
-	if other.Max > out.Max {
-		out.Max = other.Max
-	}
-	return out
-}
-
 func (s NumericStats[T]) MarshalWire(dst []byte) {
 	_ = dst[StatsWireSize-1]
 	clear(dst[:StatsWireSize])
@@ -149,15 +132,6 @@ func (s BoolStats) MarshalWire(dst []byte) {
 	binary.LittleEndian.PutUint32(dst[12:16], 0)
 }
 
-func UnmarshalBoolStats(src []byte) BoolStats {
-	_ = src[StatsWireSize-1]
-	return BoolStats{
-		TrueCount:  binary.LittleEndian.Uint32(src[0:4]),
-		FalseCount: binary.LittleEndian.Uint32(src[4:8]),
-		NullCount:  binary.LittleEndian.Uint32(src[8:12]),
-	}
-}
-
 type VarBytesStats struct {
 	MinLen     uint32
 	MaxLen     uint32
@@ -189,17 +163,4 @@ func (s VarBytesStats) MarshalWire(dst []byte) {
 	binary.LittleEndian.PutUint32(dst[0:4], s.MinLen)
 	binary.LittleEndian.PutUint32(dst[4:8], s.MaxLen)
 	binary.LittleEndian.PutUint64(dst[8:16], s.TotalBytes)
-}
-
-func UnmarshalVarBytesStats(src []byte, hasNonNull bool) VarBytesStats {
-	_ = src[StatsWireSize-1]
-	if !hasNonNull {
-		return VarBytesStats{}
-	}
-	return VarBytesStats{
-		MinLen:     binary.LittleEndian.Uint32(src[0:4]),
-		MaxLen:     binary.LittleEndian.Uint32(src[4:8]),
-		TotalBytes: binary.LittleEndian.Uint64(src[8:16]),
-		HasNonNull: true,
-	}
 }

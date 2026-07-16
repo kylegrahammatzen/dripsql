@@ -175,46 +175,6 @@ func (p Pred) columnRefs() ([]string, []uint64) {
 	return names, ids
 }
 
-// validatePred asserts the per-op shape invariants for tests and transitional checks.
-func validatePred(p Pred) error {
-	switch p.Op {
-	case OpEq, OpNe, OpLt, OpLe, OpGt, OpGe:
-		if p.Col == "" {
-			return fmt.Errorf("leaf op %v missing Col", p.Op)
-		}
-		if len(p.Children) != 0 || len(p.Set) != 0 {
-			return fmt.Errorf("leaf op %v must have no Children or Set", p.Op)
-		}
-		return nil
-	case OpIsNull:
-		if p.Col == "" {
-			return fmt.Errorf("IS NULL missing Col")
-		}
-		return nil
-	case OpIn:
-		if p.Col == "" || len(p.Set) == 0 {
-			return fmt.Errorf("IN requires Col and non-empty Set")
-		}
-		return nil
-	case OpNot:
-		if len(p.Children) != 1 {
-			return fmt.Errorf("NOT requires exactly one child")
-		}
-		return validatePred(p.Children[0])
-	case OpAnd, OpOr:
-		if len(p.Children) < 2 {
-			return fmt.Errorf("%v requires at least two children", p.Op)
-		}
-		for _, c := range p.Children {
-			if err := validatePred(c); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	return fmt.Errorf("validatePred: unknown op %v", p.Op)
-}
-
 func cloneBytes(b []byte) []byte {
 	if b == nil {
 		return nil

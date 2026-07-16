@@ -29,20 +29,11 @@ func TestVec_FixedBytesRoundTrip(t *testing.T) {
 	}
 	var v2 Vec
 	v2.Kind = VecInt64
-	if err := v2.LoadFixedBytes(src[:], 4); err != nil {
-		t.Fatalf("LoadFixedBytes: %v", err)
-	}
+	copy(v2.EnsureFixedBytes(4), src[:])
 	for i, want := range []int64{100, 200, 300, 400} {
 		if got := v2.I64()[i]; got != want {
 			t.Fatalf("row %d: got %d want %d", i, got, want)
 		}
-	}
-}
-
-func TestVec_LoadFixedBytesRejectsVarBytes(t *testing.T) {
-	v := Vec{Kind: VecText}
-	if err := v.LoadFixedBytes([]byte{0, 0, 0, 0}, 1); err == nil {
-		t.Fatal("LoadFixedBytes must reject varbytes kinds")
 	}
 }
 
@@ -64,13 +55,10 @@ func TestVec_HeaderSize(t *testing.T) {
 	t.Logf("Vec size: %d bytes", got)
 }
 
-func TestVec_LoadFixedBytesReusesBackingWhenFits(t *testing.T) {
+func TestVec_EnsureFixedBytesReusesBackingWhenFits(t *testing.T) {
 	v := NewVec(VecInt64, 100)
 	ptr := unsafe.Pointer(unsafe.SliceData(v.I64()))
-	payload := make([]byte, 800)
-	if err := v.LoadFixedBytes(payload, 100); err != nil {
-		t.Fatalf("LoadFixedBytes: %v", err)
-	}
+	v.EnsureFixedBytes(100)
 	if unsafe.Pointer(unsafe.SliceData(v.I64())) != ptr {
 		t.Fatal("backing reallocated unnecessarily when capacity sufficed")
 	}

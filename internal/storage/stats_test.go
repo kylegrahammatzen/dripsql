@@ -1,22 +1,42 @@
-// Stats tests: 16B wire round-trip + Update/Merge correctness for each kind family.
+// Stats tests cover the 16B wire round-trip and Update correctness for each kind family.
 package storage
 
 import (
+	"encoding/binary"
 	"math"
 	"testing"
 )
 
-func TestNumericStats_Int64_UpdateAndMerge(t *testing.T) {
-	var a, b NumericStats[int64]
+// UnmarshalBoolStats and UnmarshalVarBytesStats are test-only decoders pinning the wire layout.
+func UnmarshalBoolStats(src []byte) BoolStats {
+	_ = src[StatsWireSize-1]
+	return BoolStats{
+		TrueCount:  binary.LittleEndian.Uint32(src[0:4]),
+		FalseCount: binary.LittleEndian.Uint32(src[4:8]),
+		NullCount:  binary.LittleEndian.Uint32(src[8:12]),
+	}
+}
+
+func UnmarshalVarBytesStats(src []byte, hasNonNull bool) VarBytesStats {
+	_ = src[StatsWireSize-1]
+	if !hasNonNull {
+		return VarBytesStats{}
+	}
+	return VarBytesStats{
+		MinLen:     binary.LittleEndian.Uint32(src[0:4]),
+		MaxLen:     binary.LittleEndian.Uint32(src[4:8]),
+		TotalBytes: binary.LittleEndian.Uint64(src[8:16]),
+		HasNonNull: true,
+	}
+}
+
+func TestNumericStats_Int64_Update(t *testing.T) {
+	var a NumericStats[int64]
 	for _, v := range []int64{5, 3, 9, 1} {
 		a.Update(v)
 	}
-	for _, v := range []int64{0, 100} {
-		b.Update(v)
-	}
-	got := a.Merge(b)
-	if got.Min != 0 || got.Max != 100 || !got.HasNonNull {
-		t.Fatalf("merge got %+v", got)
+	if a.Min != 1 || a.Max != 9 || !a.HasNonNull {
+		t.Fatalf("update got %+v", a)
 	}
 }
 

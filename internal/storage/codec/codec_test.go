@@ -9,6 +9,15 @@ import (
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
+// Estimate is the shared test helper for exercising a single codec's Encode-or-ErrSkip path.
+func Estimate(c Codec, v vector.Vec) (int, bool) {
+	p, err := c.Encode(v, &EncodeContext{Scratch: NewScratchPool()})
+	if err != nil {
+		return 0, false
+	}
+	return len(p), true
+}
+
 func TestLookup_KnownAndUnknown(t *testing.T) {
 	c, err := Lookup(schema.EncPlain)
 	if err != nil {

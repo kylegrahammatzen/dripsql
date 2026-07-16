@@ -196,10 +196,6 @@ func TestWALRecords_RoundTrip(t *testing.T) {
 	if _, err := w.AppendManifestCommit(commit); err != nil {
 		t.Fatalf("append commit: %v", err)
 	}
-	cp := Checkpoint{Offset: 1024}
-	if _, err := w.AppendCheckpoint(cp); err != nil {
-		t.Fatalf("append checkpoint: %v", err)
-	}
 	w.Close()
 
 	w2, recs, err := OpenWAL(path)
@@ -207,8 +203,8 @@ func TestWALRecords_RoundTrip(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer w2.Close()
-	if len(recs) != 3 {
-		t.Fatalf("want 3 records, got %d", len(recs))
+	if len(recs) != 2 {
+		t.Fatalf("want 2 records, got %d", len(recs))
 	}
 	gotIntent, err := DecodeManifestIntent(recs[0])
 	if err != nil {
@@ -224,16 +220,9 @@ func TestWALRecords_RoundTrip(t *testing.T) {
 	if gotCommit != commit {
 		t.Errorf("commit %+v != %+v", gotCommit, commit)
 	}
-	gotCP, err := DecodeCheckpoint(recs[2])
-	if err != nil {
-		t.Fatalf("decode checkpoint: %v", err)
-	}
-	if gotCP != cp {
-		t.Errorf("checkpoint %+v != %+v", gotCP, cp)
-	}
 }
 
-func TestWALRecords_PendingTxns(t *testing.T) {
+func TestWALRecords_PendingTxnGroups(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.wal")
 	w, _, _ := OpenWAL(path)
 
@@ -250,18 +239,18 @@ func TestWALRecords_PendingTxns(t *testing.T) {
 	}
 	defer w2.Close()
 
-	pending, err := PendingTxns(recs)
+	groups, err := PendingTxnGroups(recs)
 	if err != nil {
 		t.Fatalf("pending: %v", err)
 	}
-	if len(pending) != 1 {
-		t.Fatalf("want 1 pending txn, got %d (%+v)", len(pending), pending)
+	if len(groups) != 1 || len(groups[0]) != 1 {
+		t.Fatalf("want 1 pending group with 1 intent, got %+v", groups)
 	}
-	if pending[0].TxnID != 2 {
-		t.Errorf("pending txn id = %d, want 2", pending[0].TxnID)
+	if groups[0][0].TxnID != 2 {
+		t.Errorf("pending txn id = %d, want 2", groups[0][0].TxnID)
 	}
-	if len(pending[0].Adds) != 1 || pending[0].Adds[0].Path != "/b" {
-		t.Errorf("pending adds mismatch: %+v", pending[0].Adds)
+	if len(groups[0][0].Adds) != 1 || groups[0][0].Adds[0].Path != "/b" {
+		t.Errorf("pending adds mismatch: %+v", groups[0][0].Adds)
 	}
 }
 

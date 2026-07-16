@@ -256,14 +256,6 @@ func ParseCompressionStrict(name string) (CompressionPolicy, bool) {
 	return CompressionDefault, false
 }
 
-func (p CompressionPolicy) AllowsFlate() bool {
-	return p != CompressionNone
-}
-
-func (p CompressionPolicy) AllowsZstd() bool {
-	return p != CompressionNone && p != CompressionFast
-}
-
 func NormalizeName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }

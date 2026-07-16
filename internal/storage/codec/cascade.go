@@ -139,16 +139,3 @@ func dominantIntFactCodec(v vector.Vec, ctx *EncodeContext) (Codec, bool) {
 	}
 	return nil, false
 }
-
-// Thin wrapper for callers that only need the chosen codec and a size.
-func Pick(v vector.Vec) (Codec, int, bool) {
-	enc, payload, err := Encode(v, nil)
-	if err != nil {
-		return nil, 0, false
-	}
-	c, err := Lookup(enc)
-	if err != nil {
-		return nil, 0, false
-	}
-	return c, len(payload), true
-}

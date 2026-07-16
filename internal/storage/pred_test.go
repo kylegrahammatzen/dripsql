@@ -1,4 +1,4 @@
-// Pred tests cover validatePred invariants and BindPred schema resolution and non-mutation.
+// Pred tests cover BindPred schema resolution and non-mutation.
 // Per-Op Skips, SkipsPage, Apply, ApplyEncoded round-trips live in scan_test.go via the production path.
 package storage
 
@@ -7,36 +7,6 @@ import (
 
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
-
-func TestPred_ValidateLeafInvariants(t *testing.T) {
-	cases := []struct {
-		name string
-		p    Pred
-		want bool
-	}{
-		{"eq_valid", Pred{Op: OpEq, Col: "x", Kind: vector.VecInt64, I64: 7}, true},
-		{"eq_missing_col", Pred{Op: OpEq, Kind: vector.VecInt64, I64: 7}, false},
-		{"isnull_valid", Pred{Op: OpIsNull, Col: "x", Kind: vector.VecInt64}, true},
-		{"in_empty_set", Pred{Op: OpIn, Col: "x", Set: nil}, false},
-		{"not_missing_child", Pred{Op: OpNot}, false},
-		{"and_one_child", Pred{Op: OpAnd, Children: []Pred{{Op: OpEq, Col: "x", Kind: vector.VecInt64}}}, false},
-		{"and_valid", Pred{Op: OpAnd, Children: []Pred{
-			{Op: OpEq, Col: "x", Kind: vector.VecInt64},
-			{Op: OpEq, Col: "y", Kind: vector.VecInt64},
-		}}, true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			err := validatePred(c.p)
-			if c.want && err != nil {
-				t.Fatalf("want valid, got %v", err)
-			}
-			if !c.want && err == nil {
-				t.Fatalf("want invalid, got nil err")
-			}
-		})
-	}
-}
 
 func TestPred_BindResolvesKind(t *testing.T) {
 	lookup := func(name string) (vector.VecKind, bool) {

@@ -246,19 +246,6 @@ func (v Vec) FixedBytes() []byte {
 	return unsafe.Slice((*byte)(v.data), int(v.Len)*int(w))
 }
 
-func (v *Vec) LoadFixedBytes(src []byte, rows int) error {
-	w := v.Kind.FixedWidth()
-	if w <= 0 {
-		return fmt.Errorf("LoadFixedBytes on non-fixed kind %v", v.Kind)
-	}
-	need := rows * int(w)
-	if len(src) < need {
-		return fmt.Errorf("payload truncated: have %d, need %d", len(src), need)
-	}
-	copy(v.EnsureFixedBytes(rows), src[:need])
-	return nil
-}
-
 func (v Vec) Validate() error {
 	w := v.Kind.FixedWidth()
 	if w == 0 {

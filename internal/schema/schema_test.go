@@ -1,5 +1,4 @@
-// Schema validation tests: TableSpec/ColumnSpec/TableOptions/TypeSpec invariants
-// and the CompressionPolicy AllowsFlate/AllowsZstd matrix.
+// Schema validation tests cover TableSpec, ColumnSpec, TableOptions, and TypeSpec invariants.
 package schema
 
 import "testing"
@@ -112,27 +111,5 @@ func TestSchema_TypeSpecValidation(t *testing.T) {
 	}
 	if err := (TypeSpec{Name: "status", EnumLabels: []string{"a", "b"}}).Validate(); err != nil {
 		t.Fatalf("good TypeSpec: %v", err)
-	}
-}
-
-func TestSchema_CompressionPolicyAllows(t *testing.T) {
-	cases := []struct {
-		p     CompressionPolicy
-		flate bool
-		zstd  bool
-	}{
-		{CompressionDefault, true, true},
-		{CompressionAuto, true, true},
-		{CompressionNone, false, false},
-		{CompressionFast, true, false},
-		{CompressionBest, true, true},
-	}
-	for _, c := range cases {
-		if c.p.AllowsFlate() != c.flate {
-			t.Errorf("%s AllowsFlate=%v want %v", c.p, c.p.AllowsFlate(), c.flate)
-		}
-		if c.p.AllowsZstd() != c.zstd {
-			t.Errorf("%s AllowsZstd=%v want %v", c.p, c.p.AllowsZstd(), c.zstd)
-		}
 	}
 }
