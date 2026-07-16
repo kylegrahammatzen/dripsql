@@ -86,13 +86,6 @@ func smithSeed(s smithSchema, rows int, r *rand.Rand) string {
 	return b.String()
 }
 
-// SmithQuery emits a single random SELECT statement against the default schema.
-// Caller decides whether failure of the query is a bug or expected grammar drift.
-func SmithQuery(r *rand.Rand) string {
-	s := defaultSmithSchema()
-	return smithSelect(s, r, 0)
-}
-
 func smithSelect(s smithSchema, r *rand.Rand, depth int) string {
 	var b strings.Builder
 	b.WriteString("SELECT ")

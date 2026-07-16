@@ -6,6 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/kylegrahammatzen/dripsql/internal/engine"
+	"github.com/kylegrahammatzen/dripsql/internal/schema"
+	"github.com/kylegrahammatzen/dripsql/internal/vector"
 )
 
 func openTestDB(t *testing.T) *DB {
@@ -351,6 +355,80 @@ func TestOpen_EmptyPathRejected(t *testing.T) {
 func TestOpen_MemoryPathNotYet(t *testing.T) {
 	if _, err := Open(MemoryPath); err == nil {
 		t.Fatal("Open(MemoryPath) must error until the in-memory backend lands")
+	}
+}
+
+// Chunk narrow accessors expose int32, int16, bool, and date columns with NULLs visible through IsNull and wrong kinds returning nil.
+func TestQueryChunks_NarrowAccessors(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	mustExec(t, db, "CREATE TABLE t (id int64 NOT NULL, a int32, b int16, c bool, d date)")
+
+	// SQL INSERT cannot yet bind date literals end to end, so the rows arrive through the engine ingest path.
+	valid := vector.NewValidity(3)
+	valid.SetInvalid(2)
+	idv := vector.NewVec(vector.VecInt64, 3)
+	copy(idv.I64(), []int64{1, 2, 3})
+	av := vector.NewVec(vector.VecInt32, 3)
+	copy(av.I32(), []int32{7, -2, 0})
+	av.Valid = valid
+	bv := vector.NewVec(vector.VecInt16, 3)
+	copy(bv.I16(), []int16{3, -4, 0})
+	bv.Valid = valid
+	cv := vector.NewVec(vector.VecBool, 3)
+	cv.BoolBits()[0] = 0b001
+	cv.Valid = valid
+	dv := vector.NewVec(vector.VecDate, 3)
+	copy(dv.I32(), []int32{19000, 20000, 0})
+	dv.Valid = valid
+	batch, err := vector.NewBatch([]vector.Column{
+		{Name: "id", Type: schema.Int64, V: idv},
+		{Name: "a", Type: schema.Int32, V: av},
+		{Name: "b", Type: schema.Int16, V: bv},
+		{Name: "c", Type: schema.Bool, V: cv},
+		{Name: "d", Type: schema.Date, V: dv},
+	})
+	if err != nil {
+		t.Fatalf("NewBatch: %v", err)
+	}
+	if _, err := db.e.Ingest(ctx, engine.IngestConfig{Table: "t", Batches: []vector.Batch{batch}}); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	chunks, err := db.QueryChunks(ctx, "SELECT a, b, c, d FROM t")
+	if err != nil {
+		t.Fatalf("QueryChunks: %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].Len() != 3 {
+		t.Fatalf("got %d chunks, want one chunk of 3 rows", len(chunks))
+	}
+	ch := chunks[0]
+	a := ch.Ints32("a")
+	if len(a) != 3 || a[0] != 7 || a[1] != -2 {
+		t.Errorf("Ints32 = %v, want 7 and -2 in the first two rows", a)
+	}
+	b := ch.Ints16("b")
+	if len(b) != 3 || b[0] != 3 || b[1] != -4 {
+		t.Errorf("Ints16 = %v, want 3 and -4 in the first two rows", b)
+	}
+	bo := ch.Bools("c")
+	if len(bo) != 3 || !bo[0] || bo[1] {
+		t.Errorf("Bools = %v, want true then false in the first two rows", bo)
+	}
+	d := ch.Dates("d")
+	if len(d) != 3 || d[0] != 19000 || d[1] != 20000 {
+		t.Errorf("Dates = %v, want 19000 and 20000 in the first two rows", d)
+	}
+	for _, col := range []string{"a", "b", "c", "d"} {
+		if ch.IsNull(col, 0) {
+			t.Errorf("IsNull(%s, 0) = true, want false", col)
+		}
+		if !ch.IsNull(col, 2) {
+			t.Errorf("IsNull(%s, 2) = false, want true", col)
+		}
+	}
+	if ch.Ints16("c") != nil || ch.Dates("a") != nil || ch.Bools("b") != nil || ch.Ints32("missing") != nil {
+		t.Error("wrong-kind or absent accessors must return nil")
 	}
 }
 

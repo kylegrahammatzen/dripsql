@@ -38,8 +38,23 @@ func Open(path string) (*DB, error) {
 	return &DB{e: e}, nil
 }
 
+// OpenReadOnly opens an existing database directory without creating or modifying any file, for replicas and inspection.
+func OpenReadOnly(path string) (*DB, error) {
+	if path == "" {
+		return nil, fmt.Errorf("dripsql.OpenReadOnly: empty path")
+	}
+	e, err := engine.OpenReadOnly(path)
+	if err != nil {
+		return nil, err
+	}
+	return &DB{e: e}, nil
+}
+
 // DB is a single-database handle whose methods are safe for concurrent use.
 type DB struct{ e *engine.DB }
+
+// Refresh picks up catalog and manifest changes committed by a writer since open, meant for read-only replicas on shared storage.
+func (db *DB) Refresh() error { return db.e.Refresh() }
 
 // Close releases the WAL, segment cache, and catalog handles.
 func (db *DB) Close() error { return db.e.Close() }
@@ -139,6 +154,51 @@ func (c Chunk) Strings(col string) []string {
 	return out
 }
 
+// Ints32 returns the raw int32 column slice or nil when the column is absent or not int32 shaped.
+func (c Chunk) Ints32(col string) []int32 {
+	v, ok := c.batch.ColumnByName(col)
+	if !ok {
+		return nil
+	}
+	switch v.V.Kind {
+	case vector.VecInt32, vector.VecDate:
+		return v.V.I32()
+	}
+	return nil
+}
+
+// Ints16 returns the raw int16 column slice or nil when the column is absent or not int16.
+func (c Chunk) Ints16(col string) []int16 {
+	v, ok := c.batch.ColumnByName(col)
+	if !ok || v.V.Kind != vector.VecInt16 {
+		return nil
+	}
+	return v.V.I16()
+}
+
+// Bools materializes a bool column from its bit-packed backing into a fresh slice or nil when the column is absent or not bool.
+func (c Chunk) Bools(col string) []bool {
+	v, ok := c.batch.ColumnByName(col)
+	if !ok || v.V.Kind != vector.VecBool {
+		return nil
+	}
+	bits := v.V.BoolBits()
+	out := make([]bool, c.batch.Len)
+	for i := range out {
+		out[i] = bits[i>>3]&(1<<(i&7)) != 0
+	}
+	return out
+}
+
+// Dates returns the raw int32 date column slice in the vector layer's day encoding or nil when the column is absent or not date.
+func (c Chunk) Dates(col string) []int32 {
+	v, ok := c.batch.ColumnByName(col)
+	if !ok || v.V.Kind != vector.VecDate {
+		return nil
+	}
+	return v.V.I32()
+}
+
 // IsNull reports whether the cell at row in col is NULL.
 func (c Chunk) IsNull(col string, row int) bool {
 	v, ok := c.batch.ColumnByName(col)
@@ -216,8 +276,8 @@ func (db *DB) SetRetentionLag(lag uint64) { db.e.SetRetentionLag(lag) }
 // SetCacheSize caps the number of open segment file handles and resets to the engine default when n is below 1.
 func (db *DB) SetCacheSize(n int) { db.e.SetCacheSize(n) }
 
-// SetReadOnly when true makes Exec and BeginTx return a read-only error while leaving reads unaffected.
-func (db *DB) SetReadOnly(on bool) { db.e.SetReadOnly(on) }
+// SetReadOnly when true makes writes return a read-only error while leaving reads unaffected, and clearing it on an OpenReadOnly database is refused.
+func (db *DB) SetReadOnly(on bool) error { return db.e.SetReadOnly(on) }
 
 // Tables returns the catalog table names in sorted order.
 func (db *DB) Tables() []string { return db.e.Tables() }
