@@ -26,9 +26,6 @@ type colSink struct {
 	varMaxLen    uint32
 	varTotal     uint64
 	varPageKeys  [][]uint64
-	// sawMixedPage means at least one page skipped analysis, so any segment wide
-	// artifact built from this sink would silently miss that page's live values.
-	sawMixedPage bool
 }
 
 // rowsHint sizes the int-dedup map and key slice up front so the typical
@@ -38,13 +35,7 @@ type colSink struct {
 func newColSink(kind vector.VecKind, rowsHint int) *colSink {
 	s := &colSink{}
 	if kindEligibleForIntFilter(kind) {
-		hint := rowsHint
-		if hint > 1024 {
-			hint = 1024
-		}
-		if hint < 8 {
-			hint = 8
-		}
+		hint := max(min(rowsHint, 1024), 8)
 		s.intDedup = make(map[uint64]struct{}, hint)
 		s.intKeys = make([]uint64, 0, hint)
 	}
@@ -54,28 +45,32 @@ func newColSink(kind vector.VecKind, rowsHint int) *colSink {
 	return s
 }
 
+// facts may be nil for sink-only accumulation on mixed pages that keep the Plain wire layout.
 func analyzePage(v vector.Vec, facts *codec.PageFacts, sink *colSink, pageIdx int) {
-	facts.Rows = int(v.Len)
-	facts.Kind = v.Kind
-	facts.Int = nil
-	facts.VarBytes = nil
-	facts.Nulls = 0
+	rows := int(v.Len)
+	nulls := 0
 	if v.Valid != nil {
-		facts.Nulls = v.Valid.NullCount(facts.Rows)
+		nulls = v.Valid.NullCount(rows)
 	}
-	if facts.Rows == 0 || facts.Nulls == facts.Rows {
+	if facts != nil {
+		facts.Rows = rows
+		facts.Kind = v.Kind
+		facts.Int = nil
+		facts.VarBytes = nil
+		facts.Nulls = nulls
+	}
+	if rows == 0 || nulls == rows {
 		return
 	}
 	switch {
 	case kindEligibleForIntFilter(v.Kind):
-		analyzeIntPage(v, facts, sink)
+		analyzeIntPage(v, rows, facts, sink)
 	case v.Kind.IsVarBytes():
-		analyzeVarBytesPage(v, facts, sink, pageIdx)
+		analyzeVarBytesPage(v, rows, facts, sink, pageIdx)
 	}
 }
 
-func analyzeIntPage(v vector.Vec, facts *codec.PageFacts, sink *colSink) {
-	rows := facts.Rows
+func analyzeIntPage(v vector.Vec, rows int, facts *codec.PageFacts, sink *colSink) {
 	valid := v.Valid
 
 	var min, max int64
@@ -153,6 +148,23 @@ func analyzeIntPage(v vector.Vec, facts *codec.PageFacts, sink *colSink) {
 		return
 	}
 
+	if sink != nil {
+		if !sink.intRangeSeen {
+			sink.intMin, sink.intMax = min, max
+			sink.intRangeSeen = true
+		} else {
+			if min < sink.intMin {
+				sink.intMin = min
+			}
+			if max > sink.intMax {
+				sink.intMax = max
+			}
+		}
+	}
+	if facts == nil {
+		return
+	}
+
 	span := uint64(max) - uint64(min)
 	width := 0
 	if span > 0 {
@@ -177,17 +189,6 @@ func analyzeIntPage(v vector.Vec, facts *codec.PageFacts, sink *colSink) {
 	if sink != nil {
 		pageSum = sink.intSum
 		pageOverflow = sink.intOverflow
-		if !sink.intRangeSeen {
-			sink.intMin, sink.intMax = min, max
-			sink.intRangeSeen = true
-		} else {
-			if min < sink.intMin {
-				sink.intMin = min
-			}
-			if max > sink.intMax {
-				sink.intMax = max
-			}
-		}
 	}
 
 	facts.Int = &codec.IntFacts{
@@ -210,9 +211,6 @@ func analyzeIntPage(v vector.Vec, facts *codec.PageFacts, sink *colSink) {
 // Writes col stats from sink data for kinds the analyzer summarizes.
 // Returns false when the sink does not cover the kind; caller falls back to scan.
 func marshalColumnStatsFromSink(kind vector.VecKind, sink *colSink, dst []byte) bool {
-	if sink.sawMixedPage {
-		return false
-	}
 	switch kind {
 	case vector.VecInt16:
 		s := NumericStats[int32]{HasNonNull: sink.intRangeSeen}
@@ -261,10 +259,55 @@ func marshalPageStatsFromFacts(kind vector.VecKind, facts *codec.PageFacts, v ve
 	}
 }
 
-func analyzeVarBytesPage(v vector.Vec, facts *codec.PageFacts, sink *colSink, pageIdx int) {
-	rows := facts.Rows
+func analyzeVarBytesPage(v vector.Vec, rows int, facts *codec.PageFacts, sink *colSink, pageIdx int) {
 	valid := v.Valid
 	vb := v.Var()
+
+	if sink != nil {
+		for len(sink.varPageKeys) <= pageIdx {
+			sink.varPageKeys = append(sink.varPageKeys, nil)
+		}
+	}
+
+	// Sink-only pass skips the page dict since mixed pages always encode Plain.
+	if facts == nil {
+		if sink == nil {
+			return
+		}
+		for r := range rows {
+			if valid != nil && !valid.IsValid(r) {
+				continue
+			}
+			b := vb.Bytes(r)
+			l := uint32(len(b))
+			sink.varPageKeys[pageIdx] = append(sink.varPageKeys[pageIdx], hashBytesFNV(b))
+			if !sink.varAny {
+				sink.varMinLen, sink.varMaxLen = l, l
+				sink.varAny = true
+			} else {
+				if l < sink.varMinLen {
+					sink.varMinLen = l
+				}
+				if l > sink.varMaxLen {
+					sink.varMaxLen = l
+				}
+			}
+			sink.varTotal += uint64(l)
+			if sink.varHistSkip {
+				continue
+			}
+			if _, exists := sink.varHist[string(b)]; exists {
+				sink.varHist[string(b)]++
+			} else {
+				sink.varHist[string(append([]byte(nil), b...))] = 1
+				if len(sink.varHist) > dictHistMaxDistinct {
+					sink.varHistSkip = true
+					sink.varHist = nil
+				}
+			}
+		}
+		return
+	}
 
 	const dictMax = 256
 	pageDict := make(map[string]uint8, 8)
@@ -273,12 +316,6 @@ func analyzeVarBytesPage(v vector.Vec, facts *codec.PageFacts, sink *colSink, pa
 	pageCounts := make([]uint64, 0, 8)
 	pageBytes := 0
 	pageFits := true
-
-	if sink != nil {
-		for len(sink.varPageKeys) <= pageIdx {
-			sink.varPageKeys = append(sink.varPageKeys, nil)
-		}
-	}
 
 	for r := range rows {
 		if valid != nil && !valid.IsValid(r) {

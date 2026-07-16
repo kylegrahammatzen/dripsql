@@ -46,9 +46,12 @@ func TestPage_FlagBits(t *testing.T) {
 func TestFooterSuffix_RoundTrip(t *testing.T) {
 	var buf [FooterSuffixSize]byte
 	WriteFooterSuffix(buf[:], 12345, 6789)
-	length, sidecar, ok := ReadFooterSuffix(buf[:])
-	if !ok {
-		t.Fatal("magic mismatch on round-trip")
+	version, length, sidecar, err := ReadFooterSuffix(buf[:])
+	if err != nil {
+		t.Fatalf("round-trip: %v", err)
+	}
+	if version != SegmentFormatVersion {
+		t.Fatalf("version = %d, want %d", version, SegmentFormatVersion)
 	}
 	if length != 12345 {
 		t.Fatalf("length = %d, want 12345", length)
@@ -62,16 +65,30 @@ func TestFooterSuffix_RejectsBadMagic(t *testing.T) {
 	var buf [FooterSuffixSize]byte
 	WriteFooterSuffix(buf[:], 1, 0)
 	buf[FooterSuffixSize-1] = 'X'
-	if _, _, ok := ReadFooterSuffix(buf[:]); ok {
+	if _, _, _, err := ReadFooterSuffix(buf[:]); err == nil {
 		t.Fatal("bad magic must be rejected")
 	}
 }
 
-func TestMagic_Current(t *testing.T) {
-	if Magic != "DRIPV4S3" {
-		t.Fatalf("magic = %q, want DRIPV4S3", Magic)
+func TestFooterSuffix_RejectsReservedFlagsAndBadVersion(t *testing.T) {
+	var buf [FooterSuffixSize]byte
+	WriteFooterSuffix(buf[:], 1, 0)
+	buf[4] = 1
+	if _, _, _, err := ReadFooterSuffix(buf[:]); err == nil {
+		t.Fatal("nonzero reserved flags must be rejected")
 	}
-	if len(Magic) != MagicLen {
-		t.Fatalf("magic length %d != %d", len(Magic), MagicLen)
+	WriteFooterSuffix(buf[:], 1, 0)
+	buf[0] = SegmentFormatVersion + 1
+	if _, _, _, err := ReadFooterSuffix(buf[:]); err == nil {
+		t.Fatal("unknown newer format version must be rejected")
+	}
+}
+
+func TestMagic_Current(t *testing.T) {
+	if Magic != "DRIPV4S4" {
+		t.Fatalf("magic = %q, want DRIPV4S4", Magic)
+	}
+	if len(Magic) != MagicLen || len(MagicV3) != MagicLen {
+		t.Fatalf("magic lengths %d/%d != %d", len(Magic), len(MagicV3), MagicLen)
 	}
 }

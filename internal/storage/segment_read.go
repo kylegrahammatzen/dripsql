@@ -84,6 +84,11 @@ type SegmentColumn struct {
 	// to positional mapping when zero.
 	ColumnID uint64
 
+	// SinkTrusted is false only on formatVersion 0 columns with a mixed page, whose
+	// writer-side sink may have skipped those pages. Untrusted columns serve no
+	// segment-level stats and no sidecar sections; page zone maps stay valid.
+	SinkTrusted bool
+
 	// Lazily inflated into PageStats on first prune call. Skips the per-column
 	// alloc on cold open when no predicate ever runs.
 	pageStatsRaw []byte
@@ -106,6 +111,14 @@ type Segment struct {
 	// Zero on legacy dsv4 segments and signals the engine to use positional mapping.
 	TableID          uint64
 	SchemaGeneration uint64
+
+	// FormatVersion is the wire version from the footer suffix. Zero means a legacy
+	// v3 file whose mixed-page columns run with sink artifacts disabled.
+	FormatVersion uint32
+
+	// untrusted holds normalized names of columns with SinkTrusted false so the
+	// sidecar accessors can drop their sections after decode.
+	untrusted map[string]bool
 
 	containerOnce sync.Once
 	container     map[uint8][]byte
@@ -168,6 +181,9 @@ func (s *Segment) DictHistograms() (DictHistograms, error) {
 			s.dictHistsErr = err
 			return
 		}
+		for name := range s.untrusted {
+			delete(m, name)
+		}
 		s.dictHists = DictHistograms(m)
 	})
 	return s.dictHists, s.dictHistsErr
@@ -184,6 +200,9 @@ func (s *Segment) IntFilterSet() (IntFilters, error) {
 		if err != nil {
 			s.intFiltersErr = err
 			return
+		}
+		for name := range s.untrusted {
+			delete(m, name)
 		}
 		s.intFilters = IntFilters(m)
 	})
@@ -202,6 +221,9 @@ func (s *Segment) NumericSums() (NumericSums, error) {
 			s.numSumsErr = err
 			return
 		}
+		for name := range s.untrusted {
+			delete(m, name)
+		}
 		s.numSums = NumericSums(m)
 	})
 	return s.numSums, s.numSumsErr
@@ -219,6 +241,20 @@ func (s *Segment) GroupSums() (GroupSumsMap, error) {
 			s.groupSumsErr = err
 			return
 		}
+		// A pair is dropped when either side is untrusted since the sums fold both columns.
+		for name := range s.untrusted {
+			delete(m, name)
+		}
+		for group, gc := range m {
+			for numName := range gc {
+				if s.untrusted[numName] {
+					delete(gc, numName)
+				}
+			}
+			if len(gc) == 0 {
+				delete(m, group)
+			}
+		}
 		s.groupSums = GroupSumsMap(m)
 	})
 	return s.groupSums, s.groupSumsErr
@@ -235,6 +271,9 @@ func (s *Segment) VarBlooms() (VarBlooms, error) {
 		if err != nil {
 			s.varBloomsErr = err
 			return
+		}
+		for name := range s.untrusted {
+			delete(m, name)
 		}
 		s.varBlooms = VarBlooms(m)
 	})
@@ -296,13 +335,22 @@ func OpenSegmentWithDV(path, dvPath string) (*Segment, error) {
 	}
 	// Sidecar container lives inline between footer and suffix; lazily read on first access.
 	seg := &Segment{
-		f:            f,
-		path:         path,
-		bodyEndCache: layout.bodyEnd,
-		sidecarOff:   layout.sidecarStart,
-		sidecarLen:   layout.sidecarLen,
-		Cols:         layout.cols,
-		DV:           dv,
+		f:             f,
+		path:          path,
+		bodyEndCache:  layout.bodyEnd,
+		sidecarOff:    layout.sidecarStart,
+		sidecarLen:    layout.sidecarLen,
+		Cols:          layout.cols,
+		DV:            dv,
+		FormatVersion: layout.formatVersion,
+	}
+	for i := range seg.Cols {
+		if !seg.Cols[i].SinkTrusted {
+			if seg.untrusted == nil {
+				seg.untrusted = make(map[string]bool)
+			}
+			seg.untrusted[schema.NormalizeName(seg.Cols[i].Name)] = true
+		}
 	}
 	if err := seg.hydrateIdentity(); err != nil {
 		f.Close()
@@ -567,10 +615,11 @@ func allInvalidValidity(rows int) vector.Validity {
 // column footer starts, where (and how big) the optional sidecar trailer is, and
 // the segment body's exclusive end (also footerStart).
 type footerLayout struct {
-	cols         []SegmentColumn
-	bodyEnd      int64
-	sidecarStart int64
-	sidecarLen   int64
+	cols          []SegmentColumn
+	bodyEnd       int64
+	sidecarStart  int64
+	sidecarLen    int64
+	formatVersion uint32
 }
 
 func readFooter(f *os.File) (footerLayout, error) {
@@ -580,16 +629,21 @@ func readFooter(f *os.File) (footerLayout, error) {
 		return out, err
 	}
 	size := fi.Size()
-	if size < int64(MagicLen+FooterSuffixSize) {
+	// The legacy 24-byte suffix sets the floor so minimal v3 files still open.
+	if size < int64(MagicLen+FooterSuffixV3Size) {
 		return out, fmt.Errorf("readFooter: file too small (%d bytes)", size)
 	}
 	suffix, err := readExactAt(f, size-int64(FooterSuffixSize), FooterSuffixSize, "suffix")
 	if err != nil {
 		return out, err
 	}
-	footerLen, sidecarLen, ok := ReadFooterSuffix(suffix)
-	if !ok {
-		return out, fmt.Errorf("readFooter: tail magic mismatch")
+	formatVersion, footerLen, sidecarLen, err := ReadFooterSuffix(suffix)
+	if err != nil {
+		return out, fmt.Errorf("readFooter: %w", err)
+	}
+	suffixSize := int64(FooterSuffixSize)
+	if formatVersion == 0 {
+		suffixSize = FooterSuffixV3Size
 	}
 	if footerLen > uint64(math.MaxInt32) {
 		return out, fmt.Errorf("readFooter: footer length %d exceeds int32 range", footerLen)
@@ -597,7 +651,7 @@ func readFooter(f *os.File) (footerLayout, error) {
 	if sidecarLen > uint64(math.MaxInt32) {
 		return out, fmt.Errorf("readFooter: sidecar length %d exceeds int32 range", sidecarLen)
 	}
-	sidecarStart := size - int64(FooterSuffixSize) - int64(sidecarLen)
+	sidecarStart := size - suffixSize - int64(sidecarLen)
 	footerStart := sidecarStart - int64(footerLen)
 	if footerStart < int64(MagicLen) {
 		return out, fmt.Errorf("readFooter: footer+sidecar lengths imply negative offset")
@@ -606,7 +660,7 @@ func readFooter(f *os.File) (footerLayout, error) {
 	if err != nil {
 		return out, err
 	}
-	if string(head) != Magic {
+	if string(head) != Magic && string(head) != MagicV3 {
 		return out, fmt.Errorf("readFooter: head magic mismatch")
 	}
 	body, err := readExactAt(f, footerStart, int(footerLen), "body")
@@ -617,10 +671,27 @@ func readFooter(f *os.File) (footerLayout, error) {
 	if err != nil {
 		return out, err
 	}
+	// Pre-fix v3 writers skipped mixed pages when filling column sinks, so any v3
+	// column with a mixed page may carry stats and sidecar artifacts that silently
+	// miss values. v4 writers analyze every page validity-exactly and stay trusted.
+	for i := range cols {
+		cols[i].SinkTrusted = true
+	}
+	if formatVersion == 0 {
+		for i := range cols {
+			for _, p := range cols[i].Pages {
+				if p.NullCount > 0 && p.NullCount < p.Rows {
+					cols[i].SinkTrusted = false
+					break
+				}
+			}
+		}
+	}
 	out.cols = cols
 	out.bodyEnd = footerStart
 	out.sidecarStart = sidecarStart
 	out.sidecarLen = int64(sidecarLen)
+	out.formatVersion = formatVersion
 	return out, nil
 }
 

@@ -8,16 +8,23 @@ import (
 	"unsafe"
 )
 
-const Magic = "DRIPV4S3"
+const Magic = "DRIPV4S4"
+
+// MagicV3 is the pre-format-version head and tail magic that old files still carry.
+const MagicV3 = "DRIPV4S3"
 
 const MagicLen = 8
+
+// SegmentFormatVersion is the version stamped into every new v4 suffix. Legacy v3
+// files carry no version on the wire and read back as formatVersion 0.
+const SegmentFormatVersion = 1
 
 // 32 pinned so the directory is pointer-castable via *(*Page)(unsafe.Pointer(&buf[i*32])).
 const PageEntrySize = 32
 
-// Footer suffix v3 carries sidecarLen + footerLen so the sidecar container can live
-// inline in the segment file (between footer and suffix) instead of a separate .sc
-// file. One tmp+fsync+rename+dirsync writes everything together.
+// Footer suffix v4 is [u32 formatVersion][u32 flags][u64 sidecarLen][u64 footerLen][magic].
+// Legacy v3 was the same trailing 24 bytes without the version+flags prefix, so both
+// layouts put sidecarLen, footerLen, and magic at the same window-relative offsets.
 
 // Field order: u64 fields first so the in-memory layout matches the wire bytes on 64-bit LE.
 type Page struct {
@@ -40,7 +47,9 @@ const (
 	PageFlagEncodedEvalOK uint8 = 1 << 3
 )
 
-const FooterSuffixSize = 24
+const FooterSuffixSize = 32
+
+const FooterSuffixV3Size = 24
 
 func WritePage(dst []byte, p Page) {
 	_ = dst[PageEntrySize-1]
@@ -63,17 +72,34 @@ func DecodePageEntry(src []byte) Page {
 
 func WriteFooterSuffix(dst []byte, footerLength, sidecarLength uint64) {
 	_ = dst[FooterSuffixSize-1]
-	binary.LittleEndian.PutUint64(dst[0:8], sidecarLength)
-	binary.LittleEndian.PutUint64(dst[8:16], footerLength)
-	copy(dst[16:24], Magic)
+	binary.LittleEndian.PutUint32(dst[0:4], SegmentFormatVersion)
+	binary.LittleEndian.PutUint32(dst[4:8], 0)
+	binary.LittleEndian.PutUint64(dst[8:16], sidecarLength)
+	binary.LittleEndian.PutUint64(dst[16:24], footerLength)
+	copy(dst[24:32], Magic)
 }
 
-func ReadFooterSuffix(src []byte) (footerLength, sidecarLength uint64, magicOK bool) {
+// ReadFooterSuffix parses the last FooterSuffixSize bytes of a segment file and
+// dispatches on the trailing magic. A legacy v3 suffix occupies the window's last
+// 24 bytes and reports formatVersion 0.
+func ReadFooterSuffix(src []byte) (formatVersion uint32, footerLength, sidecarLength uint64, err error) {
 	_ = src[FooterSuffixSize-1]
-	sidecarLength = binary.LittleEndian.Uint64(src[0:8])
-	footerLength = binary.LittleEndian.Uint64(src[8:16])
-	magicOK = string(src[16:24]) == Magic
-	return
+	switch string(src[24:32]) {
+	case Magic:
+		formatVersion = binary.LittleEndian.Uint32(src[0:4])
+		if formatVersion == 0 || formatVersion > SegmentFormatVersion {
+			return 0, 0, 0, fmt.Errorf("footer suffix: format version %d not in [1, %d]", formatVersion, SegmentFormatVersion)
+		}
+		if flags := binary.LittleEndian.Uint32(src[4:8]); flags != 0 {
+			return 0, 0, 0, fmt.Errorf("footer suffix: reserved flags %#x != 0", flags)
+		}
+	case MagicV3:
+	default:
+		return 0, 0, 0, fmt.Errorf("footer suffix: tail magic mismatch")
+	}
+	sidecarLength = binary.LittleEndian.Uint64(src[8:16])
+	footerLength = binary.LittleEndian.Uint64(src[16:24])
+	return formatVersion, footerLength, sidecarLength, nil
 }
 
 type wireBuffer struct {

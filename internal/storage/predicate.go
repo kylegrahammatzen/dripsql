@@ -47,18 +47,20 @@ func findSegmentColumnByID(seg *Segment, name string, colID uint64) (*SegmentCol
 	return nil, false
 }
 
+// Untrusted sink columns decode with HasNonNull false, the same no-stats shape
+// pruning already treats as cannot-prune, so v3 mixed columns are never skipped.
 func numericStatsFromCol(c *SegmentColumn) (NumericStats[int64], bool) {
 	if c.Rows == 0 {
 		return NumericStats[int64]{}, false
 	}
-	return UnmarshalNumericStats[int64](c.Stats[:], true), true
+	return UnmarshalNumericStats[int64](c.Stats[:], c.SinkTrusted), true
 }
 
 func floatStatsFromCol(c *SegmentColumn) (FloatStats, bool) {
 	if c.Rows == 0 {
 		return FloatStats{}, false
 	}
-	return UnmarshalFloatStats(c.Stats[:], true), true
+	return UnmarshalFloatStats(c.Stats[:], c.SinkTrusted), true
 }
 
 // pageMinMaxFloat returns the float64 min/max for a page when the column is float64.
@@ -197,7 +199,7 @@ func narrowStatsFromCol(c *SegmentColumn) (NumericStats[int32], bool) {
 	if c.Rows == 0 {
 		return NumericStats[int32]{}, false
 	}
-	return UnmarshalNumericStats[int32](c.Stats[:], true), true
+	return UnmarshalNumericStats[int32](c.Stats[:], c.SinkTrusted), true
 }
 
 // boundCmpNarrowInt covers int16 int32 and date columns whose stats live in the int32 wire shape.

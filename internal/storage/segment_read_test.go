@@ -208,7 +208,7 @@ func TestParseFooter_RejectsTrailingBytes(t *testing.T) {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
+	_, footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
 	footerStart := len(data) - FooterSuffixSize - int(sidecarLen) - int(footerLen)
 	body := append([]byte{}, data[footerStart:footerStart+int(footerLen)]...)
 	body = append(body, 0, 0, 0)
@@ -223,7 +223,7 @@ func TestOpenSegment_RejectsCorruptPageOffset(t *testing.T) {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
+	_, footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
 	footerStart := len(data) - FooterSuffixSize - int(sidecarLen) - int(footerLen)
 	pageDirOff := footerStart + int(footerLen) - PageEntrySize
 	binary.LittleEndian.PutUint64(data[pageDirOff+0:pageDirOff+8], 1<<40)
@@ -244,7 +244,7 @@ func TestOpenSegment_RejectsPageFlagAllNull(t *testing.T) {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
+	_, footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
 	footerStart := len(data) - FooterSuffixSize - int(sidecarLen) - int(footerLen)
 	// Footer ends with [page-entries...][page-stats...]; single column with one page means
 	// the page entry is at footerEnd - 1*StatsWireSize - PageEntrySize.
@@ -355,6 +355,191 @@ func TestSegmentIdentity_RejectsColumnCountMismatch(t *testing.T) {
 	}
 	if _, err := OpenSegment(path); err == nil {
 		t.Fatal("expected error on identity column count mismatch")
+	}
+}
+
+// makeTrustProbeBatch builds one page with a fully valid int column, a mixed-null
+// int column, and a mixed-null text column so sink trust can diverge per column.
+func makeTrustProbeBatch(t *testing.T, start int64) vector.Batch {
+	t.Helper()
+	const n = 8
+	id := vector.NewVec(vector.VecInt64, n)
+	for i := range id.I64() {
+		id.I64()[i] = start + int64(i)
+	}
+	x := vector.NewVec(vector.VecInt64, n)
+	xValid := vector.NewValidity(n)
+	for i := range x.I64() {
+		x.I64()[i] = 1000 + start + int64(i)
+		if i%2 == 1 {
+			xValid.SetInvalid(i)
+		}
+	}
+	x.Valid = xValid
+	g := vector.NewVarVec(vector.VecText, n, 0)
+	gValid := vector.NewValidity(n)
+	gValid.SetInvalid(0)
+	for i := range n {
+		if i%2 == 0 {
+			g.Var().AppendString(i, "a")
+		} else {
+			g.Var().AppendString(i, "b")
+		}
+	}
+	g.Valid = gValid
+	b, err := vector.NewBatch([]vector.Column{
+		{Name: "id", Type: schema.Int64, V: id},
+		{Name: "x", Type: schema.Int64, V: x},
+		{Name: "g", Type: schema.Text, V: g},
+	})
+	if err != nil {
+		t.Fatalf("NewBatch: %v", err)
+	}
+	return b
+}
+
+// Contract: a freshly written segment reopens as format version 1 with every
+// column trusted, exact stats on mixed columns, and all sidecar sections served.
+func TestOpenSegment_V4RoundTripAllTrusted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seg.dsv4")
+	pages := []vector.Batch{makeTrustProbeBatch(t, 0), makeTrustProbeBatch(t, 8)}
+	if _, err := WriteSegment(path, pages, nil); err != nil {
+		t.Fatalf("WriteSegment: %v", err)
+	}
+	seg, err := OpenSegment(path)
+	if err != nil {
+		t.Fatalf("OpenSegment: %v", err)
+	}
+	defer seg.Close()
+	if seg.FormatVersion != SegmentFormatVersion {
+		t.Fatalf("FormatVersion = %d, want %d", seg.FormatVersion, SegmentFormatVersion)
+	}
+	for i := range seg.Cols {
+		if !seg.Cols[i].SinkTrusted {
+			t.Fatalf("col %q untrusted on a v4 file", seg.Cols[i].Name)
+		}
+	}
+	xIdx, _ := findSegmentColumnIdx(seg, "x")
+	stats, present := numericStatsFromCol(&seg.Cols[xIdx])
+	if !present || !stats.HasNonNull || stats.Min != 1000 || stats.Max != 1014 {
+		t.Fatalf("x stats = %+v present=%v, want exact min 1000 max 1014", stats, present)
+	}
+	sums, err := seg.NumericSums()
+	if err != nil {
+		t.Fatalf("NumericSums: %v", err)
+	}
+	if sums["x"].Sum != 8056 || sums["id"].Sum != 120 {
+		t.Fatalf("sums = %v, want x 8056 id 120", sums)
+	}
+	hists, err := seg.DictHistograms()
+	if err != nil {
+		t.Fatalf("DictHistograms: %v", err)
+	}
+	if hists["g"]["a"] != 6 || hists["g"]["b"] != 8 {
+		t.Fatalf("g histogram = %v, want a 6 b 8", hists["g"])
+	}
+	gs, err := seg.GroupSums()
+	if err != nil {
+		t.Fatalf("GroupSums: %v", err)
+	}
+	if _, ok := gs["g"]["id"]; !ok {
+		t.Fatalf("group sums = %v, want pair g/id", gs)
+	}
+}
+
+// Contract: a legacy v3 suffix reads as format version 0, mixed-page columns lose
+// sink trust with stats absent and sidecar sections dropped, and fully valid
+// columns in the same file keep exact stats and sidecars. Pins new behavior, no
+// fail-before exists since v3 discrimination did not exist.
+func TestOpenSegment_V3LegacySuffixSoftDisablesMixedColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seg.dsv4")
+	pages := []vector.Batch{makeTrustProbeBatch(t, 0), makeTrustProbeBatch(t, 8)}
+	if _, err := WriteSegment(path, pages, nil); err != nil {
+		t.Fatalf("WriteSegment: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	_, footerLen, sidecarLen, err := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
+	if err != nil {
+		t.Fatalf("ReadFooterSuffix: %v", err)
+	}
+	// Private copy of the legacy 24-byte suffix encoding, [u64 sidecarLen][u64 footerLen][magic].
+	legacy := make([]byte, FooterSuffixV3Size)
+	binary.LittleEndian.PutUint64(legacy[0:8], sidecarLen)
+	binary.LittleEndian.PutUint64(legacy[8:16], footerLen)
+	copy(legacy[16:24], MagicV3)
+	data = append(data[:len(data)-FooterSuffixSize], legacy...)
+	copy(data[0:MagicLen], MagicV3)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	seg, err := OpenSegment(path)
+	if err != nil {
+		t.Fatalf("OpenSegment: %v", err)
+	}
+	defer seg.Close()
+	if seg.FormatVersion != 0 {
+		t.Fatalf("FormatVersion = %d, want 0", seg.FormatVersion)
+	}
+	xIdx, _ := findSegmentColumnIdx(seg, "x")
+	gIdx, _ := findSegmentColumnIdx(seg, "g")
+	idIdx, _ := findSegmentColumnIdx(seg, "id")
+	if seg.Cols[xIdx].SinkTrusted || seg.Cols[gIdx].SinkTrusted {
+		t.Fatal("mixed-page columns must lose sink trust on v3 files")
+	}
+	if !seg.Cols[idIdx].SinkTrusted {
+		t.Fatal("fully valid column must stay trusted on v3 files")
+	}
+	if stats, _ := numericStatsFromCol(&seg.Cols[xIdx]); stats.HasNonNull {
+		t.Fatalf("untrusted x stats must read absent, got %+v", stats)
+	}
+	idStats, present := numericStatsFromCol(&seg.Cols[idIdx])
+	if !present || !idStats.HasNonNull || idStats.Min != 0 || idStats.Max != 15 {
+		t.Fatalf("id stats = %+v present=%v, want exact min 0 max 15", idStats, present)
+	}
+	sums, err := seg.NumericSums()
+	if err != nil {
+		t.Fatalf("NumericSums: %v", err)
+	}
+	if _, ok := sums["x"]; ok {
+		t.Fatal("untrusted x must be dropped from numeric sums")
+	}
+	if sums["id"].Sum != 120 {
+		t.Fatalf("trusted id sum = %d, want 120", sums["id"].Sum)
+	}
+	filters, err := seg.IntFilterSet()
+	if err != nil {
+		t.Fatalf("IntFilterSet: %v", err)
+	}
+	if _, ok := filters["x"]; ok {
+		t.Fatal("untrusted x must be dropped from int filters")
+	}
+	if _, ok := filters["id"]; !ok {
+		t.Fatal("trusted id must keep its int filter")
+	}
+	hists, err := seg.DictHistograms()
+	if err != nil {
+		t.Fatalf("DictHistograms: %v", err)
+	}
+	if _, ok := hists["g"]; ok {
+		t.Fatal("untrusted g must be dropped from dict histograms")
+	}
+	blooms, err := seg.VarBlooms()
+	if err != nil {
+		t.Fatalf("VarBlooms: %v", err)
+	}
+	if _, ok := blooms["g"]; ok {
+		t.Fatal("untrusted g must be dropped from var blooms")
+	}
+	gs, err := seg.GroupSums()
+	if err != nil {
+		t.Fatalf("GroupSums: %v", err)
+	}
+	if _, ok := gs["g"]; ok {
+		t.Fatal("group sums pair must drop when the group column is untrusted")
 	}
 }
 

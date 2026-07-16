@@ -1,13 +1,11 @@
-// Optional sidecars built post-segment-publish and consulted at OpenSegment.
-// Generic Sidecar[T] plumbing, the per-tag container framer, and the four concrete sidecars all live here.
+// Optional sidecars encoded inline into the segment container and consulted at OpenSegment.
+// Generic Sidecar[T] plumbing, the per-tag container framer, and the concrete sidecars all live here.
 package storage
 
 import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/kylegrahammatzen/dripsql/internal/schema"
 	"github.com/kylegrahammatzen/dripsql/internal/vector"
@@ -21,10 +19,7 @@ type Sidecar[T any] struct {
 	DecodeBody func(name string, r *wireReader) (T, error)
 }
 
-func (s Sidecar[T]) Path(segPath string) string { return segPath + s.Suffix }
-
-// Encode returns the body bytes (magic+colCount+entries) for use either as a
-// standalone sidecar file or as a section inside a container.
+// Encode returns the body bytes (magic+colCount+entries) for embedding as a section inside a container.
 func (s Sidecar[T]) Encode(entries map[string]T) ([]byte, error) {
 	if len(entries) == 0 {
 		return nil, nil
@@ -75,42 +70,6 @@ func (s Sidecar[T]) Decode(data []byte) (map[string]T, error) {
 		return nil, fmt.Errorf("%s: trailing bytes (remaining=%d)", s.Suffix, r.Remaining())
 	}
 	return out, nil
-}
-
-// Empty entries produce no file so sidecars stay best-effort.
-func (s Sidecar[T]) Write(segPath string, entries map[string]T) error {
-	data, err := s.Encode(entries)
-	if err != nil {
-		return err
-	}
-	if data == nil {
-		return nil
-	}
-	path := s.Path(segPath)
-	tmpPath := path + ".tmp"
-	_ = os.Remove(tmpPath)
-	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	return syncDir(filepath.Dir(path))
-}
-
-// Missing file returns (nil, nil). Bad magic or trailing bytes are an error so
-// silent corruption never serves stale data.
-func (s Sidecar[T]) Read(segPath string) (map[string]T, error) {
-	path := s.Path(segPath)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return s.Decode(data)
 }
 
 const sidecarContainerMagic = "DSCV1"
@@ -286,7 +245,7 @@ func buildGroupSums(pages []vector.Batch, cols []writerColumn, sinks []*colSink)
 		}
 		switch {
 		case cols[ci].Kind.IsVarBytes():
-			if !s.varHistSkip && !s.sawMixedPage && len(s.varHist) > 0 {
+			if !s.varHistSkip && len(s.varHist) > 0 {
 				groupIdx = append(groupIdx, ci)
 			}
 		case kindEligibleForIntFilter(cols[ci].Kind):
@@ -322,8 +281,12 @@ func accumulateGroupSums(pages []vector.Batch, gi int, nums []int, cols []writer
 	acc := make(map[string]*groupAccum)
 	dead := make([]bool, len(nums))
 	for _, page := range pages {
-		gv := page.Columns[gi].V.Var()
+		gvec := page.Columns[gi].V
+		gv := gvec.Var()
 		for r := range page.Len {
+			if !isValidRow(gvec, r) {
+				continue
+			}
 			key := gv.Bytes(r)
 			a := acc[string(key)]
 			if a == nil {
@@ -532,10 +495,7 @@ func materializeSidecarsFromSinks(cols []writerColumn, sinks []*colSink) (DictHi
 		name := schema.NormalizeName(c.Schema.Name)
 		switch {
 		case c.Kind.IsVarBytes():
-			// Mixed page values never reach the sink, so a histogram or a segment wide
-			// filter built from it would lie by omission. Per page var blooms stay safe
-			// because unanalyzed pages keep a nil bloom which the reader treats as no prune.
-			if !s.varHistSkip && !s.sawMixedPage && len(s.varHist) > 0 {
+			if !s.varHistSkip && len(s.varHist) > 0 {
 				dictHists[name] = s.varHist
 			}
 			if len(s.varPageKeys) > 1 {
@@ -555,9 +515,6 @@ func materializeSidecarsFromSinks(cols []writerColumn, sinks []*colSink) (DictHi
 				}
 			}
 		case kindEligibleForIntFilter(c.Kind):
-			if s.sawMixedPage {
-				continue
-			}
 			if s.intAny && !s.intOverflow {
 				numSums[name] = NumericSum{Sum: s.intSum}
 			}

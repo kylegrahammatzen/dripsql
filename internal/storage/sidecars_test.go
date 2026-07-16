@@ -1,4 +1,4 @@
-// Sidecar tests covering bloom-filter correctness, the boundEqInt64 PruneSegment fast path, and per-page varbytes bloom pruning.
+// Sidecar tests covering bloom-filter correctness, the boundEqInt64 PruneSegment fast path, per-page varbytes bloom pruning, and group sums validity.
 package storage
 
 import (
@@ -67,6 +67,70 @@ func TestBoundEqInt64_PruneSegment_UsesIntFilterWhenInRange(t *testing.T) {
 	}
 	if cp.Skips(seg) {
 		t.Fatalf("Skips(id=100) must not prune a key present in segment")
+	}
+}
+
+// Contract: group sums count only rows whose group key is valid, and the empty
+// string bucket holds only real empty string rows.
+func TestGroupSums_SkipsNullGroupRows(t *testing.T) {
+	makeBatch := func(gs []string, gValid vector.Validity, xs []int64) vector.Batch {
+		n := len(xs)
+		gv := vector.NewVarVec(vector.VecText, n, 0)
+		for i, s := range gs {
+			gv.Var().AppendString(i, s)
+		}
+		gv.Valid = gValid
+		xv := vector.NewVec(vector.VecInt64, n)
+		copy(xv.I64(), xs)
+		b, err := vector.NewBatch([]vector.Column{
+			{Name: "g", Type: schema.Text, V: gv},
+			{Name: "x", Type: schema.Int64, V: xv},
+		})
+		if err != nil {
+			t.Fatalf("NewBatch: %v", err)
+		}
+		return b
+	}
+
+	interleaved := vector.NewValidity(6)
+	interleaved.SetInvalid(1)
+	interleaved.SetInvalid(4)
+	// Null group slots carry poison values whose x sums must appear in no bucket.
+	pages := []vector.Batch{
+		makeBatch([]string{"a", "z", "b", "a", "", "b"}, interleaved, []int64{1, 100, 2, 3, 1000, 4}),
+		makeBatch([]string{"", "", "", ""}, make(vector.Validity, vector.ValidityWords(4)), []int64{7, 8, 9, 10}),
+		makeBatch([]string{"a", "c", "", "c"}, nil, []int64{5, 6, 7, 8}),
+	}
+	path := filepath.Join(t.TempDir(), "seg.dsv4")
+	if _, err := WriteSegment(path, pages, nil); err != nil {
+		t.Fatalf("WriteSegment: %v", err)
+	}
+	seg, err := OpenSegment(path)
+	if err != nil {
+		t.Fatalf("OpenSegment: %v", err)
+	}
+	defer seg.Close()
+
+	all, err := seg.GroupSums()
+	if err != nil {
+		t.Fatalf("GroupSums: %v", err)
+	}
+	gc, ok := all["g"]
+	if !ok {
+		t.Fatal("group sums sidecar missing for nullable group column g")
+	}
+	sums, ok := gc["x"]
+	if !ok {
+		t.Fatal("group sums missing numeric column x")
+	}
+	want := DictSums{"a": 9, "b": 6, "c": 14, "": 7}
+	if len(sums) != len(want) {
+		t.Fatalf("group sums %v, want %v", sums, want)
+	}
+	for k, v := range want {
+		if sums[k] != v {
+			t.Fatalf("sums[%q] = %d, want %d", k, sums[k], v)
+		}
 	}
 }
 

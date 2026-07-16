@@ -69,9 +69,12 @@ func TestWriteSegment_FooterSuffixDecodes(t *testing.T) {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	footerLen, _, ok := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
-	if !ok {
-		t.Fatal("footer magic mismatch")
+	version, footerLen, _, err := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
+	if err != nil {
+		t.Fatalf("footer suffix: %v", err)
+	}
+	if version != SegmentFormatVersion {
+		t.Fatalf("format version = %d, want %d", version, SegmentFormatVersion)
 	}
 	if footerLen == 0 || footerLen >= uint64(len(data)) {
 		t.Fatalf("absurd footer length %d for %d-byte file", footerLen, len(data))
@@ -89,7 +92,7 @@ func TestWriteSegment_ColumnMajorPagesContiguous(t *testing.T) {
 		t.Fatalf("WriteSegment: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
+	_, footerLen, sidecarLen, _ := ReadFooterSuffix(data[len(data)-FooterSuffixSize:])
 	footerStart := uint64(len(data)) - FooterSuffixSize - sidecarLen - footerLen
 	footer := data[footerStart : footerStart+footerLen]
 

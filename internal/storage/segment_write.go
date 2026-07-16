@@ -512,9 +512,8 @@ func writePayloads(w io.Writer, pages []vector.Batch, cols []writerColumn, codec
 				page.Flags = PageFlagAllValid
 				bodyOff += uint64(len(payload))
 			default:
-				// Mixed page (some nulls, some values). Facts skip here, so the sink
-				// loses authority over segment wide stats and sidecars for this column.
-				sinks[ci].sawMixedPage = true
+				// Mixed page runs sink-only accumulation so sidecars stay exact.
+				analyzePage(col.V, nil, sinks[ci], pageIdx)
 				marshalPageStats(col.V.Kind, col.V, cols[ci].PageStats[pageIdx][:])
 				// Mixed page layout is <validity bytes><plain payload>.
 				// Plain ignores null slot values. Reader strips validity
