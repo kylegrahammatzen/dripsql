@@ -60,8 +60,7 @@ var queries = map[string]query{
 	}},
 }
 
-// Each segment is built from up to bulkPagesPerSegment pages of segmentRows rows each and sealed via Ingest into one multi-page file.
-// 128 pages of 2048 rows seals ~262k-row segments so scans amortize per-segment open and sidecar cost.
+// Each segment seals up to bulkPagesPerSegment pages of segmentRows rows via Ingest, and 128 pages of 2048 rows makes ~262k-row segments so scans amortize per-segment open and sidecar cost.
 const bulkPagesPerSegment = 128
 
 // seedTable drives the chunked seed loop shared by every dataset and calls fill once per page with the base row and row count.
@@ -117,7 +116,7 @@ func setupUsers(ctx context.Context, db *engine.DB, rows int, segmentRows int) e
 		ages := make([]int64, n)
 		catsSlice := make([]string, n)
 		prices := make([]float64, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			row := base + i
 			cents := r.IntN(100000)
 			ids[i] = int64(row)
@@ -164,7 +163,7 @@ func setupLineitem(ctx context.Context, db *engine.DB, rows int, segmentRows int
 		returnFlags := make([]string, n)
 		lineStatuses := make([]string, n)
 		shipdates := make([]int64, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			row := base + i
 			qty := int64(r.IntN(50) + 1)
 			priceCents := int64(r.IntN(10_000_000) + 100)
@@ -219,7 +218,7 @@ func setupHits(ctx context.Context, db *engine.DB, rows int, segmentRows int) er
 		searchEngineIDs := make([]int64, n)
 		advEngineIDs := make([]int64, n)
 		searchPhrases := make([]string, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			watchIDs[i] = int64(base + i)
 			userIDs[i] = int64(r.IntN(1_000_000))
 			eventTimes[i] = int64(1_500_000_000 + r.IntN(86400*365))

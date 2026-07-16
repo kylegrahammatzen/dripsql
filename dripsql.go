@@ -83,8 +83,7 @@ func (db *DB) QueryAt(ctx context.Context, sql string, readTs uint64, args ...an
 	return newRows(rs), nil
 }
 
-// QueryChunks runs a SELECT and returns dense columnar chunks so large results avoid per-cell boxing.
-// Chunk data is query-owned and stays valid after the call.
+// QueryChunks runs a SELECT and returns dense columnar chunks that avoid per-cell boxing and stay valid after the call.
 func (db *DB) QueryChunks(ctx context.Context, sql string, args ...any) ([]Chunk, error) {
 	br, err := db.e.QueryBatches(ctx, sql, args...)
 	if err != nil {
@@ -104,7 +103,7 @@ type Chunk struct {
 
 func (c Chunk) Len() int { return c.batch.Len }
 
-// Columns returns the chunk's column names in select order; the returned slice is owned by the caller.
+// Columns returns the chunk's column names in select order as a caller-owned slice.
 func (c Chunk) Columns() []string {
 	out := make([]string, len(c.batch.Columns))
 	for i := range c.batch.Columns {
@@ -345,7 +344,7 @@ func newRows(rs *engine.Rows) *Rows {
 	return &Rows{rs: rs, cursor: -1}
 }
 
-// Columns returns the result-set column names in select order; the returned slice is owned by the caller.
+// Columns returns the result-set column names in select order as a caller-owned slice.
 func (r *Rows) Columns() []string {
 	if r == nil || r.rs == nil {
 		return nil
@@ -397,7 +396,13 @@ func (r *Rows) All() ([][]any, error) {
 	for i, row := range remaining {
 		copied := make([]any, len(row))
 		for j, v := range row {
-			copied[j] = cloneCell(v)
+			if b, ok := v.([]byte); ok {
+				c := make([]byte, len(b))
+				copy(c, b)
+				copied[j] = c
+			} else {
+				copied[j] = v
+			}
 		}
 		out[i] = copied
 	}
@@ -415,15 +420,6 @@ func (r *Rows) Close() error {
 	r.current = nil
 	r.rs = nil
 	return nil
-}
-
-func cloneCell(v any) any {
-	if b, ok := v.([]byte); ok {
-		out := make([]byte, len(b))
-		copy(out, b)
-		return out
-	}
-	return v
 }
 
 // Tx is a multi-statement transaction that holds the writer lock until Commit or Rollback.

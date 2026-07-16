@@ -90,11 +90,20 @@ func intoInt[T ~int | ~int8 | ~int16 | ~int32 | ~int64 |
 }
 
 func intoFloat[T ~float32 | ~float64](d *T, src any) error {
-	v, err := toFloat64(src)
-	if err != nil {
-		return err
+	switch v := src.(type) {
+	case nil:
+		*d = 0
+	case float64:
+		*d = T(v)
+	case float32:
+		*d = T(v)
+	case int64:
+		*d = T(v)
+	case int:
+		*d = T(v)
+	default:
+		return fmt.Errorf("cannot convert %T to float", src)
 	}
-	*d = T(v)
 	return nil
 }
 
@@ -121,21 +130,4 @@ func toInt64(src any) (int64, error) {
 		return int64(v), nil
 	}
 	return 0, fmt.Errorf("cannot convert %T to integer", src)
-}
-
-func toFloat64(src any) (float64, error) {
-	if src == nil {
-		return 0, nil
-	}
-	switch v := src.(type) {
-	case float64:
-		return v, nil
-	case float32:
-		return float64(v), nil
-	case int64:
-		return float64(v), nil
-	case int:
-		return float64(v), nil
-	}
-	return 0, fmt.Errorf("cannot convert %T to float", src)
 }

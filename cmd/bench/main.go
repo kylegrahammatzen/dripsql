@@ -63,7 +63,18 @@ func main() {
 			listCatalog(os.Stdout)
 			return
 		case "compare":
-			runCompare(args[1:])
+			fs := flag.NewFlagSet("compare", flag.ExitOnError)
+			threshold := fs.Float64("threshold", 10.0, "absolute median-delta percent that flips the verdict away from ~")
+			fs.Parse(args[1:])
+			rest := fs.Args()
+			if len(rest) != 2 {
+				fmt.Fprintln(os.Stderr, "usage: bench compare base.json head.json [-threshold 10.0]")
+				os.Exit(2)
+			}
+			if err := compareReports(rest[0], rest[1], *threshold, os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, "bench: compare", err)
+				os.Exit(1)
+			}
 			return
 		}
 	}
@@ -103,15 +114,15 @@ func runBench(args []string) {
 	coldMode := *mode != "hot"
 	purgeCache := *mode == "cold"
 
-	segmentRows := *rows
-	if segmentRows > vector.StandardBatchRows {
-		segmentRows = vector.StandardBatchRows
-	}
-	if segmentRows < 1 {
-		segmentRows = 1
-	}
+	segmentRows := max(min(*rows, vector.StandardBatchRows), 1)
 
-	seeded := *reuse && manifestMatches(ds.name, *rows, segmentRows)
+	seeded := false
+	if *reuse {
+		var m benchManifest
+		if data, err := os.ReadFile(manifestPath()); err == nil && json.Unmarshal(data, &m) == nil {
+			seeded = m.Dataset == ds.name && m.Rows == *rows && m.SegmentRows == segmentRows
+		}
+	}
 	if !seeded {
 		_ = os.Remove(manifestPath())
 		if err := os.RemoveAll(benchDir); err != nil {
@@ -136,7 +147,10 @@ func runBench(args []string) {
 			os.Exit(1)
 		}
 		setup = time.Since(setupStart)
-		writeManifest(ds.name, *rows, segmentRows)
+		// A manifest write failure only costs a reseed on the next -reuse run, so it is not fatal.
+		if data, err := json.Marshal(benchManifest{Dataset: ds.name, Rows: *rows, SegmentRows: segmentRows}); err == nil {
+			_ = os.WriteFile(manifestPath(), data, 0o644)
+		}
 	}
 
 	sqlText := q.sql(*rows)
@@ -261,42 +275,6 @@ type benchManifest struct {
 // The manifest lives beside the DB dir because the engine owns everything inside it.
 func manifestPath() string { return benchDir + ".manifest.json" }
 
-func manifestMatches(dataset string, rows, segmentRows int) bool {
-	data, err := os.ReadFile(manifestPath())
-	if err != nil {
-		return false
-	}
-	var m benchManifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return false
-	}
-	return m.Dataset == dataset && m.Rows == rows && m.SegmentRows == segmentRows
-}
-
-// writeManifest failures only cost a reseed on the next -reuse run, so they are not fatal.
-func writeManifest(dataset string, rows, segmentRows int) {
-	data, err := json.Marshal(benchManifest{Dataset: dataset, Rows: rows, SegmentRows: segmentRows})
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(manifestPath(), data, 0o644)
-}
-
-func runCompare(args []string) {
-	fs := flag.NewFlagSet("compare", flag.ExitOnError)
-	threshold := fs.Float64("threshold", 10.0, "absolute median-delta percent that flips the verdict away from ~")
-	fs.Parse(args)
-	rest := fs.Args()
-	if len(rest) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: bench compare base.json head.json [-threshold 10.0]")
-		os.Exit(2)
-	}
-	if err := compareReports(rest[0], rest[1], *threshold, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "bench: compare", err)
-		os.Exit(1)
-	}
-}
-
 func summarize(query, dataset string, rows, segmentRows int, allDurations, statRuns []time.Duration, resultRows int) runReport {
 	all := toMs(allDurations)
 	ms := toMs(statRuns)
@@ -331,7 +309,13 @@ func summarize(query, dataset string, rows, segmentRows int, allDurations, statR
 		Mean:        mean,
 		StdDev:      stddev,
 		Result:      resultRows,
-		Env:         collectEnv(),
+		Env: envReport{
+			GoVersion:  runtime.Version(),
+			GOOS:       runtime.GOOS,
+			GOARCH:     runtime.GOARCH,
+			GOMAXPROCS: runtime.GOMAXPROCS(0),
+			NumCPU:     runtime.NumCPU(),
+		},
 	}
 }
 
@@ -369,16 +353,6 @@ func percentile(sorted []float64, p float64) float64 {
 	}
 	frac := rank - float64(lo)
 	return sorted[lo]*(1-frac) + sorted[hi]*frac
-}
-
-func collectEnv() envReport {
-	return envReport{
-		GoVersion:  runtime.Version(),
-		GOOS:       runtime.GOOS,
-		GOARCH:     runtime.GOARCH,
-		GOMAXPROCS: runtime.GOMAXPROCS(0),
-		NumCPU:     runtime.NumCPU(),
-	}
 }
 
 func printBenchstatLine(w io.Writer, r runReport) {
@@ -436,7 +410,16 @@ func compareReports(basePath, headPath string, thresholdPct float64, out io.Writ
 	if err != nil {
 		return fmt.Errorf("load head: %w", err)
 	}
-	names := joinedQueryNames(base, head)
+	names := make([]string, 0, len(base)+len(head))
+	for k := range base {
+		names = append(names, k)
+	}
+	for k := range head {
+		if _, ok := base[k]; !ok {
+			names = append(names, k)
+		}
+	}
+	sort.Strings(names)
 	fmt.Fprintf(out, "%-22s %14s %14s %10s %s\n", "query", "base (median)", "head (median)", "delta", "verdict")
 	for _, name := range names {
 		b, bok := base[name]
@@ -486,18 +469,4 @@ func loadReports(path string) (map[string]runReport, error) {
 		return nil, fmt.Errorf("no reports in %s", path)
 	}
 	return out, nil
-}
-
-func joinedQueryNames(a, b map[string]runReport) []string {
-	out := make([]string, 0, len(a)+len(b))
-	for k := range a {
-		out = append(out, k)
-	}
-	for k := range b {
-		if _, ok := a[k]; !ok {
-			out = append(out, k)
-		}
-	}
-	sort.Strings(out)
-	return out
 }
